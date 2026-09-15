@@ -1,0 +1,233 @@
+const express = require("express");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const { body, validationResult } = require("express-validator");
+const { query } = require("../db/pool");
+const { authRequired } = require("../middleware/auth");
+const { asyncH } = require("../utils/helpers");
+
+const router = express.Router();
+
+function makeToken(user) {
+  return jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      name: user.full_name,
+    },
+    process.env.JWT_SECRET,
+    {
+      expiresIn: process.env.JWT_EXPIRES_IN || "7d",
+    },
+  );
+}
+
+// ============================================================
+// LOGIN
+// ============================================================
+
+router.post(
+  "/login",
+  body("email").isEmail(),
+  body("password").isLength({ min: 4 }),
+
+  asyncH(async (req, res) => {
+    const errs = validationResult(req);
+
+    if (!errs.isEmpty()) {
+      return res.status(400).json({
+        error: "Invalid input",
+        details: errs.array(),
+      });
+    }
+
+    const { email, password } = req.body;
+
+    const r = await query(
+      `SELECT id, email, password_hash, role, full_name, phone, is_active
+       FROM users
+       WHERE LOWER(email)=LOWER($1) AND is_active=TRUE`,
+      [email.toLowerCase()],
+    );
+
+    if (!r.rows.length) {
+      return res.status(401).json({
+        error: "Invalid credentials",
+      });
+    }
+
+    const u = r.rows[0];
+
+    const ok = await bcrypt.compare(password, u.password_hash);
+
+    if (!ok) {
+      return res.status(401).json({
+        error: "Invalid credentials",
+      });
+    }
+
+    const token = makeToken(u);
+
+    res.json({
+      token,
+      user: {
+        id: u.id,
+        email: u.email,
+        role: u.role,
+        name: u.full_name,
+      },
+    });
+  }),
+);
+
+// ============================================================
+// REGISTER
+//
+// Students do NOT register/login.
+// Account creation will be handled by Admin later.
+//
+// This endpoint is intentionally disabled.
+// ============================================================
+
+router.post(
+  "/register",
+  asyncH(async (req, res) => {
+    return res.status(403).json({
+      error:
+        "Public registration is disabled. An administrator must create accounts.",
+    });
+  }),
+);
+
+// ============================================================
+// CURRENT USER
+// ============================================================
+
+router.get(
+  "/me",
+  authRequired,
+
+  asyncH(async (req, res) => {
+    const r = await query(
+      `SELECT id, email, role, full_name, phone, is_active
+       FROM users
+       WHERE id=$1`,
+      [req.user.id],
+    );
+
+    if (!r.rows.length) {
+      return res.status(404).json({
+        error: "User not found",
+      });
+    }
+
+    const u = r.rows[0];
+
+    let extra = {};
+
+    if (u.role === "teacher") {
+      const t = await query(
+        `SELECT *
+         FROM teachers
+         WHERE user_id=$1`,
+        [u.id],
+      );
+
+      extra = {
+        teacher: t.rows[0] || null,
+      };
+    }
+
+    res.json({
+      user: u,
+      ...extra,
+    });
+  }),
+);
+
+// ============================================================
+// UPDATE PROFILE
+// ============================================================
+
+router.put(
+  "/me",
+  authRequired,
+
+  asyncH(async (req, res) => {
+    const { full_name, phone } = req.body;
+
+    await query(
+      `UPDATE users
+       SET
+         full_name=COALESCE($1, full_name),
+         phone=COALESCE($2, phone),
+         updated_at=NOW()
+       WHERE id=$3`,
+      [full_name || null, phone || null, req.user.id],
+    );
+
+    res.json({
+      ok: true,
+    });
+  }),
+);
+
+// ============================================================
+// CHANGE PASSWORD
+// ============================================================
+
+router.post(
+  "/change-password",
+  authRequired,
+
+  asyncH(async (req, res) => {
+    const { current_password, new_password } = req.body;
+
+    if (!new_password || new_password.length < 6) {
+      return res.status(400).json({
+        error: "Password too short",
+      });
+    }
+
+    const r = await query(
+      `SELECT password_hash
+       FROM users
+       WHERE id=$1`,
+      [req.user.id],
+    );
+
+    if (!r.rows.length) {
+      return res.status(404).json({
+        error: "User not found",
+      });
+    }
+
+    const ok = await bcrypt.compare(
+      current_password || "",
+      r.rows[0].password_hash,
+    );
+
+    if (!ok) {
+      return res.status(401).json({
+        error: "Current password incorrect",
+      });
+    }
+
+    const hash = await bcrypt.hash(new_password, 10);
+
+    await query(
+      `UPDATE users
+       SET password_hash=$1,
+           updated_at=NOW()
+       WHERE id=$2`,
+      [hash, req.user.id],
+    );
+
+    res.json({
+      ok: true,
+    });
+  }),
+);
+
+module.exports = router;

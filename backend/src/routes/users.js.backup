@@ -1,0 +1,550 @@
+const express = require("express");
+const bcrypt = require("bcryptjs");
+const { query } = require("../db/pool");
+const { authRequired, requireRoles } = require("../middleware/auth");
+const { asyncH } = require("../utils/helpers");
+
+const router = express.Router();
+
+/*
+ * GET /api/users
+ * Admin only.
+ *
+ * Used for managing teachers and staff.
+ * Students do not have user accounts.
+ */
+router.get(
+  "/",
+  authRequired,
+  requireRoles("admin"),
+  asyncH(async (req, res) => {
+    const { role, search } = req.query;
+
+    const params = [];
+    const conditions = [];
+
+    if (role) {
+      if (!["admin", "teacher", "staff"].includes(role)) {
+        return res.status(400).json({
+          error: "Invalid role",
+        });
+      }
+
+      params.push(role);
+      conditions.push(`u.role = $${params.length}`);
+    }
+
+    if (search && String(search).trim()) {
+      params.push(`%${String(search).trim()}%`);
+      conditions.push(`
+        (
+          u.full_name ILIKE $${params.length}
+          OR u.email ILIKE $${params.length}
+          OR COALESCE(u.phone, '') ILIKE $${params.length}
+          OR COALESCE(t.employee_id, '') ILIKE $${params.length}
+        )
+      `);
+    }
+
+    const where = conditions.length
+      ? `WHERE ${conditions.join(" AND ")}`
+      : "";
+
+    const result = await query(
+      `
+        SELECT
+          u.id,
+          u.email,
+          u.role,
+          u.full_name,
+          u.phone,
+          u.is_active,
+          u.created_at,
+          u.updated_at,
+
+          t.id AS teacher_id,
+          t.employee_id,
+          t.qualification,
+          t.specialization,
+          t.joining_date,
+          t.salary
+
+        FROM users u
+
+        LEFT JOIN teachers t
+          ON t.user_id = u.id
+
+        ${where}
+
+        ORDER BY u.id DESC
+        LIMIT 500
+      `,
+      params
+    );
+
+    res.json(result.rows);
+  })
+);
+
+/*
+ * GET /api/users/:id
+ * Admin only.
+ */
+router.get(
+  "/:id",
+  authRequired,
+  requireRoles("admin"),
+  asyncH(async (req, res) => {
+    const result = await query(
+      `
+        SELECT
+          u.id,
+          u.email,
+          u.role,
+          u.full_name,
+          u.phone,
+          u.is_active,
+          u.created_at,
+          u.updated_at,
+
+          t.id AS teacher_id,
+          t.employee_id,
+          t.qualification,
+          t.specialization,
+          t.joining_date,
+          t.salary
+
+        FROM users u
+
+        LEFT JOIN teachers t
+          ON t.user_id = u.id
+
+        WHERE u.id = $1
+      `,
+      [req.params.id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        error: "User not found",
+      });
+    }
+
+    res.json(result.rows[0]);
+  })
+);
+
+/*
+ * POST /api/users
+ * Admin only.
+ *
+ * Creates admin, teacher or staff.
+ * Teacher users automatically receive a teacher profile.
+ */
+router.post(
+  "/",
+  authRequired,
+  requireRoles("admin"),
+  asyncH(async (req, res) => {
+    const {
+      email,
+      password,
+      role,
+      full_name,
+      phone,
+      employee_id,
+      qualification,
+      specialization,
+      joining_date,
+      salary,
+    } = req.body;
+
+    if (!email || !password || !role || !full_name) {
+      return res.status(400).json({
+        error: "Email, password, role and full name are required",
+      });
+    }
+
+    if (!["admin", "teacher", "staff"].includes(role)) {
+      return res.status(400).json({
+        error: "Invalid role",
+      });
+    }
+
+    if (String(password).length < 8) {
+      return res.status(400).json({
+        error: "Password must be at least 8 characters",
+      });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+
+    const existing = await query(
+      `
+        SELECT id
+        FROM users
+        WHERE LOWER(email) = LOWER($1)
+      `,
+      [normalizedEmail]
+    );
+
+    if (existing.rows.length) {
+      return res.status(409).json({
+        error: "Email already exists",
+      });
+    }
+
+    if (role === "teacher" && employee_id) {
+      const employeeExists = await query(
+        `
+          SELECT id
+          FROM teachers
+          WHERE employee_id = $1
+        `,
+        [employee_id]
+      );
+
+      if (employeeExists.rows.length) {
+        return res.status(409).json({
+          error: "Employee ID already exists",
+        });
+      }
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    const clientResult = await query(
+      `
+        INSERT INTO users (
+          email,
+          password_hash,
+          role,
+          full_name,
+          phone,
+          is_active
+        )
+        VALUES ($1, $2, $3, $4, $5, TRUE)
+        RETURNING
+          id,
+          email,
+          role,
+          full_name,
+          phone,
+          is_active,
+          created_at
+      `,
+      [
+        normalizedEmail,
+        passwordHash,
+        role,
+        String(full_name).trim(),
+        phone || null,
+      ]
+    );
+
+    const user = clientResult.rows[0];
+
+    if (role === "teacher") {
+      const employeeId =
+        employee_id ||
+        `EMP${String(user.id).padStart(4, "0")}`;
+
+      await query(
+        `
+          INSERT INTO teachers (
+            user_id,
+            employee_id,
+            qualification,
+            specialization,
+            joining_date,
+            salary
+          )
+          VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6)
+        `,
+        [
+          user.id,
+          employeeId,
+          qualification || null,
+          specialization || null,
+          joining_date || null,
+          salary || null,
+        ]
+      );
+    }
+
+    const created = await query(
+      `
+        SELECT
+          u.id,
+          u.email,
+          u.role,
+          u.full_name,
+          u.phone,
+          u.is_active,
+
+          t.id AS teacher_id,
+          t.employee_id,
+          t.qualification,
+          t.specialization,
+          t.joining_date,
+          t.salary
+
+        FROM users u
+
+        LEFT JOIN teachers t
+          ON t.user_id = u.id
+
+        WHERE u.id = $1
+      `,
+      [user.id]
+    );
+
+    res.status(201).json(created.rows[0]);
+  })
+);
+
+/*
+ * PUT /api/users/:id
+ * Admin only.
+ *
+ * Updates user and teacher profile information.
+ */
+router.put(
+  "/:id",
+  authRequired,
+  requireRoles("admin"),
+  asyncH(async (req, res) => {
+    const userId = Number(req.params.id);
+
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(400).json({
+        error: "Invalid user ID",
+      });
+    }
+
+    const existing = await query(
+      `
+        SELECT id, role
+        FROM users
+        WHERE id = $1
+      `,
+      [userId]
+    );
+
+    if (!existing.rows.length) {
+      return res.status(404).json({
+        error: "User not found",
+      });
+    }
+
+    const currentUser = existing.rows[0];
+
+    if (userId === req.user.id && req.body.is_active === false) {
+      return res.status(400).json({
+        error: "You cannot deactivate your own account",
+      });
+    }
+
+    const {
+      email,
+      full_name,
+      phone,
+      is_active,
+      password,
+      qualification,
+      specialization,
+      joining_date,
+      salary,
+      employee_id,
+    } = req.body;
+
+    if (password && String(password).length < 8) {
+      return res.status(400).json({
+        error: "Password must be at least 8 characters",
+      });
+    }
+
+    if (email !== undefined) {
+      const normalizedEmail = String(email).trim().toLowerCase();
+
+      const emailExists = await query(
+        `
+          SELECT id
+          FROM users
+          WHERE LOWER(email) = LOWER($1)
+            AND id <> $2
+        `,
+        [normalizedEmail, userId]
+      );
+
+      if (emailExists.rows.length) {
+        return res.status(409).json({
+          error: "Email already exists",
+        });
+      }
+    }
+
+    if (currentUser.role === "teacher" && employee_id) {
+      const employeeExists = await query(
+        `
+          SELECT id
+          FROM teachers
+          WHERE employee_id = $1
+            AND user_id <> $2
+        `,
+        [employee_id, userId]
+      );
+
+      if (employeeExists.rows.length) {
+        return res.status(409).json({
+          error: "Employee ID already exists",
+        });
+      }
+    }
+
+    let passwordHash = null;
+
+    if (password) {
+      passwordHash = await bcrypt.hash(password, 10);
+    }
+
+    await query(
+      `
+        UPDATE users
+        SET
+          email = COALESCE($1, email),
+          full_name = COALESCE($2, full_name),
+          phone = COALESCE($3, phone),
+          is_active = COALESCE($4, is_active),
+          password_hash = COALESCE($5, password_hash),
+          updated_at = NOW()
+        WHERE id = $6
+      `,
+      [
+        email !== undefined
+          ? String(email).trim().toLowerCase()
+          : null,
+        full_name !== undefined
+          ? String(full_name).trim()
+          : null,
+        phone !== undefined ? phone : null,
+        is_active !== undefined ? is_active : null,
+        passwordHash,
+        userId,
+      ]
+    );
+
+    if (currentUser.role === "teacher") {
+      await query(
+        `
+          UPDATE teachers
+          SET
+            employee_id = COALESCE($1, employee_id),
+            qualification = COALESCE($2, qualification),
+            specialization = COALESCE($3, specialization),
+            joining_date = COALESCE($4, joining_date),
+            salary = COALESCE($5, salary)
+          WHERE user_id = $6
+        `,
+        [
+          employee_id !== undefined ? employee_id : null,
+          qualification !== undefined ? qualification : null,
+          specialization !== undefined ? specialization : null,
+          joining_date !== undefined ? joining_date : null,
+          salary !== undefined ? salary : null,
+          userId,
+        ]
+      );
+    }
+
+    const updated = await query(
+      `
+        SELECT
+          u.id,
+          u.email,
+          u.role,
+          u.full_name,
+          u.phone,
+          u.is_active,
+
+          t.id AS teacher_id,
+          t.employee_id,
+          t.qualification,
+          t.specialization,
+          t.joining_date,
+          t.salary
+
+        FROM users u
+
+        LEFT JOIN teachers t
+          ON t.user_id = u.id
+
+        WHERE u.id = $1
+      `,
+      [userId]
+    );
+
+    res.json(updated.rows[0]);
+  })
+);
+
+/*
+ * DELETE /api/users/:id
+ * Admin only.
+ *
+ * Safer behavior: deactivate instead of physically deleting.
+ * This preserves teacher/class/attendance/report history.
+ */
+router.delete(
+  "/:id",
+  authRequired,
+  requireRoles("admin"),
+  asyncH(async (req, res) => {
+    const userId = Number(req.params.id);
+
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(400).json({
+        error: "Invalid user ID",
+      });
+    }
+
+    if (userId === req.user.id) {
+      return res.status(400).json({
+        error: "You cannot delete your own account",
+      });
+    }
+
+    const existing = await query(
+      `
+        SELECT id, role, is_active
+        FROM users
+        WHERE id = $1
+      `,
+      [userId]
+    );
+
+    if (!existing.rows.length) {
+      return res.status(404).json({
+        error: "User not found",
+      });
+    }
+
+    await query(
+      `
+        UPDATE users
+        SET
+          is_active = FALSE,
+          updated_at = NOW()
+        WHERE id = $1
+      `,
+      [userId]
+    );
+
+    res.json({
+      ok: true,
+      message: "User deactivated successfully",
+    });
+  })
+);
+
+module.exports = router;

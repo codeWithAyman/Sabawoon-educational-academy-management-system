@@ -1,0 +1,489 @@
+import { useEffect, useState } from "react";
+import api from "../lib/api";
+import { useAuth } from "../context/AuthContext";
+import { useToast } from "../components/Toast";
+import {
+  Loader2,
+  User,
+  Lock,
+  Phone,
+  Mail,
+  ShieldCheck,
+  Save,
+  KeyRound,
+  CheckCircle2,
+} from "lucide-react";
+
+export default function Profile() {
+  const { user, updateUser } = useAuth();
+  const toast = useToast();
+
+  const [me, setMe] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
+
+  const [form, setForm] = useState({
+    full_name: "",
+    phone: "",
+  });
+
+  const [pw, setPw] = useState({
+    current_password: "",
+    new_password: "",
+  });
+
+  useEffect(() => {
+    loadProfile();
+  }, []);
+
+  async function loadProfile() {
+    try {
+      setLoading(true);
+
+      const response = await api.get("/auth/me");
+
+      setMe(response.data);
+
+      setForm({
+        full_name: response.data.user.full_name || "",
+        phone: response.data.user.phone || "",
+      });
+    } catch (error) {
+      toast.error(error.response?.data?.error || "Failed to load profile");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function save(e) {
+    e.preventDefault();
+
+    const fullName = form.full_name.trim();
+    const phone = form.phone.trim();
+
+    if (!fullName) {
+      toast.error("Full name is required");
+      return;
+    }
+
+    if (fullName.length < 2) {
+      toast.error("Full name must be at least 2 characters");
+      return;
+    }
+
+    if (fullName.length > 150) {
+      toast.error("Full name must be 150 characters or fewer");
+      return;
+    }
+
+    if (phone.length > 30) {
+      toast.error("Phone number must be 30 characters or fewer");
+      return;
+    }
+
+    try {
+      setSaving(true);
+
+      const response = await api.put("/auth/me", {
+        full_name: fullName,
+        phone,
+      });
+
+      const updatedUser = response.data.user;
+
+      setMe((previous) => ({
+        ...previous,
+        user: updatedUser,
+      }));
+
+      updateUser(updatedUser, response.data.token);
+
+      setForm({
+        full_name: updatedUser.full_name || "",
+        phone: updatedUser.phone || "",
+      });
+
+      toast.success("Profile updated successfully");
+    } catch (error) {
+      toast.error(error.response?.data?.error || "Failed to update profile");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function changePw(e) {
+    e.preventDefault();
+
+    const currentPassword = pw.current_password;
+    const newPassword = pw.new_password;
+
+    if (!currentPassword || !newPassword) {
+      toast.error("Please complete both password fields");
+      return;
+    }
+
+    if (newPassword.length < 6) {
+      toast.error("New password must be at least 6 characters");
+      return;
+    }
+
+    if (newPassword === currentPassword) {
+      toast.error("New password must be different from the current password");
+      return;
+    }
+
+    try {
+      setChangingPassword(true);
+
+      await api.post("/auth/change-password", {
+        current_password: currentPassword,
+        new_password: newPassword,
+      });
+
+      setPw({
+        current_password: "",
+        new_password: "",
+      });
+
+      toast.success("Password changed successfully");
+    } catch (error) {
+      toast.error(error.response?.data?.error || "Failed to change password");
+    } finally {
+      setChangingPassword(false);
+    }
+  }
+
+  if (loading || !me) {
+    return (
+      <div className="min-h-[60vh] grid place-items-center">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="h-5 w-5 animate-spin text-[#f2bd19]" />
+          <span className="text-[11px] text-slate-600">Loading profile...</span>
+        </div>
+      </div>
+    );
+  }
+
+  const account = me.user;
+
+  const initial =
+    account.full_name?.trim()?.charAt(0)?.toUpperCase() ||
+    user?.name?.charAt(0)?.toUpperCase() ||
+    "A";
+
+  const role =
+    account.role?.charAt(0).toUpperCase() +
+      account.role?.slice(1).toLowerCase() || "User";
+
+  return (
+    <div className="relative min-h-full overflow-hidden">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="absolute left-[18%] top-[-280px] h-[600px] w-[600px] rounded-full bg-[#f2bd19]/[0.035] blur-[140px]" />
+        <div className="absolute bottom-[-300px] right-[-180px] h-[600px] w-[600px] rounded-full bg-[#f2bd19]/[0.018] blur-[130px]" />
+      </div>
+
+      <div
+        className="pointer-events-none absolute inset-0 opacity-[0.018]"
+        style={{
+          backgroundImage:
+            "linear-gradient(rgba(255,255,255,0.4) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.4) 1px, transparent 1px)",
+          backgroundSize: "48px 48px",
+        }}
+      />
+
+      <div className="relative z-10 mx-auto w-full max-w-4xl space-y-5">
+        <div className="flex items-end justify-between gap-4">
+          <div>
+            <div className="mb-2 flex items-center gap-2">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#f2bd19] shadow-[0_0_10px_rgba(242,189,25,0.7)]" />
+              <span className="text-[9px] font-semibold uppercase tracking-[0.24em] text-slate-600">
+                Account
+              </span>
+            </div>
+
+            <h1 className="text-[25px] font-semibold tracking-[-0.03em] text-white">
+              Profile & Settings
+            </h1>
+
+            <p className="mt-1.5 text-[11px] text-slate-600">
+              Manage your account information and security.
+            </p>
+          </div>
+
+          <div className="hidden h-9 items-center gap-2 rounded-lg border border-white/[0.07] bg-[#121519] px-3 text-[10px] text-slate-500 sm:flex">
+            <ShieldCheck className="h-3.5 w-3.5 text-[#f2bd19]" />
+            Secure account
+          </div>
+        </div>
+
+        <section className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-[#121519] shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
+          <div className="h-[2px] w-full bg-[#f2bd19]" />
+
+          <div className="p-5 sm:p-6">
+            <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex min-w-0 items-center gap-4">
+                <div className="relative shrink-0">
+                  <div className="absolute -inset-1 rounded-[17px] border border-[#f2bd19]/15" />
+
+                  <div className="relative grid h-16 w-16 place-items-center rounded-[15px] border border-white/[0.09] bg-[#0d1013] text-xl font-semibold text-[#f2bd19] shadow-[0_12px_35px_rgba(0,0,0,0.3)]">
+                    {initial}
+                  </div>
+
+                  <div className="absolute -bottom-1 -right-1 grid h-5 w-5 place-items-center rounded-full border-[3px] border-[#121519] bg-[#f2bd19]">
+                    <CheckCircle2 className="h-2.5 w-2.5 text-[#111]" />
+                  </div>
+                </div>
+
+                <div className="min-w-0">
+                  <h2 className="truncate text-[18px] font-semibold tracking-[-0.02em] text-white">
+                    {account.full_name || "Unnamed user"}
+                  </h2>
+
+                  <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-slate-500">
+                    <Mail className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{account.email}</span>
+                  </div>
+
+                  <div className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-[#f2bd19]/10 bg-[#f2bd19]/[0.05] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-[#f2bd19]">
+                    <span className="h-1 w-1 rounded-full bg-[#f2bd19]" />
+                    {role}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 rounded-xl border border-white/[0.06] bg-[#0d1013] px-3.5 py-3">
+                <div className="grid h-8 w-8 place-items-center rounded-lg border border-[#f2bd19]/10 bg-[#f2bd19]/[0.05]">
+                  <ShieldCheck className="h-3.5 w-3.5 text-[#f2bd19]" />
+                </div>
+
+                <div>
+                  <p className="text-[9px] font-semibold uppercase tracking-[0.1em] text-slate-600">
+                    Access level
+                  </p>
+
+                  <p className="mt-0.5 text-[11px] font-medium text-slate-400">
+                    {role}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-white/[0.08] bg-[#121519] shadow-[0_18px_50px_rgba(0,0,0,0.22)]">
+          <div className="border-b border-white/[0.06] px-5 py-4 sm:px-6">
+            <div className="flex items-center gap-3">
+              <div className="grid h-9 w-9 place-items-center rounded-lg border border-[#f2bd19]/10 bg-[#f2bd19]/[0.05]">
+                <User className="h-4 w-4 text-[#f2bd19]" />
+              </div>
+
+              <div>
+                <h2 className="text-[13px] font-semibold text-white">
+                  Personal information
+                </h2>
+
+                <p className="mt-0.5 text-[10px] text-slate-600">
+                  Update your basic account information.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <form onSubmit={save} className="p-5 sm:p-6">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">
+                  Full name
+                </label>
+
+                <div className="group relative">
+                  <User className="pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-600 transition-colors group-focus-within:text-[#f2bd19]" />
+
+                  <input
+                    value={form.full_name}
+                    onChange={(e) =>
+                      setForm((previous) => ({
+                        ...previous,
+                        full_name: e.target.value,
+                      }))
+                    }
+                    className="h-11 w-full rounded-lg border border-white/[0.08] bg-[#0d1013] pl-10 pr-3 text-[12px] text-slate-200 outline-none transition-all placeholder:text-slate-700 hover:border-white/[0.13] focus:border-[#f2bd19]/50 focus:ring-2 focus:ring-[#f2bd19]/[0.08]"
+                    placeholder="Your full name"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">
+                  Phone
+                </label>
+
+                <div className="group relative">
+                  <Phone className="pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-600 transition-colors group-focus-within:text-[#f2bd19]" />
+
+                  <input
+                    value={form.phone}
+                    onChange={(e) =>
+                      setForm((previous) => ({
+                        ...previous,
+                        phone: e.target.value,
+                      }))
+                    }
+                    className="h-11 w-full rounded-lg border border-white/[0.08] bg-[#0d1013] pl-10 pr-3 text-[12px] text-slate-200 outline-none transition-all placeholder:text-slate-700 hover:border-white/[0.13] focus:border-[#f2bd19]/50 focus:ring-2 focus:ring-[#f2bd19]/[0.08]"
+                    placeholder="Phone number"
+                  />
+                </div>
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">
+                  Email address
+                </label>
+
+                <div className="group relative">
+                  <Mail className="pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-600" />
+
+                  <input
+                    value={account.email || ""}
+                    readOnly
+                    className="h-11 w-full cursor-not-allowed rounded-lg border border-white/[0.06] bg-[#0a0c0f] pl-10 pr-3 text-[12px] text-slate-500 outline-none"
+                  />
+                </div>
+
+                <p className="mt-2 text-[9px] text-slate-700">
+                  Email address is managed by the account system.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-5 flex justify-end">
+              <button
+                type="submit"
+                disabled={saving}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#f2bd19] px-4 text-[11px] font-bold text-[#111] shadow-[0_8px_25px_rgba(242,189,25,0.12)] transition-all hover:bg-[#e6b317] hover:shadow-[0_10px_30px_rgba(242,189,25,0.2)] active:bg-[#d9a912] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {saving ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Save className="h-3.5 w-3.5" />
+                )}
+
+                {saving ? "Saving..." : "Save changes"}
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <section className="rounded-2xl border border-white/[0.08] bg-[#121519] shadow-[0_18px_50px_rgba(0,0,0,0.22)]">
+          <div className="border-b border-white/[0.06] px-5 py-4 sm:px-6">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="grid h-9 w-9 place-items-center rounded-lg border border-[#f2bd19]/10 bg-[#f2bd19]/[0.05]">
+                  <Lock className="h-4 w-4 text-[#f2bd19]" />
+                </div>
+
+                <div>
+                  <h2 className="text-[13px] font-semibold text-white">
+                    Account security
+                  </h2>
+
+                  <p className="mt-0.5 text-[10px] text-slate-600">
+                    Keep your account password secure.
+                  </p>
+                </div>
+              </div>
+
+              <div className="hidden items-center gap-1.5 text-[9px] font-semibold uppercase tracking-[0.1em] text-emerald-500/70 sm:flex">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                Protected
+              </div>
+            </div>
+          </div>
+
+          <form onSubmit={changePw} className="p-5 sm:p-6">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">
+                  Current password
+                </label>
+
+                <div className="group relative">
+                  <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-600 transition-colors group-focus-within:text-[#f2bd19]" />
+
+                  <input
+                    type="password"
+                    required
+                    value={pw.current_password}
+                    onChange={(e) =>
+                      setPw((previous) => ({
+                        ...previous,
+                        current_password: e.target.value,
+                      }))
+                    }
+                    className="h-11 w-full rounded-lg border border-white/[0.08] bg-[#0d1013] pl-10 pr-3 text-[12px] text-slate-200 outline-none transition-all placeholder:text-slate-700 hover:border-white/[0.13] focus:border-[#f2bd19]/50 focus:ring-2 focus:ring-[#f2bd19]/[0.08]"
+                    placeholder="Enter current password"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">
+                  New password
+                </label>
+
+                <div className="group relative">
+                  <KeyRound className="pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-600 transition-colors group-focus-within:text-[#f2bd19]" />
+
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    value={pw.new_password}
+                    onChange={(e) =>
+                      setPw((previous) => ({
+                        ...previous,
+                        new_password: e.target.value,
+                      }))
+                    }
+                    className="h-11 w-full rounded-lg border border-white/[0.08] bg-[#0d1013] pl-10 pr-3 text-[12px] text-slate-200 outline-none transition-all placeholder:text-slate-700 hover:border-white/[0.13] focus:border-[#f2bd19]/50 focus:ring-2 focus:ring-[#f2bd19]/[0.08]"
+                    placeholder="Enter new password"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-2 text-[9px] text-slate-600">
+                <ShieldCheck className="h-3.5 w-3.5 text-[#f2bd19]/60" />
+
+                <span>
+                  Passwords are securely handled by the account system.
+                </span>
+              </div>
+
+              <button
+                type="submit"
+                disabled={changingPassword}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-[#f2bd19]/20 bg-[#f2bd19]/[0.08] px-4 text-[11px] font-semibold text-[#f2bd19] transition-all hover:border-[#f2bd19]/35 hover:bg-[#f2bd19]/[0.12] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {changingPassword ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Lock className="h-3.5 w-3.5" />
+                )}
+
+                {changingPassword ? "Updating..." : "Update password"}
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <div className="flex items-center justify-center gap-2 pb-3 pt-1 text-[9px] text-slate-700">
+          <ShieldCheck className="h-3 w-3" />
+          <span>{role} account • Secure access</span>
+        </div>
+      </div>
+    </div>
+  );
+}
