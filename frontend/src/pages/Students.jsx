@@ -845,6 +845,7 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
   });
 
   const [saving, setSaving] = useState(false);
+  const [passwordConfirmOpen, setPasswordConfirmOpen] = useState(false);
 
   const [selectedClassIds, setSelectedClassIds] = useState(new Set());
 
@@ -1043,7 +1044,7 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
      SAVE STUDENT
   ============================================================ */
 
-  async function handleSave(event) {
+  function handleSave(event) {
     event.preventDefault();
 
     if (saving) return;
@@ -1072,7 +1073,7 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
     }
 
     /* ----------------------------------------------------------
-       VALIDATE PAYMENTS
+       VALIDATE PAYMENTS FOR NEW STUDENTS
     ---------------------------------------------------------- */
 
     if (!editing) {
@@ -1080,7 +1081,6 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
         const payment = payments[group.subject_id] || {};
 
         const totalRaw = String(payment.total_amount ?? "").trim();
-
         const paidRaw = String(payment.paid_amount ?? "").trim();
 
         if (!totalRaw) {
@@ -1089,7 +1089,6 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
         }
 
         const total = Number(totalRaw);
-
         const paid = paidRaw === "" ? 0 : Number(paidRaw);
 
         if (!Number.isFinite(total) || total <= 0) {
@@ -1118,9 +1117,18 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
       }
     }
 
-    /* ----------------------------------------------------------
-       START SAVING
-    ---------------------------------------------------------- */
+    /*
+     * BOTH CREATE AND EDIT REQUIRE PASSWORD VERIFICATION.
+     *
+     * Nothing is changed in the database yet.
+     * The actual save happens only after the password
+     * verification succeeds.
+     */
+    setPasswordConfirmOpen(true);
+  }
+
+  async function saveStudent() {
+    if (saving) return;
 
     setSaving(true);
 
@@ -1156,6 +1164,8 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
 
         toast.success("Student updated successfully.");
 
+        setPasswordConfirmOpen(false);
+
         await onSaved();
 
         return;
@@ -1183,8 +1193,10 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
       /*
        * IMPORTANT:
        * The Student ID comes directly from PostgreSQL.
-       * This frontend never generates, changes, resets, or reuses IDs.
+       * This frontend never generates, changes, resets,
+       * or reuses IDs.
        */
+
       const studentId = Number(createdStudent?.id);
 
       if (!studentId) {
@@ -1266,6 +1278,8 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
       ======================================================== */
 
       toast.success("Student saved successfully.");
+
+      setPasswordConfirmOpen(false);
 
       await onSaved();
     } catch (error) {
@@ -1697,6 +1711,24 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
           </button>
         </div>
       </form>
+      <PasswordConfirmModal
+        open={passwordConfirmOpen}
+        title={
+          editing ? "Confirm student edit" : "Confirm student registration"
+        }
+        description={
+          editing
+            ? `Enter your password to save changes to ${student?.full_name}.`
+            : "Enter your password to create this student."
+        }
+        confirmLabel={editing ? "Verify & Save" : "Verify & Register"}
+        onVerified={saveStudent}
+        onCancel={() => {
+          if (!saving) {
+            setPasswordConfirmOpen(false);
+          }
+        }}
+      />
     </ModalShell>
   );
 }
@@ -1724,6 +1756,9 @@ function EnrollmentModal({
   const [sections, setSections] = useState([]);
 
   const [selectedIds, setSelectedIds] = useState(new Set());
+
+  const [passwordConfirmOpen, setPasswordConfirmOpen] = useState(false);
+  const [pendingSave, setPendingSave] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -1831,6 +1866,12 @@ function EnrollmentModal({
   async function save() {
     if (saving) return;
 
+    setPasswordConfirmOpen(true);
+  }
+
+  async function confirmSave() {
+    if (saving) return;
+
     setSaving(true);
 
     try {
@@ -1842,8 +1883,6 @@ function EnrollmentModal({
           .filter((id) => Number.isFinite(id) && id > 0),
       );
 
-      /* ADD */
-
       for (const id of selectedIds) {
         if (!currentIds.has(Number(id))) {
           await api.post(`/students/${student.id}/classes`, {
@@ -1852,8 +1891,6 @@ function EnrollmentModal({
         }
       }
 
-      /* REMOVE */
-
       for (const id of currentIds) {
         if (!selectedIds.has(Number(id))) {
           await api.delete(`/students/${student.id}/classes/${id}`);
@@ -1861,6 +1898,8 @@ function EnrollmentModal({
       }
 
       toast.success("Student classes updated successfully");
+
+      setPasswordConfirmOpen(false);
 
       await onSaved();
     } catch (error) {
@@ -2076,6 +2115,18 @@ function EnrollmentModal({
           </div>
         </div>
       )}
+      <PasswordConfirmModal
+        open={passwordConfirmOpen}
+        title="Confirm class changes"
+        description={`Enter your password to update ${student.full_name}'s classes.`}
+        confirmLabel="Verify & Save"
+        onVerified={confirmSave}
+        onCancel={() => {
+          if (!saving) {
+            setPasswordConfirmOpen(false);
+          }
+        }}
+      />
     </ModalShell>
   );
 }
