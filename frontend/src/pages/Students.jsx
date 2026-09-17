@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import api from "../lib/api";
+import PasswordConfirmModal from "../components/PasswordConfirmModal";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../components/Toast";
 import {
@@ -297,6 +298,9 @@ export default function Students() {
   const [showStudentModal, setShowStudentModal] = useState(false);
   const [editingStudent, setEditingStudent] = useState(null);
 
+  const [passwordConfirmOpen, setPasswordConfirmOpen] = useState(false);
+  const [studentPendingDelete, setStudentPendingDelete] = useState(null);
+
   const [showEnrollmentModal, setShowEnrollmentModal] = useState(false);
   const [enrollmentStudent, setEnrollmentStudent] = useState(null);
 
@@ -395,7 +399,7 @@ export default function Students() {
     setShowEnrollmentModal(true);
   }
 
-  async function deleteStudent(student) {
+  function deleteStudent(student) {
     if (!canDelete) return;
 
     const confirmed = window.confirm(
@@ -404,10 +408,22 @@ export default function Students() {
 
     if (!confirmed) return;
 
+    setStudentPendingDelete(student);
+    setPasswordConfirmOpen(true);
+  }
+
+  async function confirmStudentDelete() {
+    const student = studentPendingDelete;
+
+    if (!student) return;
+
     try {
       await api.delete(`/students/${student.id}`);
 
       toast.success("Student deleted successfully");
+
+      setPasswordConfirmOpen(false);
+      setStudentPendingDelete(null);
 
       await loadData(false);
     } catch (error) {
@@ -461,6 +477,21 @@ export default function Students() {
               </button>
             </div>
           )}
+          <PasswordConfirmModal
+            open={passwordConfirmOpen}
+            title="Confirm student deletion"
+            description={
+              studentPendingDelete
+                ? `Enter your password to permanently delete ${studentPendingDelete.full_name}.`
+                : "Enter your password to continue."
+            }
+            confirmLabel="Verify & Delete"
+            onVerified={confirmStudentDelete}
+            onCancel={() => {
+              setPasswordConfirmOpen(false);
+              setStudentPendingDelete(null);
+            }}
+          />
         </div>
 
         {/* SUMMARY */}

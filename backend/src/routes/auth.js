@@ -298,4 +298,89 @@ router.post(
   }),
 );
 
+// VERIFY CURRENT PASSWORD
+router.post(
+  "/verify-password",
+  authRequired,
+  body("password")
+    .isString()
+    .isLength({ min: 1 })
+    .withMessage("Password is required"),
+  asyncH(async (req, res) => {
+    const errors = getValidationErrors(req);
+
+    if (errors) {
+      return res.status(400).json({
+        error: "Password is required",
+        code: "VALIDATION_ERROR",
+        details: errors,
+      });
+    }
+
+    const { password } = req.body;
+
+    // Check active Admin account passwords.
+    const adminResult = await query(
+      `SELECT password_hash
+       FROM users
+       WHERE role = 'admin'
+         AND is_active = TRUE`,
+    );
+
+    for (const account of adminResult.rows) {
+      const passwordCorrect = await bcrypt.compare(
+        password,
+        account.password_hash,
+      );
+
+      if (passwordCorrect) {
+        return res.json({
+          ok: true,
+          message: "Password verified successfully",
+        });
+      }
+    }
+
+    // Check active Staff verification passwords/PINs.
+    const staffResult = await query(
+      `SELECT id, full_name, password_hash
+       FROM staff
+       WHERE is_active = TRUE`,
+    );
+
+    console.log(
+      "STAFF PASSWORD CHECK:",
+      staffResult.rows.map((account) => ({
+        id: account.id,
+        full_name: account.full_name,
+        hasHash: Boolean(account.password_hash),
+      })),
+    );
+
+    for (const account of staffResult.rows) {
+      const passwordCorrect = await bcrypt.compare(
+        password,
+        account.password_hash,
+      );
+
+      console.log(
+        `STAFF PASSWORD RESULT [${account.id} - ${account.full_name}]:`,
+        passwordCorrect,
+      );
+
+      if (passwordCorrect) {
+        return res.json({
+          ok: true,
+          message: "Password verified successfully",
+        });
+      }
+    }
+
+    return res.status(401).json({
+      error: "Incorrect password",
+      code: "PASSWORD_INCORRECT",
+    });
+  }),
+);
+
 module.exports = router;
