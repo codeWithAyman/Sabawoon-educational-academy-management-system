@@ -1,2279 +1,2002 @@
 import { useEffect, useMemo, useState } from "react";
 import api from "../lib/api";
-import { useAuth } from "../context/AuthContext";
+import PasswordConfirmModal from "../components/PasswordConfirmModal";
 import { useToast } from "../components/Toast";
+
 import {
-  Plus,
-  Search,
-  Loader2,
-  Wallet,
-  Receipt,
-  RefreshCw,
-  UserRound,
-  CheckCircle2,
-  Clock3,
   AlertCircle,
-  X,
-  CreditCard,
-  Eye,
-  Pencil,
   CalendarDays,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  Clock3,
+  CreditCard,
+  Loader2,
+  RefreshCw,
+  Search,
+  UserRound,
+  Wallet,
+  X,
 } from "lucide-react";
 
-/* =========================================================
-   FEES / PAYMENTS PAGE
-========================================================= */
+/* ============================================================
+   SOLAR HIJRI
+============================================================ */
 
-export default function Fees() {
-  const { user } = useAuth();
-  const toast = useToast();
+const SOLAR_MONTHS = [
+  "Hamal",
+  "Saur",
+  "Jawza",
+  "Saratan",
+  "Asad",
+  "Sunbula",
+  "Mizan",
+  "Aqrab",
+  "Qaws",
+  "Jadi",
+  "Dalw",
+  "Hoot",
+];
 
-  const canEdit = ["admin", "staff"].includes(user?.role);
-  const isStudent = user?.role === "student";
+const MONTH_SHORT = [
+  "Ham",
+  "Sau",
+  "Jaw",
+  "Sar",
+  "Asa",
+  "Sun",
+  "Miz",
+  "Aqr",
+  "Qaw",
+  "Jad",
+  "Dal",
+  "Hoo",
+];
 
-  const [rows, setRows] = useState(null);
-  const [students, setStudents] = useState([]);
+/* ============================================================
+   HELPERS
+============================================================ */
 
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
+function formatTime(value) {
+  if (!value) return "—";
 
-  const [loadingFees, setLoadingFees] = useState(true);
-  const [loadingStudents, setLoadingStudents] = useState(false);
+  const [hourString, minuteString] = String(value).slice(0, 5).split(":");
 
-  const [error, setError] = useState("");
-  const [modal, setModal] = useState(null);
+  let hour = Number(hourString);
+  const minute = minuteString || "00";
 
-  /* =======================================================
-     LOAD FEES
-  ======================================================= */
-
-  async function loadFees() {
-    try {
-      setLoadingFees(true);
-      setError("");
-
-      const params = new URLSearchParams();
-
-      if (statusFilter) {
-        params.set("status", statusFilter);
-      }
-
-      const url = params.toString() ? `/fees?${params.toString()}` : "/fees";
-
-      const { data } = await api.get(url);
-
-      if (!Array.isArray(data)) {
-        throw new Error("Invalid fees response");
-      }
-
-      setRows(data);
-    } catch (err) {
-      console.error("Failed to load fees:", err);
-
-      setRows([]);
-
-      setError(
-        err.response?.data?.error ||
-          "Unable to load payment records from the database.",
-      );
-    } finally {
-      setLoadingFees(false);
-    }
+  if (!Number.isFinite(hour)) {
+    return String(value).slice(0, 5);
   }
 
-  /* =======================================================
-     LOAD STUDENTS
-  ======================================================= */
+  const suffix = hour >= 12 ? "PM" : "AM";
 
-  async function loadStudents() {
-    if (!canEdit) return;
+  if (hour === 0) hour = 12;
+  if (hour > 12) hour -= 12;
 
-    try {
-      setLoadingStudents(true);
+  return `${hour}:${minute} ${suffix}`;
+}
 
-      const { data } = await api.get("/students");
+function formatMoney(value) {
+  const number = Number(value || 0);
 
-      if (!Array.isArray(data)) {
-        throw new Error("Invalid students response");
-      }
+  return `AFN ${number.toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })}`;
+}
 
-      setStudents(data);
-    } catch (err) {
-      console.error("Failed to load students:", err);
+function monthKey(year, month) {
+  return `${Number(year)}-${Number(month)}`;
+}
 
-      setStudents([]);
+function parseSolarDate(value) {
+  if (!value) return null;
 
-      toast.error(err.response?.data?.error || "Unable to load students.");
-    } finally {
-      setLoadingStudents(false);
-    }
-  }
+  const match = String(value)
+    .trim()
+    .match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
 
-  /* =======================================================
-     INITIAL LOAD
-  ======================================================= */
+  if (!match) return null;
 
-  useEffect(() => {
-    loadFees();
+  return {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+  };
+}
 
-    if (canEdit) {
-      loadStudents();
-    }
-  }, [canEdit]);
+function formatSolarDate(year, month, day) {
+  return `${String(year).padStart(4, "0")}/${String(month).padStart(
+    2,
+    "0",
+  )}/${String(day).padStart(2, "0")}`;
+}
 
-  /* =======================================================
-     STATUS FILTER
-  ======================================================= */
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      loadFees();
-    }, 200);
-
-    return () => clearTimeout(timer);
-  }, [statusFilter]);
-
-  /* =======================================================
-     SEARCH
-  ======================================================= */
-
-  const filteredRows = useMemo(() => {
-    if (!Array.isArray(rows)) return [];
-
-    const value = search.trim().toLowerCase();
-
-    if (!value) return rows;
-
-    return rows.filter((row) => {
-      const fields = [
-        row.student_name,
-        row.roll_number,
-        row.guardian_name,
-        row.guardian_phone,
-        row.subject_name,
-        row.receipt_number,
-        row.academic_year,
-        row.description,
-        row.status,
-        row.from_date,
-        row.to_date,
-        row.coverage_info?.label,
-      ];
-
-      return fields.some((field) =>
-        String(field || "")
-          .toLowerCase()
-          .includes(value),
-      );
+function getTodaySolar() {
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US-u-ca-persian-nu-latn", {
+      timeZone: "Asia/Kabul",
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
     });
-  }, [rows, search]);
 
-  /* =======================================================
-     SUMMARY
-  ======================================================= */
+    const parts = formatter.formatToParts(new Date());
 
-  const summary = useMemo(() => {
-    const data = Array.isArray(rows) ? rows : [];
+    const year = Number(parts.find((part) => part.type === "year")?.value);
+    const month = Number(parts.find((part) => part.type === "month")?.value);
+    const day = Number(parts.find((part) => part.type === "day")?.value);
 
-    return data.reduce(
-      (result, row) => {
-        result.total += Number(row.total_amount || 0);
-        result.paid += Number(row.paid_amount || 0);
-        result.due += Number(row.due_amount || 0);
-        result.records += 1;
+    if (
+      Number.isInteger(year) &&
+      Number.isInteger(month) &&
+      Number.isInteger(day)
+    ) {
+      return {
+        year,
+        month,
+        day,
+        formatted: formatSolarDate(year, month, day),
+      };
+    }
+  } catch {
+    // Backend remains authoritative.
+  }
 
-        return result;
-      },
-      {
-        total: 0,
-        paid: 0,
-        due: 0,
-        records: 0,
-      },
-    );
-  }, [rows]);
+  return {
+    year: 1405,
+    month: 1,
+    day: 1,
+    formatted: "1405/01/01",
+  };
+}
 
-  /* =======================================================
-     CREATE FEE
-  ======================================================= */
+function getSolarMonthDays(year, month) {
+  if (month >= 1 && month <= 6) return 31;
+  if (month >= 7 && month <= 11) return 30;
 
-  async function createFee(form) {
+  if (month === 12) {
     try {
-      await api.post("/fees", form);
+      const formatter = new Intl.DateTimeFormat("en-US-u-ca-persian-nu-latn", {
+        timeZone: "Asia/Kabul",
+        year: "numeric",
+        month: "numeric",
+        day: "numeric",
+      });
 
-      toast.success("Fee period created successfully.");
+      const start = new Date(Date.UTC(2027, 2, 20, 12, 0, 0));
 
-      setModal(null);
+      for (let offset = 0; offset <= 2; offset++) {
+        const testDate = new Date(
+          start.getTime() + offset * 24 * 60 * 60 * 1000,
+        );
 
-      await loadFees();
-    } catch (err) {
-      console.error("Failed to create fee:", err);
+        const parts = formatter.formatToParts(testDate);
 
-      toast.error(err.response?.data?.error || "Unable to create fee period.");
+        const jy = Number(parts.find((part) => part.type === "year")?.value);
+        const jm = Number(parts.find((part) => part.type === "month")?.value);
+        const jd = Number(parts.find((part) => part.type === "day")?.value);
 
-      throw err;
+        if (jy === year && jm === 12 && jd === 30) {
+          return 30;
+        }
+      }
+    } catch {
+      // Backend remains authoritative.
+    }
+
+    return year % 4 === 3 ? 30 : 29;
+  }
+
+  return 30;
+}
+
+function monthName(month) {
+  return SOLAR_MONTHS[Number(month) - 1] || `Month ${month}`;
+}
+
+function statusForMonth({
+  year,
+  month,
+  currentYear,
+  currentMonth,
+  paidMonth,
+  enrolledSolar,
+}) {
+  const isBeforeEnrollment =
+    enrolledSolar &&
+    (year < enrolledSolar.year ||
+      (year === enrolledSolar.year && month < enrolledSolar.month));
+
+  if (isBeforeEnrollment) {
+    return "not_started";
+  }
+
+  if (paidMonth) {
+    const paid = Number(paidMonth.paid_amount || 0);
+    const calculated = Number(paidMonth.calculated_amount || 0);
+
+    const feeStatus = String(paidMonth.fee_status || "").toLowerCase();
+
+    if (feeStatus === "paid" || (calculated > 0 && paid >= calculated)) {
+      return "paid";
+    }
+
+    if (paid > 0 || feeStatus === "partial") {
+      return "partial";
     }
   }
 
-  /* =======================================================
-     PAYMENT
-  ======================================================= */
-
-  async function recordPayment(id, form) {
-    try {
-      await api.post(`/fees/${id}/payment`, form);
-
-      toast.success("Payment recorded successfully.");
-
-      setModal(null);
-
-      await loadFees();
-    } catch (err) {
-      console.error("Failed to record payment:", err);
-
-      toast.error(err.response?.data?.error || "Unable to record payment.");
-
-      throw err;
-    }
+  if (year > currentYear || (year === currentYear && month > currentMonth)) {
+    return "upcoming";
   }
 
-  /* =======================================================
-     MONEY
-  ======================================================= */
+  return "due";
+}
 
-  function formatMoney(value) {
-    return Number(value || 0).toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
+function getClassBooks(classItem) {
+  if (!classItem) return [];
+
+  if (Array.isArray(classItem.books)) {
+    return classItem.books;
   }
 
-  /* =======================================================
-     RENDER
-  ======================================================= */
+  if (Array.isArray(classItem.sections)) {
+    return classItem.sections;
+  }
 
-  return (
-    <div className="relative min-h-full text-white">
-      {/* BACKGROUND */}
+  if (Array.isArray(classItem.levels)) {
+    return classItem.levels;
+  }
 
-      <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-[-260px] right-[-180px] w-[600px] h-[600px] rounded-full bg-[#f2bd19]/[0.025] blur-[140px]" />
-
-        <div className="absolute bottom-[-300px] left-[-180px] w-[500px] h-[500px] rounded-full bg-white/[0.012] blur-[130px]" />
-      </div>
-
-      <div
-        className="absolute inset-0 pointer-events-none opacity-[0.025]"
-        style={{
-          backgroundImage:
-            "linear-gradient(rgba(255,255,255,0.4) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.4) 1px, transparent 1px)",
-          backgroundSize: "48px 48px",
-        }}
-      />
-
-      <div className="relative z-10 space-y-5">
-        {/* =================================================
-            HEADER
-        ================================================= */}
-
-        <div className="relative bg-[#121519] border border-white/[0.08] rounded-xl overflow-hidden shadow-[0_18px_50px_rgba(0,0,0,0.22)]">
-          <div className="h-[2px] w-full bg-[#f2bd19]" />
-
-          <div className="p-4">
-            <div className="flex flex-col xl:flex-row xl:items-center gap-4">
-              <div className="flex items-center gap-3">
-                <div className="relative">
-                  <div className="absolute inset-[-5px] rounded-xl border border-[#f2bd19]/10" />
-
-                  <div className="relative w-10 h-10 rounded-lg bg-[#f2bd19]/10 border border-[#f2bd19]/15 text-[#f2bd19] flex items-center justify-center">
-                    <Wallet className="w-5 h-5" />
-                  </div>
-                </div>
-
-                <div>
-                  <h2 className="text-[17px] font-semibold tracking-[-0.01em] text-white">
-                    {isStudent ? "My Fees" : "Fees & Payments"}
-                  </h2>
-
-                  <p className="text-[11px] text-slate-500 mt-1">
-                    {isStudent
-                      ? "View your fee records and payment status"
-                      : "Manage student fees, payments and coverage"}
-                  </p>
-                </div>
-              </div>
-
-              <div className="xl:ml-auto flex flex-col sm:flex-row gap-2">
-                {!isStudent && (
-                  <div className="relative group">
-                    <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-600 group-focus-within:text-[#f2bd19] pointer-events-none" />
-
-                    <input
-                      className="w-full sm:w-64 h-9 pl-9 pr-3 rounded-lg bg-[#0d1013] border border-white/[0.08] text-[12px] text-slate-200 placeholder:text-slate-600 outline-none focus:border-[#f2bd19]/50 focus:ring-2 focus:ring-[#f2bd19]/10"
-                      placeholder="Search student, subject, receipt..."
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                    />
-                  </div>
-                )}
-
-                <select
-                  className="w-full sm:w-36 h-9 px-3 rounded-lg bg-[#0d1013] border border-white/[0.08] text-[12px] text-slate-300 outline-none focus:border-[#f2bd19]/50"
-                  value={statusFilter}
-                  onChange={(e) => setStatusFilter(e.target.value)}
-                  style={{ colorScheme: "dark" }}
-                >
-                  <option value="">All Status</option>
-                  <option value="paid">Paid</option>
-                  <option value="partial">Partial</option>
-                  <option value="pending">Pending</option>
-                  <option value="overdue">Overdue</option>
-                </select>
-
-                <button
-                  type="button"
-                  onClick={loadFees}
-                  disabled={loadingFees}
-                  className="h-9 px-3 rounded-lg bg-[#0d1013] border border-white/[0.08] hover:border-white/[0.15] text-slate-400 hover:text-slate-200 flex items-center justify-center gap-2 text-[12px] transition disabled:opacity-50"
-                >
-                  <RefreshCw
-                    className={`w-4 h-4 ${loadingFees ? "animate-spin" : ""}`}
-                  />
-
-                  <span className="hidden sm:inline">Refresh</span>
-                </button>
-
-                {canEdit && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setModal({
-                        mode: "create",
-                      })
-                    }
-                    className="h-9 px-4 bg-[#f2bd19] hover:bg-[#e5ae08] text-[#111] rounded-lg text-[12px] font-bold flex items-center justify-center gap-2 transition"
-                  >
-                    <Plus className="w-4 h-4" />
-                    New Fee
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* =================================================
-            SUMMARY
-        ================================================= */}
-
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          <SummaryCard
-            icon={Wallet}
-            title="Total Fees"
-            value={formatMoney(summary.total)}
-            accent="gold"
-          />
-
-          <SummaryCard
-            icon={CheckCircle2}
-            title="Total Paid"
-            value={formatMoney(summary.paid)}
-            accent="green"
-          />
-
-          <SummaryCard
-            icon={AlertCircle}
-            title="Total Due"
-            value={formatMoney(summary.due)}
-            accent="red"
-          />
-
-          <SummaryCard
-            icon={Receipt}
-            title="Fee Records"
-            value={summary.records}
-            accent="blue"
-          />
-        </div>
-
-        {/* =================================================
-            ERROR
-        ================================================= */}
-
-        {error && (
-          <div className="bg-[#151113] border border-red-500/20 rounded-xl px-4 py-3 text-[12px] text-red-300 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4" />
-
-              <span>{error}</span>
-            </div>
-
-            <button
-              type="button"
-              onClick={loadFees}
-              className="px-3 py-1.5 bg-white/[0.03] border border-red-500/20 rounded-lg text-[11px] text-red-300"
-            >
-              Try again
-            </button>
-          </div>
-        )}
-
-        {/* =================================================
-            TABLE
-        ================================================= */}
-
-        <div className="bg-[#121519] border border-white/[0.08] rounded-xl shadow-[0_18px_50px_rgba(0,0,0,0.22)] overflow-hidden">
-          <div className="px-4 py-3 border-b border-white/[0.07] flex items-center justify-between">
-            <div>
-              <div className="flex items-center gap-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-[#f2bd19]" />
-
-                <h3 className="font-semibold text-white text-[13px]">
-                  Payment Records
-                </h3>
-              </div>
-
-              <p className="text-[10px] text-slate-600 mt-1.5 ml-3.5">
-                Financial records and fee coverage from the database
-              </p>
-            </div>
-
-            {!loadingFees && (
-              <span className="px-2 py-1 rounded-md bg-white/[0.025] border border-white/[0.06] text-[10px] text-slate-500">
-                {filteredRows.length}{" "}
-                {filteredRows.length === 1 ? "record" : "records"}
-              </span>
-            )}
-          </div>
-
-          {loadingFees ? (
-            <EmptyState loading />
-          ) : filteredRows.length === 0 ? (
-            <EmptyState search={search} statusFilter={statusFilter} />
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[980px]">
-                <thead>
-                  <tr className="bg-[#0d1013] border-b border-white/[0.07]">
-                    {!isStudent && (
-                      <>
-                        <TableHead>Roll</TableHead>
-                        <TableHead>Student</TableHead>
-                      </>
-                    )}
-
-                    <TableHead>Subject</TableHead>
-                    <TableHead>Coverage</TableHead>
-                    <TableHead>Total</TableHead>
-                    <TableHead>Paid</TableHead>
-                    <TableHead>Due</TableHead>
-                    <TableHead>Status</TableHead>
-
-                    {canEdit && <TableHead right>Action</TableHead>}
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {filteredRows.map((row) => (
-                    <FeeRow
-                      key={row.id}
-                      row={row}
-                      isStudent={isStudent}
-                      canEdit={canEdit}
-                      onView={() =>
-                        setModal({
-                          mode: "view",
-                          fee: row,
-                        })
-                      }
-                      onEdit={() =>
-                        setModal({
-                          mode: "edit",
-                          fee: row,
-                        })
-                      }
-                      onPay={() =>
-                        setModal({
-                          mode: "payment",
-                          fee: row,
-                        })
-                      }
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* ===================================================
-          MODALS
-      =================================================== */}
-
-      {modal?.mode === "create" && (
-        <CreateFeeModal
-          students={students}
-          loadingStudents={loadingStudents}
-          onClose={() => setModal(null)}
-          onSave={createFee}
-        />
-      )}
-
-      {modal?.mode === "payment" && (
-        <PaymentModal
-          fee={modal.fee}
-          onClose={() => setModal(null)}
-          onSave={recordPayment}
-        />
-      )}
-
-      {modal?.mode === "view" && (
-        <ViewFeeModal fee={modal.fee} onClose={() => setModal(null)} />
-      )}
-
-      {modal?.mode === "edit" && (
-        <EditFeeModal
-          fee={modal.fee}
-          onClose={() => setModal(null)}
-          onSaved={loadFees}
-          toast={toast}
-        />
-      )}
-    </div>
-  );
+  return [];
 }
 
-/* =========================================================
-   TABLE
-========================================================= */
+function formatBooks(books) {
+  if (!Array.isArray(books) || books.length === 0) {
+    return "—";
+  }
 
-function TableHead({ children, right = false }) {
-  return (
-    <th
-      className={`px-4 py-3 text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-600 ${
-        right ? "text-right" : "text-left"
-      }`}
-    >
-      {children}
-    </th>
-  );
+  return books
+    .map((book) => {
+      if (typeof book === "string") return book;
+      return book?.name || "";
+    })
+    .filter(Boolean)
+    .join(" • ");
 }
 
-function FeeRow({ row, isStudent, canEdit, onView, onEdit, onPay }) {
-  const isLegacy = row.is_period_based === false;
+/* ============================================================
+   MONTH STATUS CARD
+============================================================ */
 
-  return (
-    <tr className="border-b border-white/[0.045] hover:bg-white/[0.018] transition-colors">
-      {!isStudent && (
-        <>
-          <td className="px-4 py-3">
-            <span className="font-mono text-[10px] text-slate-500">
-              {row.roll_number || "-"}
-            </span>
-          </td>
+function MonthStatusCard({ month, status, selected, onClick }) {
+  const clickable =
+    status === "due" || status === "partial" || status === "upcoming";
 
-          <td className="px-4 py-3">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-[#f2bd19]/[0.08] border border-[#f2bd19]/10 text-[#f2bd19] flex items-center justify-center shrink-0">
-                <UserRound className="w-3.5 h-3.5" />
-              </div>
+  const styles = {
+    paid: {
+      box: "border-emerald-400/25 bg-emerald-400/[0.08] text-emerald-300",
+      dot: "bg-emerald-400",
+      label: "Paid",
+    },
 
-              <div className="min-w-0">
-                <div className="text-[12px] font-semibold text-slate-300 truncate">
-                  {row.student_name || "-"}
-                </div>
+    partial: {
+      box: "border-amber-400/25 bg-amber-400/[0.07] text-amber-300",
+      dot: "bg-amber-400",
+      label: "Partial",
+    },
 
-                {row.guardian_name && (
-                  <div className="text-[10px] text-slate-600 mt-0.5">
-                    Guardian: {row.guardian_name}
-                  </div>
-                )}
-              </div>
-            </div>
-          </td>
-        </>
-      )}
+    due: {
+      box: "border-red-400/25 bg-red-400/[0.06] text-red-300",
+      dot: "bg-red-400",
+      label: "Payment Due",
+    },
 
-      {/* SUBJECT */}
+    upcoming: {
+      box: "border-blue-400/15 bg-blue-400/[0.035] text-blue-300",
+      dot: "bg-blue-400",
+      label: "Upcoming",
+    },
 
-      <td className="px-4 py-3">
-        <div>
-          <span className="text-[11px] font-medium text-slate-300">
-            {row.subject_name || "-"}
-          </span>
+    not_started: {
+      box: "border-white/[0.045] bg-white/[0.01] text-slate-700",
+      dot: "bg-slate-800",
+      label: "Not Started",
+    },
+  };
 
-          {row.academic_year && (
-            <div className="text-[9px] text-slate-600 mt-1">
-              Academic year: {row.academic_year}
-            </div>
-          )}
-        </div>
-      </td>
+  const style = styles[status] || styles.upcoming;
 
-      {/* COVERAGE */}
-
-      <td className="px-4 py-3">
-        {isLegacy ? (
-          <div>
-            <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/[0.025] border border-white/[0.06] text-[9px] text-slate-600">
-              Legacy record
-            </span>
-
-            <div className="text-[9px] text-slate-700 mt-1">
-              No period coverage
-            </div>
-          </div>
-        ) : (
-          <div>
-            {row.from_date && row.to_date ? (
-              <>
-                <div className="text-[10px] text-slate-300">
-                  {formatDatabaseDate(row.from_date)}
-                </div>
-
-                <div className="text-[9px] text-slate-600 mt-0.5">
-                  → {formatDatabaseDate(row.to_date)}
-                </div>
-              </>
-            ) : (
-              <span className="text-[10px] text-slate-600">
-                Coverage recorded
-              </span>
-            )}
-
-            <div className="text-[9px] text-[#f2bd19]/70 mt-1">
-              {Number(row.covered_days || 0)}{" "}
-              {Number(row.covered_days || 0) === 1 ? "day" : "days"}
-            </div>
-          </div>
-        )}
-      </td>
-
-      {/* TOTAL */}
-
-      <td className="px-4 py-3">
-        <span className="text-[11px] font-semibold text-slate-300">
-          {formatAmount(row.total_amount)}
-        </span>
-      </td>
-
-      {/* PAID */}
-
-      <td className="px-4 py-3">
-        <span className="text-[11px] font-semibold text-emerald-400">
-          {formatAmount(row.paid_amount)}
-        </span>
-      </td>
-
-      {/* DUE */}
-
-      <td className="px-4 py-3">
-        <span
-          className={`text-[11px] font-semibold ${
-            Number(row.due_amount) > 0 ? "text-red-400" : "text-slate-600"
-          }`}
-        >
-          {formatAmount(row.due_amount)}
-        </span>
-      </td>
-
-      {/* STATUS */}
-
-      <td className="px-4 py-3">
-        <StatusBadge status={row.status} />
-      </td>
-
-      {/* ACTION */}
-
-      {canEdit && (
-        <td className="px-4 py-3">
-          <div className="flex items-center justify-end gap-1.5">
-            <ActionButton icon={Eye} title="View" onClick={onView} />
-
-            <ActionButton icon={Pencil} title="Edit" onClick={onEdit} />
-
-            {Number(row.due_amount) > 0 && (
-              <button
-                type="button"
-                onClick={onPay}
-                className="h-8 px-3 rounded-lg bg-[#f2bd19] hover:bg-[#e5ae08] text-[#111] text-[10px] font-bold flex items-center gap-1.5 transition"
-              >
-                <CreditCard className="w-3.5 h-3.5" />
-                Pay
-              </button>
-            )}
-          </div>
-        </td>
-      )}
-    </tr>
-  );
-}
-
-function ActionButton({ icon: Icon, title, onClick }) {
   return (
     <button
       type="button"
-      onClick={onClick}
-      title={title}
-      className="w-8 h-8 rounded-lg bg-white/[0.025] border border-white/[0.07] text-slate-500 hover:text-slate-200 hover:border-white/[0.14] flex items-center justify-center transition"
+      disabled={!clickable}
+      onClick={() => clickable && onClick(month)}
+      className={`
+        group relative min-h-[86px] w-full rounded-xl border p-3
+        text-left transition-all
+        ${style.box}
+        ${
+          clickable
+            ? "cursor-pointer hover:-translate-y-0.5 hover:border-[#f2bd19]/35"
+            : "cursor-default"
+        }
+        ${selected ? "ring-2 ring-[#f2bd19]/50 border-[#f2bd19]/50" : ""}
+      `}
     >
-      <Icon className="w-3.5 h-3.5" />
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-[10px] uppercase tracking-[0.16em] font-semibold opacity-70">
+            {MONTH_SHORT[month.solar_month - 1]}
+          </p>
+
+          <p className="mt-1 text-sm font-bold text-white truncate">
+            {monthName(month.solar_month)}
+          </p>
+        </div>
+
+        <span className={`mt-1 h-2 w-2 rounded-full shrink-0 ${style.dot}`} />
+      </div>
+
+      <div className="mt-3 flex items-center justify-between gap-2">
+        <span className="text-[9px] font-medium truncate">{style.label}</span>
+
+        {Number(month.paid_amount || 0) > 0 && (
+          <span className="text-[9px] opacity-70 whitespace-nowrap">
+            {formatMoney(month.paid_amount)}
+          </span>
+        )}
+      </div>
     </button>
   );
 }
 
-/* =========================================================
-   CREATE FEE
-========================================================= */
+/* ============================================================
+   RECORD PAYMENT MODAL
+============================================================ */
 
-function CreateFeeModal({ students, loadingStudents, onClose, onSave }) {
-  const [saving, setSaving] = useState(false);
-  const [loadingEnrollments, setLoadingEnrollments] = useState(false);
+function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
+  const [monthlyAmount, setMonthlyAmount] = useState("");
+  const [paymentAmount, setPaymentAmount] = useState("");
+  const [comment, setComment] = useState("");
 
-  const [enrollments, setEnrollments] = useState([]);
+  const todaySolar = useMemo(() => getTodaySolar(), []);
 
-  const currentYear = getCurrentSolarYear();
+  useEffect(() => {
+    if (!open) return;
 
-  const [form, setForm] = useState({
-    student_id: "",
-    enrollment_id: "",
+    setMonthlyAmount(
+      month?.monthly_amount ? String(Number(month.monthly_amount)) : "",
+    );
 
-    period_mode: "month",
+    setPaymentAmount("");
+    setComment("");
+  }, [open, month]);
 
-    solar_year: String(currentYear),
-    solar_month: String(getCurrentSolarMonth()),
-
-    from_solar_date: "",
-    to_solar_date: "",
-
-    monthly_amounts: {},
-
-    initial_paid_amount: "0",
-
-    academic_year: "",
-    description: "",
-  });
-
-  function updateField(field, value) {
-    setForm((previous) => ({
-      ...previous,
-      [field]: value,
-    }));
+  if (!open || !enrollment || !month) {
+    return null;
   }
 
-  async function loadEnrollments(studentId) {
-    setEnrollments([]);
+  const feeAmount = Number(monthlyAmount || 0);
+  const amount = Number(paymentAmount || 0);
 
-    updateField("enrollment_id", "");
+  const existingPaid = Number(month.paid_amount || 0);
+  const existingCalculated = Number(month.calculated_amount || feeAmount || 0);
 
-    if (!studentId) return;
+  const existingDue = Math.max(existingCalculated - existingPaid, 0);
 
-    try {
-      setLoadingEnrollments(true);
+  const suggestedFullPayment = existingDue > 0 ? existingDue : feeAmount;
 
-      const { data } = await api.get(
-        `/fees/enrollments?student_id=${encodeURIComponent(studentId)}`,
-      );
+  const isPartial =
+    amount > 0 && suggestedFullPayment > 0 && amount < suggestedFullPayment;
 
-      if (!Array.isArray(data)) {
-        throw new Error("Invalid enrollment response");
-      }
-
-      setEnrollments(data);
-    } catch (err) {
-      console.error("Failed to load enrollments:", err);
-
-      setEnrollments([]);
-
-      toastEnrollmentError(
-        err.response?.data?.error ||
-          "Unable to load this student's enrollments.",
-      );
-    } finally {
-      setLoadingEnrollments(false);
-    }
-  }
-
-  function handleStudentChange(value) {
-    updateField("student_id", value);
-    loadEnrollments(value);
-  }
-
-  const selectedEnrollment = enrollments.find(
-    (item) => String(item.id) === String(form.enrollment_id),
-  );
-
-  const period = buildPeriodPreview(form);
-
-  const paid = Number(form.initial_paid_amount || 0);
-
-  const due = Math.max(0, period.total_amount - paid);
-
-  function setMonthlyAmount(key, value) {
-    setForm((previous) => ({
-      ...previous,
-      monthly_amounts: {
-        ...previous.monthly_amounts,
-        [key]: value,
-      },
-    }));
-  }
+  const valid = feeAmount > 0 && amount > 0 && amount <= suggestedFullPayment;
 
   function submit(e) {
     e.preventDefault();
 
-    if (saving) return;
+    if (!valid || saving) return;
 
-    if (!form.student_id) return;
-    if (!form.enrollment_id) return;
-    if (!period.valid) return;
-
-    if (paid < 0 || paid > period.total_amount) {
-      return;
-    }
-
-    const monthlyAmounts = period.months.map((month) => ({
-      solar_year: month.year,
-      solar_month: month.month,
-      monthly_amount: Number(form.monthly_amounts[month.key] || 0),
-    }));
-
-    const invalidMonthlyAmount = monthlyAmounts.some(
-      (item) =>
-        !Number.isFinite(item.monthly_amount) || item.monthly_amount <= 0,
-    );
-
-    if (invalidMonthlyAmount) {
-      return;
-    }
-
-    const data = {
-      student_id: Number(form.student_id),
-      enrollment_id: Number(form.enrollment_id),
-
-      from_solar_date: period.from_solar_date,
-
-      to_solar_date: period.to_solar_date,
-
-      monthly_amounts: monthlyAmounts,
-
-      initial_paid_amount: paid,
-
-      academic_year: form.academic_year.trim() || null,
-
-      description: form.description.trim() || null,
-    };
-
-    setSaving(true);
-
-    onSave(data)
-      .catch(() => {})
-      .finally(() => setSaving(false));
+    onSubmit({
+      solarYear: Number(month.solar_year),
+      solarMonth: Number(month.solar_month),
+      monthlyAmount: feeAmount,
+      paymentAmount: amount,
+      comment: comment.trim(),
+    });
   }
 
-  return (
-    <ModalShell
-      title="New Fee Period"
-      subtitle="Create fee coverage for an enrolled student"
-      onClose={onClose}
-      saving={saving}
-    >
-      <form onSubmit={submit}>
-        <div className="p-5 space-y-4">
-          {/* STUDENT */}
+  const books = enrollment.books || [];
 
-          <Field label="Student" required>
-            <select
-              required
-              className="form-input"
-              value={form.student_id}
-              onChange={(e) => handleStudentChange(e.target.value)}
-              disabled={loadingStudents}
-              style={{ colorScheme: "dark" }}
-            >
-              <option value="">
-                {loadingStudents ? "Loading students..." : "Select student"}
-              </option>
-
-              {students.map((student) => (
-                <option key={student.id} value={student.id}>
-                  {student.roll_number || "No roll"} — {student.full_name}
-                </option>
-              ))}
-            </select>
-          </Field>
-
-          {/* ENROLLMENT */}
-
-          <Field label="Enrolled subject / class" required>
-            <select
-              required
-              className="form-input"
-              value={form.enrollment_id}
-              onChange={(e) => updateField("enrollment_id", e.target.value)}
-              disabled={!form.student_id || loadingEnrollments}
-              style={{ colorScheme: "dark" }}
-            >
-              <option value="">
-                {!form.student_id
-                  ? "Select a student first"
-                  : loadingEnrollments
-                    ? "Loading enrollments..."
-                    : enrollments.length === 0
-                      ? "No active enrollments"
-                      : "Select enrollment"}
-              </option>
-
-              {enrollments.map((enrollment) => (
-                <option key={enrollment.id} value={enrollment.id}>
-                  {enrollment.subject_name} •{" "}
-                  {enrollment.teacher_name || "Teacher"} •{" "}
-                  {formatTime(enrollment.start_time)} -{" "}
-                  {formatTime(enrollment.end_time)}
-                </option>
-              ))}
-            </select>
-          </Field>
-
-          {/* SELECTED ENROLLMENT */}
-
-          {selectedEnrollment && (
-            <div className="rounded-lg bg-[#0d1013] border border-[#f2bd19]/10 px-3 py-3">
-              <div className="flex items-start gap-3">
-                <div className="w-9 h-9 rounded-lg bg-[#f2bd19]/[0.07] border border-[#f2bd19]/10 text-[#f2bd19] flex items-center justify-center shrink-0">
-                  <CalendarDays className="w-4 h-4" />
-                </div>
-
-                <div>
-                  <div className="text-[12px] font-semibold text-slate-300">
-                    {selectedEnrollment.subject_name}
-                  </div>
-
-                  <div className="text-[10px] text-slate-500 mt-1">
-                    Teacher: {selectedEnrollment.teacher_name || "-"}
-                  </div>
-
-                  <div className="text-[10px] text-slate-600 mt-0.5">
-                    Time: {formatTime(selectedEnrollment.start_time)} -{" "}
-                    {formatTime(selectedEnrollment.end_time)}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* COVERAGE TYPE */}
-
-          <Field label="Coverage type" required>
-            <div className="grid grid-cols-2 gap-2">
-              <PeriodModeButton
-                active={form.period_mode === "month"}
-                onClick={() =>
-                  setForm((previous) => ({
-                    ...previous,
-                    period_mode: "month",
-                    from_solar_date: "",
-                    to_solar_date: "",
-                  }))
-                }
-              >
-                Solar month
-              </PeriodModeButton>
-
-              <PeriodModeButton
-                active={form.period_mode === "custom"}
-                onClick={() =>
-                  setForm((previous) => ({
-                    ...previous,
-                    period_mode: "custom",
-                  }))
-                }
-              >
-                Custom dates
-              </PeriodModeButton>
-            </div>
-          </Field>
-
-          {/* MONTH */}
-
-          {form.period_mode === "month" ? (
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Solar year" required>
-                <input
-                  required
-                  type="number"
-                  min="1300"
-                  max="1600"
-                  className="form-input"
-                  value={form.solar_year}
-                  onChange={(e) => updateField("solar_year", e.target.value)}
-                />
-              </Field>
-
-              <Field label="Solar month" required>
-                <select
-                  required
-                  className="form-input"
-                  value={form.solar_month}
-                  onChange={(e) => updateField("solar_month", e.target.value)}
-                  style={{ colorScheme: "dark" }}
-                >
-                  {SOLAR_MONTHS.map((month) => (
-                    <option key={month.value} value={month.value}>
-                      {month.value} — {month.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            </div>
-          ) : (
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="From Solar Hijri" required>
-                <input
-                  required
-                  type="text"
-                  className="form-input"
-                  placeholder="1405/06/01"
-                  value={form.from_solar_date}
-                  onChange={(e) =>
-                    updateField("from_solar_date", e.target.value)
-                  }
-                />
-              </Field>
-
-              <Field label="To Solar Hijri" required>
-                <input
-                  required
-                  type="text"
-                  className="form-input"
-                  placeholder="1405/06/30"
-                  value={form.to_solar_date}
-                  onChange={(e) => updateField("to_solar_date", e.target.value)}
-                />
-              </Field>
-            </div>
-          )}
-
-          {/* MONTHLY FEES */}
-
-          {period.months.length > 0 && (
-            <div className="rounded-lg bg-[#0d1013] border border-white/[0.07] overflow-hidden">
-              <div className="px-3 py-2.5 border-b border-white/[0.06]">
-                <div className="text-[9px] uppercase tracking-[0.12em] text-slate-600">
-                  Monthly fee
-                </div>
-
-                <div className="text-[10px] text-slate-500 mt-1">
-                  Set the fee for each Solar Hijri month included in this
-                  coverage period.
-                </div>
-              </div>
-
-              <div className="divide-y divide-white/[0.045]">
-                {period.months.map((month) => (
-                  <div
-                    key={month.key}
-                    className="px-3 py-3 flex items-center gap-3"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="text-[11px] text-slate-300">
-                        {month.year} / {String(month.month).padStart(2, "0")} —{" "}
-                        {getSolarMonthName(month.month)}
-                      </div>
-
-                      <div className="text-[9px] text-slate-600 mt-0.5">
-                        {month.covered_days} of {month.month_days} days covered
-                      </div>
-                    </div>
-
-                    <input
-                      type="number"
-                      min="0.01"
-                      step="0.01"
-                      placeholder="Monthly fee"
-                      className="form-input w-32"
-                      value={form.monthly_amounts[month.key] || ""}
-                      onChange={(e) =>
-                        setMonthlyAmount(month.key, e.target.value)
-                      }
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* CALCULATION */}
-
-          <div className="grid grid-cols-3 gap-2">
-            <PreviewCard
-              label="Covered days"
-              value={period.valid ? String(period.covered_days) : "-"}
-            />
-
-            <PreviewCard
-              label="Calculated fee"
-              value={formatAmount(period.total_amount)}
-            />
-
-            <PreviewCard
-              label="Remaining due"
-              value={formatAmount(due)}
-              danger={due > 0}
-            />
-          </div>
-
-          {/* CALCULATION DETAILS */}
-
-          {period.months.length > 0 && (
-            <div className="rounded-lg bg-[#0d1013] border border-white/[0.07] overflow-hidden">
-              <div className="px-3 py-2.5 border-b border-white/[0.06]">
-                <div className="text-[9px] uppercase tracking-[0.12em] text-slate-600">
-                  Fee calculation
-                </div>
-              </div>
-
-              <div className="divide-y divide-white/[0.045]">
-                {period.months.map((month) => (
-                  <div
-                    key={month.key}
-                    className="px-3 py-2.5 flex items-center justify-between"
-                  >
-                    <div>
-                      <div className="text-[11px] text-slate-400">
-                        {month.year} / {String(month.month).padStart(2, "0")} —{" "}
-                        {getSolarMonthName(month.month)}
-                      </div>
-
-                      <div className="text-[9px] text-slate-600 mt-0.5">
-                        {month.covered_days} / {month.month_days} days
-                      </div>
-                    </div>
-
-                    <div className="text-right">
-                      <div className="text-[10px] text-slate-600">
-                        Monthly {formatAmount(month.monthly_amount)}
-                      </div>
-
-                      <div className="text-[11px] font-semibold text-slate-300 mt-0.5">
-                        {formatAmount(month.calculated_amount)}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* INITIAL PAYMENT */}
-
-          <Field label="Initial payment">
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              className="form-input"
-              placeholder="0.00"
-              value={form.initial_paid_amount}
-              onChange={(e) =>
-                updateField("initial_paid_amount", e.target.value)
-              }
-            />
-          </Field>
-
-          {paid > period.total_amount && (
-            <div className="rounded-lg bg-red-500/[0.06] border border-red-500/15 px-3 py-2.5 text-[11px] text-red-400">
-              Initial payment cannot be greater than the calculated fee.
-            </div>
-          )}
-
-          {/* ACADEMIC YEAR */}
-
-          <Field label="Academic year">
-            <input
-              className="form-input"
-              placeholder="e.g. 1405-1406"
-              value={form.academic_year}
-              onChange={(e) => updateField("academic_year", e.target.value)}
-            />
-          </Field>
-
-          {/* DESCRIPTION */}
-
-          <Field label="Description">
-            <textarea
-              className="form-input min-h-[75px] resize-none"
-              placeholder="Optional note..."
-              value={form.description}
-              onChange={(e) => updateField("description", e.target.value)}
-            />
-          </Field>
-
-          {/* NO ENROLLMENT */}
-
-          {form.student_id &&
-            !loadingEnrollments &&
-            enrollments.length === 0 && (
-              <div className="rounded-lg bg-amber-500/[0.06] border border-amber-500/15 px-3 py-2.5 text-[11px] text-amber-400">
-                This student has no active enrollment. Create the real class
-                enrollment first.
-              </div>
-            )}
-        </div>
-
-        <ModalFooter
-          onClose={onClose}
-          saving={saving}
-          submitText="Create Fee Period"
-          disabled={
-            !form.student_id ||
-            !form.enrollment_id ||
-            !period.valid ||
-            period.months.some(
-              (month) => Number(form.monthly_amounts[month.key] || 0) <= 0,
-            ) ||
-            paid > period.total_amount
-          }
-        />
-      </form>
-    </ModalShell>
-  );
-}
-
-/* =========================================================
-   PAYMENT
-========================================================= */
-
-function PaymentModal({ fee, onClose, onSave }) {
-  const [amount, setAmount] = useState("");
-  const [paymentSolarDate, setPaymentSolarDate] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  const due = Number(fee?.due_amount || 0);
-
-  const payment = Number(amount || 0);
-
-  const remaining = Math.max(0, due - payment);
-
-  async function submit(e) {
-    e.preventDefault();
-
-    if (saving || payment <= 0 || payment > due || !paymentSolarDate) {
-      return;
-    }
-
-    try {
-      setSaving(true);
-
-      await onSave(fee.id, {
-        amount: payment,
-        payment_solar_date: paymentSolarDate,
-      });
-    } catch {
-      // Parent handles error.
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <ModalShell
-      title="Record Payment"
-      subtitle="Record a payment against this fee"
-      onClose={onClose}
-      saving={saving}
-    >
-      <form onSubmit={submit}>
-        <div className="p-5 space-y-4">
-          <FeeIdentity fee={fee} />
-
-          <div className="grid grid-cols-2 gap-3">
-            <PreviewCard
-              label="Current Due"
-              value={formatAmount(due)}
-              danger={due > 0}
-            />
-
-            <PreviewCard
-              label="After Payment"
-              value={formatAmount(remaining)}
-            />
-          </div>
-
-          <Field label="Payment Solar Hijri date" required>
-            <input
-              required
-              type="text"
-              className="form-input"
-              placeholder="1405/06/26"
-              value={paymentSolarDate}
-              onChange={(e) => setPaymentSolarDate(e.target.value)}
-            />
-
-            <div className="text-[9px] text-slate-600 mt-1.5">
-              Use YYYY/MM/DD.
-            </div>
-          </Field>
-
-          <Field label="Payment amount" required>
-            <input
-              required
-              autoFocus
-              type="number"
-              min="0.01"
-              max={due}
-              step="0.01"
-              className="form-input"
-              placeholder="Enter amount"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-            />
-          </Field>
-
-          {payment > due && (
-            <div className="rounded-lg bg-red-500/[0.06] border border-red-500/15 px-3 py-2.5 text-[11px] text-red-400">
-              Payment cannot be greater than the remaining balance.
-            </div>
-          )}
-        </div>
-
-        <ModalFooter
-          onClose={onClose}
-          saving={saving}
-          submitText="Record Payment"
-          disabled={payment <= 0 || payment > due || !paymentSolarDate}
-        />
-      </form>
-    </ModalShell>
-  );
-}
-
-/* =========================================================
-   VIEW
-========================================================= */
-
-function ViewFeeModal({ fee, onClose }) {
-  const [details, setDetails] = useState(null);
-
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let mounted = true;
-
-    async function load() {
-      try {
-        setLoading(true);
-
-        const { data } = await api.get(`/fees/${fee.id}`);
-
-        if (mounted) {
-          setDetails(data);
-        }
-      } catch (err) {
-        console.error("Failed to load fee details:", err);
-
-        if (mounted) {
-          setDetails(fee);
-        }
-      } finally {
-        if (mounted) {
-          setLoading(false);
-        }
-      }
-    }
-
-    load();
-
-    return () => {
-      mounted = false;
-    };
-  }, [fee.id]);
-
-  const item = details || fee;
-
-  return (
-    <ModalShell
-      title="Fee Details"
-      subtitle="Complete financial record"
-      onClose={onClose}
-      saving={false}
-    >
-      {loading ? (
-        <div className="p-10 flex justify-center">
-          <Loader2 className="w-5 h-5 text-[#f2bd19] animate-spin" />
-        </div>
-      ) : (
-        <div className="p-5 space-y-4">
-          <FeeIdentity fee={item} />
-
-          <div className="grid grid-cols-3 gap-2">
-            <PreviewCard
-              label="Total"
-              value={formatAmount(item.total_amount)}
-            />
-
-            <PreviewCard label="Paid" value={formatAmount(item.paid_amount)} />
-
-            <PreviewCard
-              label="Due"
-              value={formatAmount(item.due_amount)}
-              danger={Number(item.due_amount) > 0}
-            />
-          </div>
-
-          {/* COVERAGE */}
-
-          <InfoBlock title="Coverage">
-            {item.is_period_based && item.from_date && item.to_date ? (
-              <>
-                <div className="text-[12px] text-slate-300">
-                  {formatDatabaseDate(item.from_date)} →{" "}
-                  {formatDatabaseDate(item.to_date)}
-                </div>
-
-                <div className="text-[10px] text-slate-600 mt-1">
-                  {Number(item.covered_days || 0)} covered days
-                </div>
-              </>
-            ) : (
-              <div className="text-[11px] text-slate-500">
-                Legacy fee record — no period coverage is attached.
-              </div>
-            )}
-          </InfoBlock>
-
-          {/* MONTHLY BREAKDOWN */}
-
-          {Array.isArray(item.months) && item.months.length > 0 && (
-            <InfoBlock title="Monthly breakdown">
-              <div className="divide-y divide-white/[0.05]">
-                {item.months.map((month) => (
-                  <div
-                    key={`${month.solar_year}-${month.solar_month}`}
-                    className="py-2.5 flex items-center justify-between"
-                  >
-                    <div>
-                      <div className="text-[11px] text-slate-300">
-                        {month.solar_year} /{" "}
-                        {String(month.solar_month).padStart(2, "0")} —{" "}
-                        {getSolarMonthName(month.solar_month)}
-                      </div>
-
-                      <div className="text-[9px] text-slate-600 mt-0.5">
-                        {month.covered_days} / {month.month_days} days
-                      </div>
-                    </div>
-
-                    <div className="text-right">
-                      <div className="text-[9px] text-slate-600">
-                        Monthly {formatAmount(month.monthly_amount)}
-                      </div>
-
-                      <div className="text-[11px] text-slate-300 mt-0.5">
-                        {formatAmount(month.calculated_amount)}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </InfoBlock>
-          )}
-
-          {/* PAYMENT HISTORY */}
-
-          {Array.isArray(item.payments) && item.payments.length > 0 && (
-            <InfoBlock title="Payment history">
-              <div className="divide-y divide-white/[0.05]">
-                {item.payments.map((payment) => (
-                  <div
-                    key={payment.id}
-                    className="py-2.5 flex items-center justify-between"
-                  >
-                    <div>
-                      <div className="text-[11px] text-slate-300">
-                        {payment.payment_solar_date ||
-                          payment.payment_date ||
-                          "-"}
-                      </div>
-
-                      {payment.receipt_number && (
-                        <div className="text-[9px] text-slate-600 mt-0.5">
-                          {payment.receipt_number}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="text-[11px] font-semibold text-emerald-400">
-                      {formatAmount(payment.amount)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </InfoBlock>
-          )}
-
-          {/* RECEIPT */}
-
-          {item.receipt_number && (
-            <InfoBlock title="Receipt">
-              <div className="text-[11px] text-slate-300 font-mono">
-                {item.receipt_number}
-              </div>
-            </InfoBlock>
-          )}
-
-          {/* DESCRIPTION */}
-
-          {item.description && (
-            <InfoBlock title="Description">
-              <div className="text-[11px] text-slate-400 whitespace-pre-wrap">
-                {item.description}
-              </div>
-            </InfoBlock>
-          )}
-        </div>
-      )}
-
-      <ModalFooter
-        onClose={onClose}
-        saving={false}
-        submitText="Close"
-        disabled={false}
-      />
-    </ModalShell>
-  );
-}
-
-/* =========================================================
-   EDIT
-========================================================= */
-
-function EditFeeModal({ fee, onClose, onSaved, toast }) {
-  const [academicYear, setAcademicYear] = useState(fee.academic_year || "");
-
-  const [description, setDescription] = useState(fee.description || "");
-
-  const [saving, setSaving] = useState(false);
-
-  async function submit(e) {
-    e.preventDefault();
-
-    if (saving) return;
-
-    try {
-      setSaving(true);
-
-      await api.put(`/fees/${fee.id}`, {
-        academic_year: academicYear.trim() || null,
-
-        description: description.trim() || null,
-      });
-
-      toast.success("Fee record updated successfully.");
-
-      await onSaved();
-
-      onClose();
-    } catch (err) {
-      console.error("Failed to edit fee:", err);
-
-      toast.error(err.response?.data?.error || "Unable to update fee record.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <ModalShell
-      title="Edit Fee Record"
-      subtitle="Update record information"
-      onClose={onClose}
-      saving={saving}
-    >
-      <form onSubmit={submit}>
-        <div className="p-5 space-y-4">
-          <FeeIdentity fee={fee} />
-
-          <div className="rounded-lg bg-amber-500/[0.045] border border-amber-500/10 px-3 py-2.5 text-[10px] text-amber-400">
-            Payment amounts and coverage are protected here. Only administrative
-            information can be changed.
-          </div>
-
-          <Field label="Academic year">
-            <input
-              className="form-input"
-              value={academicYear}
-              onChange={(e) => setAcademicYear(e.target.value)}
-              placeholder="e.g. 1405-1406"
-            />
-          </Field>
-
-          <Field label="Description">
-            <textarea
-              className="form-input min-h-[100px] resize-none"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Optional note..."
-            />
-          </Field>
-        </div>
-
-        <ModalFooter
-          onClose={onClose}
-          saving={saving}
-          submitText="Save Changes"
-        />
-      </form>
-    </ModalShell>
-  );
-}
-
-/* =========================================================
-   SHARED COMPONENTS
-========================================================= */
-
-function FeeIdentity({ fee }) {
-  return (
-    <div className="rounded-lg bg-[#0d1013] border border-white/[0.07] p-3">
-      <div className="flex items-center gap-3">
-        <div className="w-9 h-9 rounded-lg bg-[#f2bd19]/[0.08] border border-[#f2bd19]/10 text-[#f2bd19] flex items-center justify-center">
-          <UserRound className="w-4 h-4" />
-        </div>
-
-        <div className="min-w-0">
-          <div className="text-[13px] font-semibold text-slate-300">
-            {fee.student_name || "Student"}
-          </div>
-
-          <div className="text-[10px] text-slate-500 mt-0.5">
-            {fee.subject_name || "Subject"}
-          </div>
-
-          {fee.roll_number && (
-            <div className="text-[9px] text-slate-600 mt-0.5">
-              Roll: {fee.roll_number}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function InfoBlock({ title, children }) {
-  return (
-    <div className="rounded-lg bg-[#0d1013] border border-white/[0.07] overflow-hidden">
-      <div className="px-3 py-2.5 border-b border-white/[0.06]">
-        <div className="text-[9px] uppercase tracking-[0.12em] text-slate-600">
-          {title}
-        </div>
-      </div>
-
-      <div className="px-3 py-3">{children}</div>
-    </div>
-  );
-}
-
-function SummaryCard({ icon: Icon, title, value, accent }) {
-  const styles = {
-    gold: {
-      box: "bg-[#f2bd19]/[0.07] border-[#f2bd19]/10",
-      icon: "text-[#f2bd19]",
-    },
-
-    green: {
-      box: "bg-emerald-500/[0.06] border-emerald-500/10",
-      icon: "text-emerald-400",
-    },
-
-    red: {
-      box: "bg-red-500/[0.06] border-red-500/10",
-      icon: "text-red-400",
-    },
-
-    blue: {
-      box: "bg-blue-500/[0.06] border-blue-500/10",
-      icon: "text-blue-400",
-    },
-  };
-
-  const style = styles[accent] || styles.gold;
-
-  return (
-    <div className="relative bg-[#121519] border border-white/[0.08] rounded-xl px-4 py-3 overflow-hidden">
-      <div className="flex items-center gap-3">
-        <div
-          className={`w-10 h-10 rounded-lg border flex items-center justify-center shrink-0 ${style.box}`}
-        >
-          <Icon className={`w-[18px] h-[18px] ${style.icon}`} />
-        </div>
-
-        <div className="min-w-0">
-          <div className="text-[9px] uppercase tracking-[0.13em] text-slate-600">
-            {title}
-          </div>
-
-          <div className="text-[13px] font-semibold text-slate-300 mt-1 truncate">
-            {value}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function StatusBadge({ status }) {
-  const value = String(status || "").toLowerCase();
-
-  if (value === "paid") {
-    return (
-      <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-emerald-500/[0.07] border border-emerald-500/10 text-emerald-400 text-[9px] font-semibold">
-        <CheckCircle2 className="w-3 h-3" />
-        Paid
-      </span>
-    );
-  }
-
-  if (value === "partial") {
-    return (
-      <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-500/[0.07] border border-amber-500/10 text-amber-400 text-[9px] font-semibold">
-        <Clock3 className="w-3 h-3" />
-        Partial
-      </span>
-    );
-  }
-
-  if (value === "overdue") {
-    return (
-      <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-orange-500/[0.07] border border-orange-500/10 text-orange-400 text-[9px] font-semibold">
-        <AlertCircle className="w-3 h-3" />
-        Overdue
-      </span>
-    );
-  }
-
-  return (
-    <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-red-500/[0.07] border border-red-500/10 text-red-400 text-[9px] font-semibold">
-      <AlertCircle className="w-3 h-3" />
-      Pending
-    </span>
-  );
-}
-
-function PreviewCard({ label, value, danger = false }) {
   return (
     <div
-      className={`rounded-lg px-3 py-3 border ${
-        danger
-          ? "bg-red-500/[0.045] border-red-500/10"
-          : "bg-[#0d1013] border-white/[0.07]"
-      }`}
+      className="
+        fixed inset-0 z-[8000]
+        bg-black/75 backdrop-blur-sm
+        flex items-start sm:items-center justify-center
+        p-2 sm:p-4
+        overflow-y-auto
+      "
     >
       <div
-        className={`text-[8px] uppercase tracking-[0.1em] ${
-          danger ? "text-red-400/70" : "text-slate-600"
-        }`}
+        className="
+          w-full max-w-xl
+          max-h-[calc(100vh-1rem)]
+          sm:max-h-[calc(100vh-2rem)]
+          rounded-2xl
+          border border-white/10
+          bg-[#121519]
+          shadow-[0_25px_100px_rgba(0,0,0,0.65)]
+          flex flex-col
+          overflow-hidden
+          my-auto
+        "
       >
-        {label}
-      </div>
+        {/* HEADER */}
 
-      <div
-        className={`text-[12px] font-semibold mt-1 ${
-          danger ? "text-red-400" : "text-slate-300"
-        }`}
-      >
-        {value}
-      </div>
-    </div>
-  );
-}
+        <div className="shrink-0 flex items-start justify-between gap-3 px-4 sm:px-5 py-4 border-b border-white/[0.06]">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2.5">
+              <div className="h-8 w-8 shrink-0 rounded-lg bg-[#f2bd19]/10 border border-[#f2bd19]/20 grid place-items-center">
+                <CreditCard className="h-4 w-4 text-[#f2bd19]" />
+              </div>
 
-function PeriodModeButton({ active, onClick, children }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`h-9 rounded-lg border text-[11px] font-medium transition ${
-        active
-          ? "bg-[#f2bd19]/10 border-[#f2bd19]/30 text-[#f2bd19]"
-          : "bg-[#0d1013] border-white/[0.07] text-slate-500 hover:text-slate-300"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-white">Record Payment</h3>
 
-function EmptyState({ loading = false, search = "", statusFilter = "" }) {
-  if (loading) {
-    return (
-      <div className="min-h-[320px] grid place-items-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-[#f2bd19]/[0.06] border border-[#f2bd19]/10 flex items-center justify-center">
-            <Loader2 className="w-5 h-5 text-[#f2bd19] animate-spin" />
-          </div>
-
-          <span className="text-[11px] text-slate-600">
-            Loading payment records...
-          </span>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-[320px] grid place-items-center text-slate-600">
-      <div className="text-center">
-        <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-white/[0.025] border border-white/[0.06] flex items-center justify-center">
-          <Wallet className="w-6 h-6 opacity-40" />
-        </div>
-
-        <div className="text-[13px] font-medium text-slate-400">
-          No payment records found
-        </div>
-
-        <div className="text-[11px] mt-1.5 text-slate-600">
-          {search || statusFilter
-            ? "Try changing your search or filter."
-            : "There are currently no fee records."}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ModalShell({ title, subtitle, onClose, saving, children }) {
-  return (
-    <div
-      className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-      onMouseDown={() => {
-        if (!saving) onClose();
-      }}
-    >
-      <div
-        className="relative bg-[#121519] border border-white/[0.09] rounded-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto shadow-[0_30px_100px_rgba(0,0,0,0.55)]"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <div className="h-[2px] w-full bg-[#f2bd19]" />
-
-        <div className="px-5 py-4 border-b border-white/[0.07] flex items-center">
-          <div>
-            <div className="flex items-center gap-2">
-              <div className="w-1.5 h-1.5 rounded-full bg-[#f2bd19]" />
-
-              <h3 className="font-semibold text-white text-[14px]">{title}</h3>
+                <p className="text-[10px] text-slate-600 mt-0.5">
+                  Payment date is automatically today
+                </p>
+              </div>
             </div>
-
-            <p className="text-[10px] text-slate-600 mt-1 ml-3.5">{subtitle}</p>
           </div>
 
           <button
             type="button"
             onClick={onClose}
             disabled={saving}
-            className="ml-auto w-8 h-8 rounded-lg grid place-items-center text-slate-600 hover:text-slate-300 hover:bg-white/[0.04] disabled:opacity-50"
+            className="
+              h-8 w-8 shrink-0 rounded-lg
+              grid place-items-center
+              text-slate-600
+              hover:text-white hover:bg-white/[0.05]
+              transition
+            "
           >
-            <X className="w-4 h-4" />
+            <X className="h-4 w-4" />
           </button>
         </div>
 
-        {children}
+        {/* CONTENT */}
+
+        <form onSubmit={submit} className="min-h-0 flex flex-col">
+          <div className="flex-1 overflow-y-auto overscroll-contain">
+            <div className="p-4 sm:p-5 space-y-4">
+              {/* STUDENT */}
+
+              <div className="rounded-xl border border-white/[0.06] bg-[#0d1013] p-3.5 sm:p-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="h-10 w-10 shrink-0 rounded-xl bg-white/[0.04] border border-white/[0.06] grid place-items-center">
+                    <UserRound className="h-4 w-4 text-slate-500" />
+                  </div>
+
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-white truncate">
+                      {enrollment.student_name}
+                    </p>
+
+                    <p className="text-[10px] text-slate-500 mt-1 truncate">
+                      Father:{" "}
+                      <span className="text-slate-300">
+                        {enrollment.father_name || "—"}
+                      </span>
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <InfoBox label="Subject" value={enrollment.subject_name} />
+
+                  <InfoBox label="Level / Book" value={formatBooks(books)} />
+
+                  <InfoBox label="Teacher" value={enrollment.teacher_name} />
+
+                  <InfoBox
+                    label="Time"
+                    value={`${formatTime(
+                      enrollment.start_time,
+                    )}–${formatTime(enrollment.end_time)}`}
+                  />
+                </div>
+              </div>
+
+              {/* PAYMENT PERIOD */}
+
+              <div className="rounded-xl border border-[#f2bd19]/15 bg-[#f2bd19]/[0.04] p-3.5 sm:p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[8px] uppercase tracking-[0.15em] text-[#f2bd19]/60">
+                      Payment Period
+                    </p>
+
+                    <p className="text-lg font-bold text-white mt-1">
+                      {monthName(month.solar_month)}
+                    </p>
+                  </div>
+
+                  <div className="text-right">
+                    <p className="text-[8px] uppercase tracking-wider text-slate-600">
+                      Solar Year
+                    </p>
+
+                    <p className="text-sm font-semibold text-slate-300 mt-1">
+                      {month.solar_year}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-3 rounded-lg border border-white/[0.05] bg-white/[0.02] px-3 py-2">
+                  <p className="text-[9px] text-slate-600">Coverage</p>
+
+                  <p className="text-[10px] text-slate-300 mt-1">
+                    {formatSolarDate(
+                      Number(month.solar_year),
+                      Number(month.solar_month),
+                      1,
+                    )}
+                    {" — "}
+                    {formatSolarDate(
+                      Number(month.solar_year),
+                      Number(month.solar_month),
+                      month.month_days ||
+                        getSolarMonthDays(
+                          Number(month.solar_year),
+                          Number(month.solar_month),
+                        ),
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              {/* PAYMENT DATE */}
+
+              <div>
+                <label className="text-[9px] uppercase tracking-[0.14em] text-slate-600">
+                  Payment Date
+                </label>
+
+                <div className="mt-1 min-h-11 rounded-lg border border-white/[0.07] bg-[#0d1013] px-3 py-2 flex items-center gap-2">
+                  <CalendarDays className="h-4 w-4 shrink-0 text-[#f2bd19]/70" />
+
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold text-white">
+                      {todaySolar.formatted}
+                    </p>
+
+                    <p className="text-[8px] text-slate-700">
+                      Afghanistan Solar Hijri date
+                    </p>
+                  </div>
+
+                  <span className="ml-auto shrink-0 text-[8px] rounded-full border border-emerald-400/15 bg-emerald-400/[0.05] px-2 py-1 text-emerald-400">
+                    Today
+                  </span>
+                </div>
+              </div>
+
+              {/* MONTHLY FEE */}
+
+              <div>
+                <label className="text-[9px] uppercase tracking-[0.14em] text-slate-600">
+                  Monthly Fee
+                </label>
+
+                <div className="mt-1 relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-[10px] font-semibold">
+                    AFN
+                  </span>
+
+                  <input
+                    type="number"
+                    min="0"
+                    step="10"
+                    value={monthlyAmount}
+                    onChange={(e) => setMonthlyAmount(e.target.value)}
+                    placeholder="Enter monthly fee"
+                    className="
+                      h-11 w-full rounded-lg
+                      border border-white/[0.07]
+                      bg-[#0d1013]
+                      pl-12 pr-3
+                      text-sm text-white
+                      outline-none
+                      focus:border-[#f2bd19]/50
+                    "
+                  />
+                </div>
+              </div>
+
+              {/* PAYMENT */}
+
+              <div>
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1.5">
+                  <label className="text-[9px] uppercase tracking-[0.14em] text-slate-600">
+                    Payment Amount
+                  </label>
+
+                  {suggestedFullPayment > 0 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPaymentAmount(
+                          String(Number(suggestedFullPayment.toFixed(2))),
+                        )
+                      }
+                      className="text-left sm:text-right text-[9px] text-[#f2bd19] hover:text-[#ffd34d]"
+                    >
+                      Pay remaining {formatMoney(suggestedFullPayment)}
+                    </button>
+                  )}
+                </div>
+
+                <div className="mt-1 relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-[10px] font-semibold">
+                    AFN
+                  </span>
+
+                  <input
+                    type="number"
+                    min="0"
+                    max={suggestedFullPayment || undefined}
+                    step="10"
+                    value={paymentAmount}
+                    onChange={(e) => setPaymentAmount(e.target.value)}
+                    placeholder="Enter amount paid"
+                    className="
+                      h-12 w-full rounded-lg
+                      border border-[#f2bd19]/20
+                      bg-[#0d1013]
+                      pl-12 pr-3
+                      text-base font-semibold text-white
+                      outline-none
+                      focus:border-[#f2bd19]/60
+                    "
+                  />
+                </div>
+
+                {existingPaid > 0 && (
+                  <p className="text-[9px] text-amber-400 mt-2 leading-relaxed">
+                    Already paid: {formatMoney(existingPaid)}
+                    {" • "}
+                    Remaining: {formatMoney(existingDue)}
+                  </p>
+                )}
+              </div>
+
+              {/* COMMENT */}
+
+              <div>
+                <label className="text-[9px] uppercase tracking-[0.14em] text-slate-600">
+                  Comment
+                </label>
+
+                <textarea
+                  value={comment}
+                  onChange={(e) => setComment(e.target.value)}
+                  placeholder="Optional payment comment"
+                  rows={3}
+                  maxLength={1000}
+                  className="
+                    mt-1 w-full rounded-lg
+                    border border-white/[0.07]
+                    bg-[#0d1013]
+                    px-3 py-2.5
+                    text-[11px] text-white
+                    placeholder:text-slate-700
+                    outline-none
+                    resize-none
+                    focus:border-[#f2bd19]/50
+                  "
+                />
+
+                <p className="text-[8px] text-slate-700 mt-1">
+                  Optional. This comment will be saved with the payment.
+                </p>
+              </div>
+
+              {/* PARTIAL */}
+
+              {isPartial && (
+                <div className="rounded-lg border border-amber-400/15 bg-amber-400/[0.04] p-3 flex gap-2">
+                  <AlertCircle className="h-4 w-4 text-amber-400 shrink-0" />
+
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-semibold text-amber-300">
+                      Partial payment
+                    </p>
+
+                    <p className="text-[9px] text-slate-600 mt-0.5 leading-relaxed">
+                      This month will remain marked Partial until its remaining
+                      balance is paid.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* FULL PAYMENT */}
+
+              {amount > 0 &&
+                suggestedFullPayment > 0 &&
+                amount === suggestedFullPayment && (
+                  <div className="rounded-lg border border-emerald-400/15 bg-emerald-400/[0.04] p-3 flex gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+
+                    <div>
+                      <p className="text-[10px] font-semibold text-emerald-300">
+                        Full payment
+                      </p>
+
+                      <p className="text-[9px] text-slate-600 mt-0.5">
+                        This payment will clear the remaining balance for this
+                        month.
+                      </p>
+                    </div>
+                  </div>
+                )}
+            </div>
+          </div>
+
+          {/* FOOTER */}
+
+          <div className="shrink-0 px-4 sm:px-5 py-3 sm:py-4 border-t border-white/[0.06] flex flex-col-reverse sm:flex-row sm:justify-end gap-2 bg-[#121519]">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={saving}
+              className="
+                h-10 px-4 rounded-lg
+                border border-white/10
+                bg-white/[0.02]
+                text-xs text-slate-500
+                hover:text-white
+                transition
+              "
+            >
+              Cancel
+            </button>
+
+            <button
+              type="submit"
+              disabled={!valid || saving}
+              className="
+                h-10 px-5 rounded-lg
+                bg-[#f2bd19]
+                text-[#0b0d10]
+                text-xs font-bold
+                flex items-center justify-center gap-2
+                hover:bg-[#ffd34d]
+                disabled:opacity-40
+                disabled:cursor-not-allowed
+                transition
+              "
+            >
+              {saving ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Recording...
+                </>
+              ) : (
+                <>
+                  <Check className="h-4 w-4" />
+                  Record Payment
+                </>
+              )}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
 }
 
-function ModalFooter({ onClose, saving, submitText, disabled = false }) {
+/* ============================================================
+   INFO BOX
+============================================================ */
+
+function InfoBox({ label, value }) {
   return (
-    <div className="px-5 py-3 border-t border-white/[0.07] bg-[#0d1013] flex justify-end gap-2">
-      <button
-        type="button"
-        className="h-9 px-4 border border-white/[0.08] rounded-lg bg-white/[0.025] text-[11px] font-medium text-slate-400 hover:text-slate-200 disabled:opacity-50"
-        onClick={onClose}
-        disabled={saving}
-      >
-        Cancel
-      </button>
+    <div className="min-w-0 rounded-lg border border-white/[0.05] bg-white/[0.02] p-2.5">
+      <p className="text-[8px] uppercase tracking-wider text-slate-700">
+        {label}
+      </p>
 
-      <button
-        type="submit"
-        className="h-9 px-5 bg-[#f2bd19] hover:bg-[#e5ae08] text-[#111] rounded-lg text-[11px] font-bold flex items-center gap-2 disabled:opacity-40"
-        disabled={saving || disabled}
-      >
-        {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-
-        {submitText}
-      </button>
+      <p className="text-[10px] text-slate-300 mt-1 break-words">
+        {value || "—"}
+      </p>
     </div>
   );
 }
 
-function Field({ label, required = false, children }) {
+/* ============================================================
+   MAIN PAGE
+============================================================ */
+
+export default function Fees() {
+  const toast = useToast();
+
+  const [classes, setClasses] = useState([]);
+  const [enrollments, setEnrollments] = useState([]);
+
+  const [selectedClassId, setSelectedClassId] = useState("");
+  const [selectedEnrollment, setSelectedEnrollment] = useState(null);
+
+  const [history, setHistory] = useState(null);
+
+  const [loading, setLoading] = useState(true);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [savingPayment, setSavingPayment] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const [subjectFilter, setSubjectFilter] = useState("all");
+  const [teacherFilter, setTeacherFilter] = useState("all");
+  const [timeFilter, setTimeFilter] = useState("all");
+  const [search, setSearch] = useState("");
+
+  const [paymentModalOpen, setPaymentModalOpen] = useState(false);
+  const [paymentMonth, setPaymentMonth] = useState(null);
+
+  const [passwordConfirmOpen, setPasswordConfirmOpen] = useState(false);
+  const [pendingPayment, setPendingPayment] = useState(null);
+
+  /* ==========================================================
+     LOAD
+  ========================================================== */
+
+  async function loadData(showSpinner = true) {
+    if (showSpinner) {
+      setLoading(true);
+    }
+
+    try {
+      const [classesResponse, enrollmentsResponse] = await Promise.all([
+        api.get("/classes"),
+        api.get("/fees/enrollments"),
+      ]);
+
+      setClasses(
+        Array.isArray(classesResponse.data) ? classesResponse.data : [],
+      );
+
+      setEnrollments(
+        Array.isArray(enrollmentsResponse.data) ? enrollmentsResponse.data : [],
+      );
+    } catch (error) {
+      toast.error(error.response?.data?.error || "Failed to load payment data");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  /* ==========================================================
+     CLASS DATA
+  ========================================================== */
+
+  const activeClasses = useMemo(() => {
+    return classes
+      .filter((item) => item.is_active !== false)
+      .map((item) => {
+        const students = enrollments.filter(
+          (enrollment) => Number(enrollment.class_slot_id) === Number(item.id),
+        );
+
+        return {
+          ...item,
+          books: getClassBooks(item),
+          enrolled_count: students.length,
+        };
+      });
+  }, [classes, enrollments]);
+
+  const subjects = useMemo(() => {
+    const map = new Map();
+
+    activeClasses.forEach((item) => {
+      if (item.subject_name) {
+        map.set(item.subject_name, item.subject_name);
+      }
+    });
+
+    return [...map.values()].sort();
+  }, [activeClasses]);
+
+  const teachers = useMemo(() => {
+    const map = new Map();
+
+    activeClasses.forEach((item) => {
+      if (item.teacher_name) {
+        map.set(item.teacher_name, item.teacher_name);
+      }
+    });
+
+    return [...map.values()].sort();
+  }, [activeClasses]);
+
+  const times = useMemo(() => {
+    const map = new Map();
+
+    activeClasses.forEach((item) => {
+      const key = `${formatTime(item.start_time)}–${formatTime(item.end_time)}`;
+
+      map.set(key, key);
+    });
+
+    return [...map.values()].sort();
+  }, [activeClasses]);
+
+  const filteredClasses = useMemo(() => {
+    const q = search.trim().toLowerCase();
+
+    return activeClasses.filter((item) => {
+      if (subjectFilter !== "all" && item.subject_name !== subjectFilter) {
+        return false;
+      }
+
+      if (teacherFilter !== "all" && item.teacher_name !== teacherFilter) {
+        return false;
+      }
+
+      const timeLabel = `${formatTime(
+        item.start_time,
+      )}–${formatTime(item.end_time)}`;
+
+      if (timeFilter !== "all" && timeLabel !== timeFilter) {
+        return false;
+      }
+
+      if (q) {
+        const haystack = [
+          item.subject_name,
+          item.teacher_name,
+          item.room,
+          item.subject_code,
+          formatBooks(item.books),
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+
+        if (!haystack.includes(q)) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [activeClasses, subjectFilter, teacherFilter, timeFilter, search]);
+
+  /* ==========================================================
+     SELECT CLASS
+  ========================================================== */
+
+  function selectClass(classItem) {
+    setSelectedClassId(String(classItem.id));
+    setSelectedEnrollment(null);
+    setHistory(null);
+  }
+
+  const selectedClass = useMemo(
+    () =>
+      activeClasses.find(
+        (item) => String(item.id) === String(selectedClassId),
+      ) || null,
+    [activeClasses, selectedClassId],
+  );
+
+  const classStudents = useMemo(() => {
+    if (!selectedClassId) return [];
+
+    const selectedClassData = activeClasses.find(
+      (item) => Number(item.id) === Number(selectedClassId),
+    );
+
+    const books = selectedClassData?.books || [];
+
+    return enrollments
+      .filter((item) => Number(item.class_slot_id) === Number(selectedClassId))
+      .filter((item) => item.enrollment_active !== false)
+      .map((item) => ({
+        ...item,
+        books,
+      }))
+      .sort((a, b) =>
+        String(a.student_name || "").localeCompare(
+          String(b.student_name || ""),
+        ),
+      );
+  }, [enrollments, selectedClassId, activeClasses]);
+
+  /* ==========================================================
+     HISTORY
+  ========================================================== */
+
+  async function selectStudent(enrollment) {
+    setSelectedEnrollment(enrollment);
+    setHistory(null);
+    setLoadingHistory(true);
+
+    try {
+      const { data } = await api.get(
+        `/fees/enrollments/${enrollment.enrollment_id}/history`,
+      );
+
+      setHistory(data);
+    } catch (error) {
+      toast.error(
+        error.response?.data?.error || "Failed to load payment history",
+      );
+    } finally {
+      setLoadingHistory(false);
+    }
+  }
+
+  async function refreshHistory() {
+    if (!selectedEnrollment) return;
+
+    await selectStudent(selectedEnrollment);
+  }
+
+  /* ==========================================================
+     MONTH GRID
+  ========================================================== */
+
+  const monthCards = useMemo(() => {
+    if (!history) return [];
+
+    const today = getTodaySolar();
+
+    const currentYear = Number(history.current_solar_year) || today.year;
+
+    const currentMonth = Number(history.current_solar_month) || today.month;
+
+    const enrolledSolar =
+      parseSolarDate(history.enrollment?.enrolled_on_solar) ||
+      parseSolarDate(history.enrollment?.enrolled_on);
+
+    const existing = new Map();
+
+    (history.months || []).forEach((month) => {
+      existing.set(monthKey(month.solar_year, month.solar_month), month);
+    });
+
+    return Array.from({ length: 12 }, (_, index) => {
+      const solarMonth = index + 1;
+
+      const paidMonth = existing.get(monthKey(currentYear, solarMonth));
+
+      const status = statusForMonth({
+        year: currentYear,
+        month: solarMonth,
+        currentYear,
+        currentMonth,
+        paidMonth,
+        enrolledSolar,
+      });
+
+      return {
+        solar_year: currentYear,
+        solar_month: solarMonth,
+
+        month_days:
+          paidMonth?.month_days || getSolarMonthDays(currentYear, solarMonth),
+
+        covered_days: paidMonth?.covered_days || 0,
+
+        monthly_amount: paidMonth?.monthly_amount || null,
+
+        calculated_amount: paidMonth?.calculated_amount || null,
+
+        paid_amount: paidMonth?.paid_amount || 0,
+
+        paid_days: paidMonth?.paid_days || 0,
+
+        fee_id: paidMonth?.fee_id || null,
+
+        fee_status: paidMonth?.fee_status || null,
+
+        fee_period_id: paidMonth?.fee_period_id || null,
+
+        status,
+      };
+    });
+  }, [history]);
+
+  /* ==========================================================
+     OPEN PAYMENT
+  ========================================================== */
+
+  function openPayment(month) {
+    const payable =
+      month.status === "due" ||
+      month.status === "partial" ||
+      month.status === "upcoming";
+
+    if (!payable) {
+      return;
+    }
+
+    if (!selectedEnrollment || !history) {
+      return;
+    }
+
+    setPaymentMonth(month);
+    setPaymentModalOpen(true);
+  }
+
+  /* ==========================================================
+     SUBMIT PAYMENT
+  ========================================================== */
+
+  function requestPayment(payment) {
+    if (!selectedEnrollment) return;
+
+    setPendingPayment(payment);
+    setPasswordConfirmOpen(true);
+  }
+
+  async function confirmPayment() {
+    if (!selectedEnrollment || !pendingPayment) {
+      return;
+    }
+
+    const { solarYear, solarMonth, monthlyAmount, paymentAmount, comment } =
+      pendingPayment;
+
+    setSavingPayment(true);
+
+    try {
+      const selectedMonth = monthCards.find(
+        (month) =>
+          Number(month.solar_year) === Number(solarYear) &&
+          Number(month.solar_month) === Number(solarMonth),
+      );
+
+      if (!selectedMonth) {
+        throw new Error("Selected payment month was not found");
+      }
+
+      /*
+       * FIRST PAYMENT / NEW FEE
+       */
+      if (!selectedMonth.fee_id) {
+        const monthDays =
+          selectedMonth.month_days || getSolarMonthDays(solarYear, solarMonth);
+
+        const fromSolarDate = formatSolarDate(solarYear, solarMonth, 1);
+
+        const toSolarDate = formatSolarDate(solarYear, solarMonth, monthDays);
+
+        await api.post("/fees", {
+          student_id: selectedEnrollment.student_id,
+
+          enrollment_id: selectedEnrollment.enrollment_id,
+
+          from_solar_date: fromSolarDate,
+          to_solar_date: toSolarDate,
+
+          monthly_amounts: [
+            {
+              solar_year: solarYear,
+              solar_month: solarMonth,
+              monthly_amount: monthlyAmount,
+            },
+          ],
+
+          initial_paid_amount: paymentAmount,
+
+          initial_payment_solar_date: null,
+
+          initial_payment_comment: comment || null,
+
+          academic_year: null,
+          description: null,
+        });
+      } else {
+        /*
+         * EXISTING FEE
+         */
+        await api.post(`/fees/${selectedMonth.fee_id}/payment`, {
+          amount: paymentAmount,
+          comment: comment || null,
+        });
+      }
+
+      toast.success("Payment recorded successfully");
+
+      setPasswordConfirmOpen(false);
+      setPaymentModalOpen(false);
+      setPendingPayment(null);
+      setPaymentMonth(null);
+
+      await loadData(false);
+
+      if (selectedEnrollment) {
+        setLoadingHistory(true);
+
+        try {
+          const { data } = await api.get(
+            `/fees/enrollments/${selectedEnrollment.enrollment_id}/history`,
+          );
+
+          setHistory(data);
+        } finally {
+          setLoadingHistory(false);
+        }
+      }
+    } catch (error) {
+      toast.error(
+        error.response?.data?.error ||
+          error.message ||
+          "Failed to record payment",
+      );
+    } finally {
+      setSavingPayment(false);
+    }
+  }
+
+  /* ==========================================================
+     REFRESH
+  ========================================================== */
+
+  async function refresh() {
+    setRefreshing(true);
+
+    await loadData(false);
+
+    if (selectedEnrollment) {
+      await selectStudent(selectedEnrollment);
+    }
+  }
+
+  /* ==========================================================
+     RENDER
+  ========================================================== */
+
+  return (
+    <div className="min-h-full bg-[#0b0d10] text-slate-100 p-3 sm:p-5 lg:p-6">
+      <div className="max-w-[1600px] mx-auto space-y-4 sm:space-y-5">
+        {/* HEADER */}
+
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 shrink-0 rounded-xl bg-[#f2bd19]/10 border border-[#f2bd19]/20 grid place-items-center">
+                <Wallet className="h-5 w-5 text-[#f2bd19]" />
+              </div>
+
+              <div className="min-w-0">
+                <h2 className="text-xl font-bold tracking-tight text-white">
+                  Fees & Payments
+                </h2>
+
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Manage payments directly from classes, time slots, and
+                  enrolled students
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={refresh}
+            disabled={refreshing}
+            className="
+              h-10 px-3 rounded-lg
+              border border-white/10
+              bg-[#121519]
+              text-slate-400
+              hover:text-white
+              hover:bg-white/[0.04]
+              transition
+              flex items-center justify-center gap-2
+              text-xs
+              w-full sm:w-auto
+            "
+          >
+            <RefreshCw
+              className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`}
+            />
+            Refresh
+          </button>
+        </div>
+
+        {/* STEP 01 */}
+
+        <section className="rounded-2xl border border-white/[0.06] bg-[#121519] overflow-hidden">
+          <div className="px-4 sm:px-5 py-4 border-b border-white/[0.06]">
+            <div className="flex items-start gap-3">
+              <span className="h-7 w-7 shrink-0 rounded-lg bg-[#f2bd19]/10 text-[#f2bd19] grid place-items-center text-[10px] font-bold">
+                01
+              </span>
+
+              <div>
+                <h3 className="text-sm font-bold text-white">Choose Class</h3>
+
+                <p className="text-[10px] text-slate-600 mt-1">
+                  Select the exact subject, level/book, teacher, and time slot
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="p-4 sm:p-5 space-y-4">
+            {/* FILTERS */}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+              <FilterSelect
+                label="Subject"
+                value={subjectFilter}
+                onChange={setSubjectFilter}
+                options={subjects}
+              />
+
+              <FilterSelect
+                label="Teacher"
+                value={teacherFilter}
+                onChange={setTeacherFilter}
+                options={teachers}
+              />
+
+              <FilterSelect
+                label="Time"
+                value={timeFilter}
+                onChange={setTimeFilter}
+                options={times}
+              />
+
+              <div>
+                <label className="text-[9px] uppercase tracking-[0.14em] text-slate-700">
+                  Search
+                </label>
+
+                <div className="mt-1 relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-700" />
+
+                  <input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Subject, teacher, level or room"
+                    className="
+                      h-10 w-full rounded-lg
+                      border border-white/[0.07]
+                      bg-[#0d1013]
+                      pl-9 pr-3
+                      text-[11px] text-white
+                      outline-none
+                      focus:border-[#f2bd19]/50
+                    "
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <p className="text-[10px] text-slate-700">
+                Showing{" "}
+                <span className="text-slate-400 font-semibold">
+                  {filteredClasses.length}
+                </span>{" "}
+                of{" "}
+                <span className="text-slate-400 font-semibold">
+                  {activeClasses.length}
+                </span>
+              </p>
+
+              <p className="text-[10px] text-slate-700">
+                {activeClasses.length} active classes
+              </p>
+            </div>
+
+            {/* CLASS GRID */}
+
+            {loading ? (
+              <div className="py-16 grid place-items-center">
+                <Loader2 className="h-6 w-6 text-[#f2bd19] animate-spin" />
+              </div>
+            ) : filteredClasses.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-white/[0.07] py-12 text-center">
+                <p className="text-xs text-slate-500">
+                  No matching classes found.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                {filteredClasses.map((item) => {
+                  const selected = String(item.id) === String(selectedClassId);
+
+                  return (
+                    <button
+                      type="button"
+                      key={item.id}
+                      onClick={() => selectClass(item)}
+                      className={`
+                        rounded-xl border p-4 text-left
+                        transition-all min-w-0
+                        ${
+                          selected
+                            ? "border-[#f2bd19]/40 bg-[#f2bd19]/[0.06] ring-1 ring-[#f2bd19]/20"
+                            : "border-white/[0.06] bg-[#0d1013] hover:border-white/[0.12] hover:bg-white/[0.02]"
+                        }
+                      `}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-bold text-white truncate">
+                            {item.subject_name || "Unknown Subject"}
+                          </p>
+
+                          <p className="text-[10px] text-slate-500 mt-1 truncate">
+                            {item.teacher_name || "Unknown Teacher"}
+                          </p>
+                        </div>
+
+                        {selected && (
+                          <CheckCircle2 className="h-4 w-4 shrink-0 text-[#f2bd19]" />
+                        )}
+                      </div>
+
+                      <div className="mt-3 rounded-lg border border-white/[0.05] bg-white/[0.02] px-2.5 py-2">
+                        <p className="text-[8px] uppercase tracking-wider text-slate-700">
+                          Level / Book
+                        </p>
+
+                        <p className="text-[10px] text-slate-300 mt-1 break-words">
+                          {formatBooks(item.books)}
+                        </p>
+                      </div>
+
+                      <div className="mt-3 flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-1.5 text-[10px] text-slate-500 min-w-0">
+                          <Clock3 className="h-3.5 w-3.5 shrink-0" />
+
+                          <span className="truncate">
+                            {formatTime(item.start_time)}–
+                            {formatTime(item.end_time)}
+                          </span>
+                        </div>
+
+                        <span className="shrink-0 text-[9px] rounded-full border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-slate-600">
+                          {item.enrolled_count || 0} enrolled
+                        </span>
+                      </div>
+
+                      {item.room && (
+                        <p className="text-[9px] text-slate-700 mt-3 truncate">
+                          {item.room}
+                        </p>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* STEP 02 */}
+
+        <section className="rounded-2xl border border-white/[0.06] bg-[#121519] overflow-hidden">
+          <div className="px-4 sm:px-5 py-4 border-b border-white/[0.06]">
+            <div className="flex items-start gap-3">
+              <span className="h-7 w-7 shrink-0 rounded-lg bg-[#f2bd19]/10 text-[#f2bd19] grid place-items-center text-[10px] font-bold">
+                02
+              </span>
+
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-white">Students</h3>
+
+                {selectedClass ? (
+                  <>
+                    <p className="text-[10px] text-slate-600 mt-1 truncate">
+                      {selectedClass.subject_name}
+                      {" • "}
+                      {formatBooks(selectedClass.books)}
+                      {" • "}
+                      {selectedClass.teacher_name}
+                      {" • "}
+                      {formatTime(selectedClass.start_time)}–
+                      {formatTime(selectedClass.end_time)}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-[10px] text-slate-600 mt-1">
+                    Select a class above to view enrolled students
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="p-4 sm:p-5">
+            {!selectedClass ? (
+              <div className="py-10 text-center">
+                <UserRound className="h-7 w-7 text-slate-800 mx-auto" />
+
+                <p className="text-xs text-slate-600 mt-3">
+                  Select a class to see its students.
+                </p>
+              </div>
+            ) : classStudents.length === 0 ? (
+              <div className="py-10 text-center">
+                <p className="text-xs text-slate-600">
+                  No students are enrolled in this time slot.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-[10px] text-slate-600">
+                    {classStudents.length}{" "}
+                    {classStudents.length === 1 ? "student" : "students"}
+                  </p>
+                </div>
+
+                {classStudents.map((student) => {
+                  const selected =
+                    selectedEnrollment?.enrollment_id === student.enrollment_id;
+
+                  return (
+                    <button
+                      type="button"
+                      key={student.enrollment_id}
+                      onClick={() => selectStudent(student)}
+                      className={`
+                        w-full rounded-xl border p-3 sm:p-4
+                        text-left transition-all
+                        ${
+                          selected
+                            ? "border-[#f2bd19]/35 bg-[#f2bd19]/[0.05]"
+                            : "border-white/[0.05] bg-[#0d1013] hover:border-white/[0.10]"
+                        }
+                      `}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="h-10 w-10 shrink-0 rounded-xl bg-white/[0.04] border border-white/[0.06] grid place-items-center">
+                          <UserRound className="h-4 w-4 text-slate-600" />
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-semibold text-white truncate">
+                            {student.student_name}
+                          </p>
+
+                          <p className="text-[10px] text-slate-600 mt-1 truncate">
+                            Father:{" "}
+                            <span className="text-slate-400">
+                              {student.father_name || "—"}
+                            </span>
+                          </p>
+
+                          {student.roll_number && (
+                            <p className="text-[9px] text-slate-700 mt-0.5">
+                              Roll: {student.roll_number}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="text-right shrink-0 hidden sm:block">
+                          <p className="text-[10px] text-slate-500">
+                            {student.subject_name}
+                          </p>
+
+                          <p className="text-[9px] text-slate-600 mt-1 max-w-[180px]">
+                            {formatBooks(student.books)}
+                          </p>
+
+                          <p className="text-[9px] text-slate-700 mt-1">
+                            {formatTime(student.start_time)}–
+                            {formatTime(student.end_time)}
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* PAYMENT HISTORY */}
+
+        {selectedEnrollment && (
+          <section className="rounded-2xl border border-white/[0.06] bg-[#121519] overflow-hidden">
+            <div className="px-4 sm:px-5 py-4 border-b border-white/[0.06] flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-white">
+                  Payment History
+                </h3>
+
+                <p className="text-[10px] text-slate-600 mt-1">
+                  Solar Hijri payment coverage
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={refreshHistory}
+                disabled={loadingHistory}
+                className="
+                  h-8 w-8 shrink-0 rounded-lg
+                  border border-white/[0.06]
+                  bg-white/[0.02]
+                  grid place-items-center
+                  text-slate-600
+                  hover:text-white
+                "
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${
+                    loadingHistory ? "animate-spin" : ""
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-5">
+              {loadingHistory ? (
+                <div className="py-14 grid place-items-center">
+                  <Loader2 className="h-6 w-6 text-[#f2bd19] animate-spin" />
+                </div>
+              ) : !history ? (
+                <div className="py-12 text-center">
+                  <p className="text-xs text-slate-600">
+                    Unable to load payment history.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {/* STUDENT SUMMARY */}
+
+                  <div className="rounded-xl border border-white/[0.06] bg-[#0d1013] p-4">
+                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                      <div className="min-w-0">
+                        <p className="text-base font-bold text-white truncate">
+                          {history.enrollment.student_name}
+                        </p>
+
+                        <p className="text-[10px] text-slate-500 mt-1 truncate">
+                          Father:{" "}
+                          <span className="text-slate-300">
+                            {history.enrollment.father_name || "—"}
+                          </span>
+                        </p>
+
+                        <p className="text-[10px] text-slate-600 mt-1">
+                          {history.enrollment.subject_name}
+                          {" • "}
+                          {formatBooks(selectedEnrollment.books || [])}
+                          {" • "}
+                          {history.enrollment.teacher_name}
+                          {" • "}
+                          {formatTime(history.enrollment.start_time)}–
+                          {formatTime(history.enrollment.end_time)}
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const firstPayable = monthCards.find(
+                            (month) =>
+                              month.status === "partial" ||
+                              month.status === "due" ||
+                              month.status === "upcoming",
+                          );
+
+                          if (firstPayable) {
+                            openPayment(firstPayable);
+                          } else {
+                            toast.error(
+                              "There is no month available for payment.",
+                            );
+                          }
+                        }}
+                        className="
+                          h-10 px-4 rounded-lg
+                          bg-[#f2bd19]
+                          text-[#0b0d10]
+                          text-xs font-bold
+                          flex items-center
+                          justify-center gap-2
+                          hover:bg-[#ffd34d]
+                          w-full md:w-auto
+                          shrink-0
+                        "
+                      >
+                        <CreditCard className="h-4 w-4" />
+                        Record Payment
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* LEGEND */}
+
+                  <div className="mt-5 flex flex-wrap items-center gap-3">
+                    <LegendItem dot="bg-emerald-400" label="Paid" />
+
+                    <LegendItem dot="bg-amber-400" label="Partial" />
+
+                    <LegendItem dot="bg-red-400" label="Payment Due" />
+
+                    <LegendItem dot="bg-blue-400" label="Upcoming" />
+
+                    <LegendItem dot="bg-slate-800" label="Not Started" />
+                  </div>
+
+                  {/* 12 MONTHS */}
+
+                  <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                    {monthCards.map((month) => (
+                      <MonthStatusCard
+                        key={`${month.solar_year}-${month.solar_month}`}
+                        month={month}
+                        status={month.status}
+                        selected={
+                          paymentMonth &&
+                          Number(paymentMonth.solar_month) ===
+                            Number(month.solar_month)
+                        }
+                        onClick={openPayment}
+                      />
+                    ))}
+                  </div>
+
+                  {/* TRANSACTIONS */}
+
+                  <div className="mt-6">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 mb-3">
+                      <p className="text-[9px] uppercase tracking-[0.15em] text-slate-700">
+                        Transactions
+                      </p>
+
+                      <p className="text-[9px] text-slate-700">
+                        {(history.payments || []).length} payments
+                      </p>
+                    </div>
+
+                    {(history.payments || []).length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-white/[0.06] py-8 text-center">
+                        <p className="text-xs text-slate-700">
+                          No payment transactions yet.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {history.payments.map((payment) => (
+                          <div
+                            key={payment.payment_id}
+                            className="
+                              rounded-xl border
+                              border-white/[0.05]
+                              bg-[#0d1013]
+                              px-3 sm:px-4 py-3
+                            "
+                          >
+                            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="text-xs font-semibold text-white">
+                                  {formatMoney(payment.amount)}
+                                </p>
+
+                                <p className="text-[9px] text-slate-600 mt-1 truncate">
+                                  {payment.receipt_number || "Payment"}
+                                </p>
+                              </div>
+
+                              <div className="sm:text-right">
+                                <p className="text-[10px] text-slate-400">
+                                  {payment.payment_solar_date ||
+                                    payment.payment_date ||
+                                    "—"}
+                                </p>
+
+                                <p className="text-[9px] text-slate-700 mt-1">
+                                  {payment.covered_days || 0} covered days
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                              <TransactionInfo
+                                label="Payment Amount"
+                                value={formatMoney(payment.amount)}
+                              />
+
+                              <TransactionInfo
+                                label="Allocated"
+                                value={formatMoney(payment.allocated_amount)}
+                              />
+
+                              <TransactionInfo
+                                label="Covered Days"
+                                value={`${Number(
+                                  payment.covered_days || 0,
+                                )} days`}
+                              />
+                            </div>
+
+                            {payment.from_solar_date ||
+                            payment.to_solar_date ||
+                            payment.coverage_from_solar_date ||
+                            payment.coverage_to_solar_date ? (
+                              <div className="mt-2 rounded-lg border border-white/[0.04] bg-white/[0.015] px-3 py-2">
+                                <p className="text-[8px] uppercase tracking-wider text-slate-700">
+                                  Coverage
+                                </p>
+
+                                <p className="text-[10px] text-slate-400 mt-1">
+                                  {payment.from_solar_date ||
+                                    payment.coverage_from_solar_date ||
+                                    "—"}{" "}
+                                  →{" "}
+                                  {payment.to_solar_date ||
+                                    payment.coverage_to_solar_date ||
+                                    "—"}
+                                </p>
+                              </div>
+                            ) : null}
+
+                            {payment.comment ? (
+                              <div className="mt-2 rounded-lg border border-[#f2bd19]/10 bg-[#f2bd19]/[0.025] px-3 py-2">
+                                <p className="text-[8px] uppercase tracking-wider text-slate-700">
+                                  Comment
+                                </p>
+
+                                <p className="text-[10px] text-slate-400 mt-1 whitespace-pre-wrap break-words">
+                                  {payment.comment}
+                                </p>
+                              </div>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          </section>
+        )}
+      </div>
+
+      {/* PAYMENT MODAL */}
+
+      <PaymentModal
+        open={paymentModalOpen}
+        enrollment={
+          history
+            ? {
+                ...history.enrollment,
+                books: selectedEnrollment?.books || [],
+                current_solar_date: getTodaySolar().formatted,
+              }
+            : selectedEnrollment
+        }
+        month={paymentMonth}
+        onClose={() => {
+          if (savingPayment) return;
+
+          setPaymentModalOpen(false);
+          setPaymentMonth(null);
+        }}
+        onSubmit={requestPayment}
+        saving={savingPayment}
+      />
+
+      {/* PASSWORD CONFIRMATION */}
+
+      <div className="fixed inset-0 z-[9999] pointer-events-none">
+        <div className="pointer-events-auto">
+          <PasswordConfirmModal
+            open={passwordConfirmOpen}
+            title="Confirm payment"
+            description={
+              pendingPayment
+                ? `Enter your password to record ${formatMoney(
+                    pendingPayment.paymentAmount,
+                  )} for ${monthName(pendingPayment.solarMonth)}.`
+                : "Enter your password to continue."
+            }
+            confirmLabel="Verify & Record Payment"
+            onVerified={confirmPayment}
+            onCancel={() => {
+              if (savingPayment) return;
+
+              setPasswordConfirmOpen(false);
+              setPendingPayment(null);
+            }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   TRANSACTION INFO
+============================================================ */
+
+function TransactionInfo({ label, value }) {
+  return (
+    <div className="rounded-lg border border-white/[0.04] bg-white/[0.015] p-2.5">
+      <p className="text-[8px] uppercase tracking-wider text-slate-700">
+        {label}
+      </p>
+
+      <p className="text-[10px] text-slate-400 mt-1">{value || "—"}</p>
+    </div>
+  );
+}
+
+/* ============================================================
+   FILTER SELECT
+============================================================ */
+
+function FilterSelect({ label, value, onChange, options }) {
   return (
     <div>
-      <label className="block text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500 mb-2">
+      <label className="text-[9px] uppercase tracking-[0.14em] text-slate-700">
         {label}
-
-        {required && <span className="text-[#f2bd19] ml-1">*</span>}
       </label>
 
-      {children}
+      <div className="relative mt-1">
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="
+            h-10 w-full appearance-none
+            rounded-lg
+            border border-white/[0.07]
+            bg-[#0d1013]
+            px-3 pr-8
+            text-[11px] text-slate-300
+            outline-none
+            focus:border-[#f2bd19]/50
+          "
+        >
+          <option value="all">All {label.toLowerCase()}s</option>
+
+          {options.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+
+        <ChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-700" />
+      </div>
     </div>
   );
 }
 
-/* =========================================================
-   PERIOD CALCULATION
-========================================================= */
-
-function buildPeriodPreview(form) {
-  let from;
-  let to;
-
-  if (form.period_mode === "month") {
-    const year = Number(form.solar_year);
-
-    const month = Number(form.solar_month);
-
-    if (!Number.isInteger(year) || month < 1 || month > 12) {
-      return invalidPeriod();
-    }
-
-    const days = solarMonthDays(year, month);
-
-    from = {
-      year,
-      month,
-      day: 1,
-    };
-
-    to = {
-      year,
-      month,
-      day: days,
-    };
-  } else {
-    from = parseSolarInput(form.from_solar_date);
-
-    to = parseSolarInput(form.to_solar_date);
-
-    if (!from || !to) {
-      return invalidPeriod();
-    }
-  }
-
-  if (compareSolarDates(from, to) > 0) {
-    return invalidPeriod();
-  }
-
-  const months = [];
-
-  let year = from.year;
-  let month = from.month;
-
-  while (year < to.year || (year === to.year && month <= to.month)) {
-    const monthDays = solarMonthDays(year, month);
-
-    const rangeStart =
-      year === from.year && month === from.month ? from.day : 1;
-
-    const rangeEnd =
-      year === to.year && month === to.month ? to.day : monthDays;
-
-    const coveredDays = rangeEnd - rangeStart + 1;
-
-    if (coveredDays > 0) {
-      const key = `${year}-${month}`;
-
-      const monthlyAmount = Number(form.monthly_amounts?.[key] || 0);
-
-      const calculatedAmount =
-        monthlyAmount > 0
-          ? Number(((monthlyAmount / monthDays) * coveredDays).toFixed(2))
-          : 0;
-
-      months.push({
-        key,
-        year,
-        month,
-        month_days: monthDays,
-        covered_days: coveredDays,
-        monthly_amount: monthlyAmount,
-        calculated_amount: calculatedAmount,
-      });
-    }
-
-    month++;
-
-    if (month > 12) {
-      month = 1;
-      year++;
-    }
-  }
-
-  const coveredDays = months.reduce(
-    (sum, month) => sum + month.covered_days,
-    0,
-  );
-
-  const totalAmount = Number(
-    months.reduce((sum, month) => sum + month.calculated_amount, 0).toFixed(2),
-  );
-
-  return {
-    valid:
-      months.length > 0 && months.every((month) => month.monthly_amount > 0),
-
-    covered_days: coveredDays,
-
-    total_amount: totalAmount,
-
-    from_solar_date: formatSolarDate(from),
-
-    to_solar_date: formatSolarDate(to),
-
-    months,
-  };
-}
-
-function invalidPeriod() {
-  return {
-    valid: false,
-    covered_days: 0,
-    total_amount: 0,
-    from_solar_date: "",
-    to_solar_date: "",
-    months: [],
-  };
-}
-
-/* =========================================================
-   SOLAR DATE HELPERS
-========================================================= */
-
-function parseSolarInput(value) {
-  const match = String(value || "")
-    .trim()
-    .match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
-
-  if (!match) return null;
-
-  const year = Number(match[1]);
-
-  const month = Number(match[2]);
-
-  const day = Number(match[3]);
-
-  if (month < 1 || month > 12 || day < 1 || day > solarMonthDays(year, month)) {
-    return null;
-  }
-
-  return {
-    year,
-    month,
-    day,
-  };
-}
-
-function formatSolarDate(date) {
-  return `${date.year}/${String(date.month).padStart(2, "0")}/${String(
-    date.day,
-  ).padStart(2, "0")}`;
-}
-
-function compareSolarDates(a, b) {
-  if (a.year !== b.year) {
-    return a.year - b.year;
-  }
-
-  if (a.month !== b.month) {
-    return a.month - b.month;
-  }
-
-  return a.day - b.day;
-}
-
-function solarMonthDays(year, month) {
-  if (month >= 1 && month <= 6) {
-    return 31;
-  }
-
-  if (month >= 7 && month <= 11) {
-    return 30;
-  }
-
-  /*
-    Solar Hijri month 12 can be
-    29 or 30 depending on the year.
-
-    The backend is authoritative.
-    The frontend preview uses 29
-    until the actual backend result
-    is available.
-  */
-
-  return 29;
-}
-
-/* =========================================================
-   DATABASE DATE DISPLAY
-========================================================= */
-
-function formatDatabaseDate(value) {
-  if (!value) return "-";
-
-  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
-
-  if (match) {
-    return `${match[1]}-${match[2]}-${match[3]}`;
-  }
-
-  return String(value);
-}
-
-/* =========================================================
-   CURRENT SOLAR DATE
-========================================================= */
-
-function getCurrentSolarYear() {
-  /*
-    Initial UI value only.
-    Backend remains authoritative.
-  */
-
-  const now = new Date();
-
-  return now.getFullYear() - 621;
-}
-
-function getCurrentSolarMonth() {
-  const now = new Date();
-
-  /*
-    Current month around the
-    September period in Afghanistan.
-    This is only the initial UI value.
-  */
-
-  if (now.getMonth() >= 2 && now.getMonth() <= 8) {
-    return 6;
-  }
-
-  return 1;
-}
-
-/* =========================================================
-   SOLAR MONTH NAMES
-========================================================= */
-
-const SOLAR_MONTHS = [
-  {
-    value: 1,
-    name: "Hamal",
-  },
-  {
-    value: 2,
-    name: "Sawr",
-  },
-  {
-    value: 3,
-    name: "Jawza",
-  },
-  {
-    value: 4,
-    name: "Saratan",
-  },
-  {
-    value: 5,
-    name: "Asad",
-  },
-  {
-    value: 6,
-    name: "Sunbula",
-  },
-  {
-    value: 7,
-    name: "Mizan",
-  },
-  {
-    value: 8,
-    name: "Aqrab",
-  },
-  {
-    value: 9,
-    name: "Qaws",
-  },
-  {
-    value: 10,
-    name: "Jadi",
-  },
-  {
-    value: 11,
-    name: "Dalw",
-  },
-  {
-    value: 12,
-    name: "Hut",
-  },
-];
-
-function getSolarMonthName(month) {
+/* ============================================================
+   LEGEND
+============================================================ */
+
+function LegendItem({ dot, label }) {
   return (
-    SOLAR_MONTHS.find((item) => item.value === Number(month))?.name ||
-    `Month ${month}`
+    <div className="flex items-center gap-1.5">
+      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+
+      <span className="text-[9px] text-slate-600">{label}</span>
+    </div>
   );
-}
-
-/* =========================================================
-   MONEY / TIME
-========================================================= */
-
-function formatAmount(value) {
-  return Number(value || 0).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-}
-
-function formatTime(value) {
-  if (!value) return "-";
-
-  const match = String(value).match(/^(\d{1,2}):(\d{2})/);
-
-  if (!match) {
-    return String(value);
-  }
-
-  let hour = Number(match[1]);
-
-  const minute = match[2];
-
-  const suffix = hour >= 12 ? "PM" : "AM";
-
-  hour %= 12;
-
-  if (hour === 0) {
-    hour = 12;
-  }
-
-  return `${hour}:${minute} ${suffix}`;
-}
-
-/* =========================================================
-   SMALL ERROR HELPER
-========================================================= */
-
-function toastEnrollmentError(message) {
-  /*
-    Kept outside the toast context so
-    the enrollment loader remains simple.
-    The native alert is intentionally
-    delayed so it does not interrupt the
-    React state update.
-  */
-
-  window.setTimeout(() => {
-    window.alert(message);
-  }, 0);
 }

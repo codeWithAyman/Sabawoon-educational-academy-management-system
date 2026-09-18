@@ -1,27 +1,127 @@
 const express = require("express");
 const { query, pool } = require("../db/pool");
 const { authRequired, requireRoles } = require("../middleware/auth");
-const crypto = require("crypto");
+
+const {
+  dateToJalaali,
+  getJalaaliMonthDays,
+  formatSolarDate,
+} = require("../utils/solarDate");
 
 const router = express.Router();
 
-/*
-  STUDENTS
-  ----------
-  Students are records only.
-  They do NOT have login accounts.
+/* =========================================================
+   HELPERS
+========================================================= */
 
-  Roles:
-  - admin: full CRUD
-  - staff: full CRUD
-  - teacher: view only
-*/
+function isValidPositiveInteger(value) {
+  return Number.isInteger(Number(value)) && Number(value) > 0;
+}
+
+function getAfghanistanTodaySolar() {
+  const now = new Date();
+
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kabul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+
+  const result = {};
+
+  for (const part of parts) {
+    if (part.type !== "literal") {
+      result[part.type] = part.value;
+    }
+  }
+
+  const gregorian = new Date(
+    Date.UTC(Number(result.year), Number(result.month) - 1, Number(result.day)),
+  );
+
+  const solar = dateToJalaali(gregorian);
+
+  return {
+    year: solar.jy,
+    month: solar.jm,
+    day: solar.jd,
+    value: formatSolarDate(solar.jy, solar.jm, solar.jd),
+  };
+}
+
+/*
+ * HTML <input type="date"> sends Gregorian YYYY-MM-DD.
+ * Convert that date-only value to Solar Hijri.
+ */
+function gregorianDateToSolar(value) {
+  if (!value) {
+    return getAfghanistanTodaySolar();
+  }
+
+  const raw = String(value).trim();
+
+  const match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+
+  if (!match) {
+    throw new Error("Invalid payment date");
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+
+  const date = new Date(Date.UTC(year, month - 1, day));
+
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() + 1 !== month ||
+    date.getUTCDate() !== day
+  ) {
+    throw new Error("Invalid payment date");
+  }
+
+  const solar = dateToJalaali(date);
+
+  return {
+    year: solar.jy,
+    month: solar.jm,
+    day: solar.jd,
+    value: formatSolarDate(solar.jy, solar.jm, solar.jd),
+  };
+}
+
+/*
+ * Build a complete Solar month period.
+ *
+ * Example:
+ * Gregorian payment date 2026-09-18
+ * -> Solar month containing that date
+ * -> period becomes Solar 1405/month/01 through month/monthDays
+ */
+function buildMonthlyPeriodFromGregorianDate(paymentDate, monthlyAmount) {
+  const solar = gregorianDateToSolar(paymentDate);
+
+  const monthDays = getJalaaliMonthDays(solar.year, solar.month);
+
+  return {
+    from_solar_date: formatSolarDate(solar.year, solar.month, 1),
+    to_solar_date: formatSolarDate(solar.year, solar.month, monthDays),
+    monthly_amounts: [
+      {
+        solar_year: solar.year,
+        solar_month: solar.month,
+        monthly_amount: Number(monthlyAmount),
+      },
+    ],
+  };
+}
 
 /* =========================================================
    GET /api/students
    Get all students + active class enrollments
-   Supports search
-   ========================================================= */
+========================================================= */
+
 router.get("/", authRequired, async (req, res, next) => {
   try {
     const search = String(req.query.search || "").trim();
@@ -47,16 +147,38 @@ router.get("/", authRequired, async (req, res, next) => {
             json_build_object(
               'id', cs.id,
               'class_slot_id', cs.id,
+
               'subject_id', sub.id,
               'subject_name', sub.name,
               'subject_code', sub.code,
+
               'teacher_id', cs.teacher_id,
               'teacher_name', t.full_name,
+
               'start_time', cs.start_time,
               'end_time', cs.end_time,
+
               'enrollment_id', se.id,
               'enrolled_on', se.enrolled_on,
-              'is_active', se.is_active
+              'is_active', se.is_active,
+
+              'books',
+                COALESCE(
+                  (
+                    SELECT json_agg(
+                      json_build_object(
+                        'id', sb.id,
+                        'name', sb.name
+                      )
+                      ORDER BY sb.name
+                    )
+                    FROM class_slot_books csb
+                    JOIN subject_books sb
+                      ON sb.id = csb.book_id
+                    WHERE csb.class_slot_id = cs.id
+                  ),
+                  '[]'::json
+                )
             )
             ORDER BY cs.start_time, sub.name
           ) FILTER (WHERE cs.id IS NOT NULL),
@@ -100,8 +222,8 @@ router.get("/", authRequired, async (req, res, next) => {
 
 /* =========================================================
    GET /api/students/:id
-   Get one student
-   ========================================================= */
+========================================================= */
+
 router.get("/:id([0-9]+)", authRequired, async (req, res, next) => {
   try {
     const result = await query(
@@ -139,8 +261,8 @@ router.get("/:id([0-9]+)", authRequired, async (req, res, next) => {
 
 /* =========================================================
    GET /api/students/:id/classes
-   Get student's active class slots
-   ========================================================= */
+========================================================= */
+
 router.get("/:id([0-9]+)/classes", authRequired, async (req, res, next) => {
   try {
     const result = await query(
@@ -160,7 +282,24 @@ router.get("/:id([0-9]+)/classes", authRequired, async (req, res, next) => {
         cs.end_time,
 
         se.enrolled_on,
-        se.is_active
+        se.is_active,
+
+        COALESCE(
+          (
+            SELECT json_agg(
+              json_build_object(
+                'id', sb.id,
+                'name', sb.name
+              )
+              ORDER BY sb.name
+            )
+            FROM class_slot_books csb
+            JOIN subject_books sb
+              ON sb.id = csb.book_id
+            WHERE csb.class_slot_id = cs.id
+          ),
+          '[]'::json
+        ) AS books
 
       FROM student_enrollments se
 
@@ -192,54 +331,20 @@ router.get("/:id([0-9]+)/classes", authRequired, async (req, res, next) => {
 /* =========================================================
    POST /api/students/create-complete
 
+   Complete enrollment endpoint.
+
    Creates:
-
    1. Student
-   2. All selected class enrollments
-   3. One fee per selected subject
-   4. Optional payment for each subject
+   2. Class enrollments
 
-   EVERYTHING happens inside ONE PostgreSQL transaction.
+   Fee creation itself is intentionally handled by the current
+   /fees API because that API owns the current period/month/
+   allocation/payment rules.
 
-   If anything fails:
-   - student is rolled back
-   - enrollments are rolled back
-   - fees are rolled back
-   - payments are rolled back
+   This endpoint is kept for compatibility with the existing
+   application.
+========================================================= */
 
-   Expected body:
-
-   {
-     student: {
-       full_name,
-       phone,
-       roll_number,
-       dob,
-       gender,
-       blood_group,
-       address,
-       guardian_name,
-       guardian_phone,
-       guardian_email,
-       admission_date
-     },
-
-     class_slot_ids: [1, 2, 3],
-
-     payments: [
-       {
-         subject_id: 1,
-         paid_amount: 500,
-         payment_date: "2026-09-16",
-         description: "Student enrollment"
-       }
-     ]
-   }
-
-   IMPORTANT:
-   total fee amounts are NEVER trusted from the frontend.
-   They are taken from subject_fee_config.
-   ========================================================= */
 router.post(
   "/create-complete",
   authRequired,
@@ -248,11 +353,7 @@ router.post(
     const client = await pool.connect();
 
     try {
-      const {
-        student = {},
-        class_slot_ids = [],
-        payments = [],
-      } = req.body || {};
+      const { student = {}, class_slot_ids = [] } = req.body || {};
 
       const {
         full_name,
@@ -280,26 +381,14 @@ router.post(
         });
       }
 
-      if (!Array.isArray(payments)) {
-        return res.status(400).json({
-          error: "payments must be an array",
-        });
-      }
-
-      /*
-        Remove duplicate class slot IDs.
-      */
       const uniqueClassSlotIds = [
         ...new Set(
           class_slot_ids
-            .map((id) => Number(id))
+            .map(Number)
             .filter((id) => Number.isInteger(id) && id > 0),
         ),
       ];
 
-      /*
-        Validate that the supplied IDs were actually valid numbers.
-      */
       if (
         class_slot_ids.some(
           (id) => !Number.isInteger(Number(id)) || Number(id) <= 0,
@@ -310,210 +399,49 @@ router.post(
         });
       }
 
-      /*
-        Normalize payment information.
-      */
-      const normalizedPayments = payments.map((payment) => ({
-        subject_id: Number(payment?.subject_id),
-        paid_amount:
-          payment?.paid_amount === undefined ||
-          payment?.paid_amount === null ||
-          payment?.paid_amount === ""
-            ? 0
-            : Number(payment.paid_amount),
-        payment_date:
-          payment?.payment_date || new Date().toISOString().slice(0, 10),
-        description: payment?.description
-          ? String(payment.description).trim()
-          : "Student enrollment",
-      }));
-
-      /*
-        Validate payment values.
-      */
-      for (const payment of normalizedPayments) {
-        if (!Number.isInteger(payment.subject_id) || payment.subject_id <= 0) {
-          return res.status(400).json({
-            error: "Invalid payment subject",
-          });
-        }
-
-        if (!Number.isFinite(payment.paid_amount) || payment.paid_amount < 0) {
-          return res.status(400).json({
-            error: "Payment amount cannot be negative",
-          });
-        }
-      }
-
-      /*
-        A subject should appear only once in the payment list.
-      */
-      const paymentSubjectIds = normalizedPayments.map(
-        (payment) => payment.subject_id,
-      );
-
-      if (new Set(paymentSubjectIds).size !== paymentSubjectIds.length) {
-        return res.status(400).json({
-          error: "Each subject can only have one payment entry",
-        });
-      }
-
       await client.query("BEGIN");
 
-      /*
-        ---------------------------------------------------------
-        1. VALIDATE CLASS SLOTS
-        ---------------------------------------------------------
-      */
+      const classSlotsResult = await client.query(
+        `
+        SELECT
+          cs.id,
+          cs.subject_id,
+          cs.teacher_id,
+          cs.start_time,
+          cs.end_time,
 
-      let classSlots = [];
+          sub.name AS subject_name,
 
-      if (uniqueClassSlotIds.length) {
-        const classSlotsResult = await client.query(
-          `
-          SELECT
-            cs.id,
-            cs.subject_id,
-            cs.teacher_id,
-            cs.start_time,
-            cs.end_time,
+          t.full_name AS teacher_name
 
-            sub.name AS subject_name,
+        FROM class_slots cs
 
-            t.full_name AS teacher_name
+        JOIN subjects sub
+          ON sub.id = cs.subject_id
 
-          FROM class_slots cs
+        JOIN teachers t
+          ON t.id = cs.teacher_id
 
-          JOIN subjects sub
-            ON sub.id = cs.subject_id
+        WHERE cs.id = ANY($1::integer[])
+          AND cs.is_active = TRUE
 
-          JOIN teachers t
-            ON t.id = cs.teacher_id
-
-          WHERE cs.id = ANY($1::integer[])
-            AND cs.is_active = TRUE
-
-          ORDER BY
-            sub.name ASC,
-            cs.start_time ASC
-          `,
-          [uniqueClassSlotIds],
-        );
-
-        classSlots = classSlotsResult.rows;
-
-        if (classSlots.length !== uniqueClassSlotIds.length) {
-          await client.query("ROLLBACK");
-
-          return res.status(400).json({
-            error:
-              "One or more selected class slots do not exist or are inactive",
-          });
-        }
-      }
-
-      /*
-        ---------------------------------------------------------
-        2. DETERMINE UNIQUE SUBJECTS
-        ---------------------------------------------------------
-      */
-
-      const subjectIds = [
-        ...new Set(classSlots.map((slot) => Number(slot.subject_id))),
-      ];
-
-      /*
-        If classes were selected, every selected subject must have
-        a backend fee configuration.
-      */
-      let feeConfigs = [];
-
-      if (subjectIds.length) {
-        const feeConfigResult = await client.query(
-          `
-          SELECT
-            sfc.subject_id,
-            sfc.amount,
-            s.name AS subject_name
-
-          FROM subject_fee_config sfc
-
-          JOIN subjects s
-            ON s.id = sfc.subject_id
-
-          WHERE sfc.subject_id = ANY($1::integer[])
-          `,
-          [subjectIds],
-        );
-
-        feeConfigs = feeConfigResult.rows;
-
-        const configuredSubjectIds = new Set(
-          feeConfigs.map((row) => Number(row.subject_id)),
-        );
-
-        const missingFeeSubjects = subjectIds.filter(
-          (subjectId) => !configuredSubjectIds.has(Number(subjectId)),
-        );
-
-        if (missingFeeSubjects.length) {
-          await client.query("ROLLBACK");
-
-          return res.status(400).json({
-            error:
-              "Every selected subject must have a fee configuration before the student can be enrolled",
-            subject_ids: missingFeeSubjects,
-          });
-        }
-      }
-
-      /*
-        ---------------------------------------------------------
-        3. VALIDATE PAYMENT SUBJECTS
-        ---------------------------------------------------------
-      */
-
-      const selectedSubjectSet = new Set(subjectIds);
-
-      for (const payment of normalizedPayments) {
-        if (!selectedSubjectSet.has(payment.subject_id)) {
-          await client.query("ROLLBACK");
-
-          return res.status(400).json({
-            error:
-              "A payment was supplied for a subject the student is not being enrolled in",
-            subject_id: payment.subject_id,
-          });
-        }
-      }
-
-      /*
-        ---------------------------------------------------------
-        4. VALIDATE PAYMENT AMOUNTS AGAINST BACKEND CONFIG
-        ---------------------------------------------------------
-      */
-
-      const feeConfigMap = new Map(
-        feeConfigs.map((row) => [Number(row.subject_id), Number(row.amount)]),
+        ORDER BY
+          sub.name ASC,
+          cs.start_time ASC
+        `,
+        [uniqueClassSlotIds],
       );
 
-      for (const payment of normalizedPayments) {
-        const configuredAmount = feeConfigMap.get(payment.subject_id);
+      const classSlots = classSlotsResult.rows;
 
-        if (payment.paid_amount > configuredAmount) {
-          await client.query("ROLLBACK");
+      if (classSlots.length !== uniqueClassSlotIds.length) {
+        await client.query("ROLLBACK");
 
-          return res.status(400).json({
-            error: `Payment for subject ID ${payment.subject_id} cannot be greater than its configured fee of ${configuredAmount}`,
-          });
-        }
+        return res.status(400).json({
+          error:
+            "One or more selected class slots do not exist or are inactive",
+        });
       }
-
-      /*
-        ---------------------------------------------------------
-        5. CREATE STUDENT
-        ---------------------------------------------------------
-      */
 
       let studentResult;
 
@@ -566,12 +494,6 @@ router.post(
 
       const createdStudent = studentResult.rows[0];
 
-      /*
-        ---------------------------------------------------------
-        6. CREATE ALL ENROLLMENTS
-        ---------------------------------------------------------
-      */
-
       const createdEnrollments = [];
 
       for (const classSlot of classSlots) {
@@ -598,119 +520,12 @@ router.post(
         });
       }
 
-      /*
-        ---------------------------------------------------------
-        7. CREATE ONE FEE PER SUBJECT
-        ---------------------------------------------------------
-      */
-
-      const createdFees = [];
-
-      for (const subjectId of subjectIds) {
-        const totalAmount = feeConfigMap.get(Number(subjectId));
-
-        const payment = normalizedPayments.find(
-          (item) => Number(item.subject_id) === Number(subjectId),
-        );
-
-        const paidAmount = payment ? Number(payment.paid_amount) : 0;
-
-        const dueAmount = totalAmount - paidAmount;
-
-        let status = "pending";
-
-        if (dueAmount === 0) {
-          status = "paid";
-        } else if (paidAmount > 0) {
-          status = "partial";
-        }
-
-        let receiptNumber = null;
-
-        if (paidAmount > 0) {
-          const datePart = new Date()
-            .toISOString()
-            .slice(0, 10)
-            .replace(/-/g, "");
-
-          receiptNumber = `REC-${datePart}-${crypto
-            .randomBytes(5)
-            .toString("hex")
-            .toUpperCase()}`;
-        }
-
-        const feeResult = await client.query(
-          `
-          INSERT INTO fees (
-            student_id,
-            subject_id,
-            total_amount,
-            paid_amount,
-            due_amount,
-            status,
-            payment_date,
-            receipt_number,
-            academic_year,
-            description
-          )
-          VALUES (
-            $1,
-            $2,
-            $3,
-            $4,
-            $5,
-            $6,
-            $7,
-            $8,
-            $9,
-            $10
-          )
-          RETURNING *
-          `,
-          [
-            createdStudent.id,
-            subjectId,
-            totalAmount,
-            paidAmount,
-            dueAmount,
-            status,
-            paidAmount > 0 ? payment.payment_date : null,
-            receiptNumber,
-            new Date().getFullYear().toString(),
-            payment?.description || "Student enrollment",
-          ],
-        );
-
-        const createdFee = feeResult.rows[0];
-
-        const subjectName =
-          feeConfigs.find(
-            (config) => Number(config.subject_id) === Number(subjectId),
-          )?.subject_name || null;
-
-        createdFees.push({
-          ...createdFee,
-          subject_name: subjectName,
-        });
-      }
-
-      /*
-        ---------------------------------------------------------
-        8. COMMIT EVERYTHING
-        ---------------------------------------------------------
-      */
-
       await client.query("COMMIT");
 
       res.status(201).json({
-        message:
-          "Student, enrollments, fees, and payments created successfully",
-
+        message: "Student and enrollments created successfully",
         student: createdStudent,
-
         enrollments: createdEnrollments,
-
-        fees: createdFees,
       });
     } catch (err) {
       try {
@@ -734,9 +549,8 @@ router.post(
 
 /* =========================================================
    POST /api/students
-   Create student
-   Existing endpoint preserved.
-   ========================================================= */
+========================================================= */
+
 router.post(
   "/",
   authRequired,
@@ -813,8 +627,8 @@ router.post(
 
 /* =========================================================
    PUT /api/students/:id
-   Update student
-   ========================================================= */
+========================================================= */
+
 router.put(
   "/:id([0-9]+)",
   authRequired,
@@ -896,9 +710,8 @@ router.put(
 
 /* =========================================================
    DELETE /api/students/:id
-   Delete student
-   Admin only.
-   ========================================================= */
+========================================================= */
+
 router.delete(
   "/:id([0-9]+)",
   authRequired,
@@ -932,8 +745,8 @@ router.delete(
 
 /* =========================================================
    POST /api/students/:id/classes
-   Enroll student into class slot
-   ========================================================= */
+========================================================= */
+
 router.post(
   "/:id([0-9]+)/classes",
   authRequired,
@@ -942,7 +755,7 @@ router.post(
     try {
       const { class_slot_id } = req.body;
 
-      if (!class_slot_id) {
+      if (!isValidPositiveInteger(class_slot_id)) {
         return res.status(400).json({
           error: "class_slot_id is required",
         });
@@ -965,10 +778,27 @@ router.post(
 
       const classSlot = await query(
         `
-        SELECT id
-        FROM class_slots
-        WHERE id = $1
-          AND is_active = TRUE
+        SELECT
+          cs.id,
+          cs.subject_id,
+          cs.teacher_id,
+          cs.start_time,
+          cs.end_time,
+
+          sub.name AS subject_name,
+
+          t.full_name AS teacher_name
+
+        FROM class_slots cs
+
+        JOIN subjects sub
+          ON sub.id = cs.subject_id
+
+        JOIN teachers t
+          ON t.id = cs.teacher_id
+
+        WHERE cs.id = $1
+          AND cs.is_active = TRUE
         `,
         [class_slot_id],
       );
@@ -1010,7 +840,10 @@ router.post(
           [enrollment.id],
         );
 
-        return res.status(200).json(reactivated.rows[0]);
+        return res.status(200).json({
+          ...reactivated.rows[0],
+          ...classSlot.rows[0],
+        });
       }
 
       const result = await query(
@@ -1025,7 +858,10 @@ router.post(
         [req.params.id, class_slot_id],
       );
 
-      res.status(201).json(result.rows[0]);
+      res.status(201).json({
+        ...result.rows[0],
+        ...classSlot.rows[0],
+      });
     } catch (err) {
       if (err.code === "23505") {
         return res.status(409).json({
@@ -1040,8 +876,8 @@ router.post(
 
 /* =========================================================
    DELETE /api/students/:id/classes/:classSlotId
-   Remove enrollment
-   ========================================================= */
+========================================================= */
+
 router.delete(
   "/:id([0-9]+)/classes/:classSlotId([0-9]+)",
   authRequired,

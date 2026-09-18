@@ -46,10 +46,6 @@ function formatTime(value) {
   return String(value).slice(0, 5);
 }
 
-/*
- * All application dates are handled using Afghanistan time.
- * Afghanistan uses Asia/Kabul (UTC+4:30) and has no DST.
- */
 function getAfghanistanDateParts(value = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Kabul",
@@ -75,20 +71,11 @@ function today() {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
-function afghanistanYear() {
-  return getAfghanistanDateParts().year;
-}
-
 function formatDate(value) {
   if (!value) return "—";
 
   const valueString = String(value);
 
-  /*
-   * PostgreSQL DATE values arrive as YYYY-MM-DD.
-   * Keep these as date-only values so browser timezone conversion
-   * cannot move them to the previous/next day.
-   */
   const raw = valueString.slice(0, 10);
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
@@ -350,11 +337,6 @@ export default function Students() {
 
       const matchesSearch =
         !term ||
-        /*
-         * Student ID is now searchable.
-         * IDs are converted to strings so searching "12", "0012", etc.
-         * behaves naturally with the existing search field.
-         */
         String(student?.id ?? "")
           .toLowerCase()
           .includes(term) ||
@@ -477,6 +459,7 @@ export default function Students() {
               </button>
             </div>
           )}
+
           <PasswordConfirmModal
             open={passwordConfirmOpen}
             title="Confirm student deletion"
@@ -857,6 +840,19 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
 
   const [loadingSections, setLoadingSections] = useState(false);
 
+  /*
+   * Payment is now keyed by CLASS SLOT.
+   *
+   * This is important:
+   *
+   * English / Book 1 / Ahmad / 2-3
+   *
+   * and
+   *
+   * English / Book 2 / Ahmad / 2-3
+   *
+   * are separate fees.
+   */
   const [payments, setPayments] = useState({});
 
   /* ============================================================
@@ -945,33 +941,6 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
   }, [classes, selectedClassIds]);
 
   /* ============================================================
-     GROUP SELECTED CLASSES BY SUBJECT
-  ============================================================ */
-
-  const selectedSubjectGroups = useMemo(() => {
-    const groups = new Map();
-
-    for (const slot of selectedClasses) {
-      const subjectId = getSubjectId(slot);
-
-      if (!subjectId) continue;
-
-      if (!groups.has(subjectId)) {
-        groups.set(subjectId, {
-          subject_id: subjectId,
-          subject_name:
-            slot.subject_name || getSubjectName(subjects, subjectId),
-          classes: [],
-        });
-      }
-
-      groups.get(subjectId).classes.push(slot);
-    }
-
-    return Array.from(groups.values());
-  }, [selectedClasses, subjects]);
-
-  /* ============================================================
      PAYMENT STATE
   ============================================================ */
 
@@ -981,19 +950,21 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
     setPayments((current) => {
       const next = {};
 
-      for (const group of selectedSubjectGroups) {
-        const existing = current[group.subject_id];
+      for (const slot of selectedClasses) {
+        const classId = Number(slot.id);
+        const existing = current[classId];
 
-        next[group.subject_id] = {
+        next[classId] = {
           total_amount: existing?.total_amount ?? "",
           paid_amount: existing?.paid_amount ?? "",
           payment_date: existing?.payment_date || today(),
+          comment: existing?.comment || "",
         };
       }
 
       return next;
     });
-  }, [selectedSubjectGroups, editing]);
+  }, [selectedClasses, editing]);
 
   /* ============================================================
      UPDATE FORM
@@ -1029,12 +1000,12 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
      UPDATE PAYMENT
   ============================================================ */
 
-  function updatePayment(subjectId, field, value) {
+  function updatePayment(classSlotId, field, value) {
     setPayments((current) => ({
       ...current,
 
-      [subjectId]: {
-        ...(current[subjectId] || {}),
+      [classSlotId]: {
+        ...(current[classSlotId] || {}),
         [field]: value,
       },
     }));
@@ -1049,10 +1020,6 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
 
     if (saving) return;
 
-    /* ----------------------------------------------------------
-       BASIC VALIDATION
-    ---------------------------------------------------------- */
-
     if (!form.full_name.trim()) {
       toast.error("Please enter the student's full name.");
       return;
@@ -1063,67 +1030,59 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
       return;
     }
 
-    /* ----------------------------------------------------------
-       NEW STUDENT MUST HAVE A CLASS
-    ---------------------------------------------------------- */
-
     if (!editing && selectedClassIds.size === 0) {
       toast.error("Please select at least one class.");
       return;
     }
 
-    /* ----------------------------------------------------------
-       VALIDATE PAYMENTS FOR NEW STUDENTS
-    ---------------------------------------------------------- */
-
     if (!editing) {
-      for (const group of selectedSubjectGroups) {
-        const payment = payments[group.subject_id] || {};
+      for (const slot of selectedClasses) {
+        const payment = payments[Number(slot.id)] || {};
 
         const totalRaw = String(payment.total_amount ?? "").trim();
+
         const paidRaw = String(payment.paid_amount ?? "").trim();
 
+        const label = classLabel(slot, subjects);
+
         if (!totalRaw) {
-          toast.error(`Please enter the total fee for ${group.subject_name}.`);
+          toast.error(`Please enter the total fee for ${label}.`);
           return;
         }
 
         const total = Number(totalRaw);
+
         const paid = paidRaw === "" ? 0 : Number(paidRaw);
 
         if (!Number.isFinite(total) || total <= 0) {
-          toast.error(`Invalid total fee for ${group.subject_name}.`);
+          toast.error(`Invalid total fee for ${label}.`);
           return;
         }
 
         if (!Number.isFinite(paid) || paid < 0) {
-          toast.error(`Invalid amount paid for ${group.subject_name}.`);
+          toast.error(`Invalid amount paid for ${label}.`);
           return;
         }
 
         if (paid > total) {
           toast.error(
-            `Amount paid cannot be greater than the total fee for ${group.subject_name}.`,
+            `Amount paid cannot be greater than the total fee for ${label}.`,
           );
           return;
         }
 
         if (paid > 0 && !payment.payment_date) {
-          toast.error(
-            `Please select a payment date for ${group.subject_name}.`,
-          );
+          toast.error(`Please select a payment date for ${label}.`);
+          return;
+        }
+
+        if (total % 10 !== 0 || (paid > 0 && paid % 10 !== 0)) {
+          toast.error(`Fee amounts must be multiples of 10 for ${label}.`);
           return;
         }
       }
     }
 
-    /*
-     * BOTH CREATE AND EDIT REQUIRE PASSWORD VERIFICATION.
-     *
-     * Nothing is changed in the database yet.
-     * The actual save happens only after the password
-     * verification succeeds.
-     */
     setPasswordConfirmOpen(true);
   }
 
@@ -1133,10 +1092,6 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
     setSaving(true);
 
     try {
-      /* --------------------------------------------------------
-         STUDENT PAYLOAD
-      -------------------------------------------------------- */
-
       const studentPayload = {
         full_name: form.full_name.trim(),
 
@@ -1156,7 +1111,7 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
       };
 
       /* ========================================================
-         EDIT EXISTING STUDENT
+         EDIT
       ======================================================== */
 
       if (editing) {
@@ -1172,30 +1127,13 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
       }
 
       /* ========================================================
-         CREATE NEW STUDENT
+         CREATE STUDENT
       ======================================================== */
 
       const studentResponse = await api.post("/students", studentPayload);
 
-      /*
-       * Backend may return:
-       *
-       * { student: {...} }
-       *
-       * or:
-       *
-       * {...student}
-       */
-
       const createdStudent =
         studentResponse.data?.student || studentResponse.data;
-
-      /*
-       * IMPORTANT:
-       * The Student ID comes directly from PostgreSQL.
-       * This frontend never generates, changes, resets,
-       * or reuses IDs.
-       */
 
       const studentId = Number(createdStudent?.id);
 
@@ -1206,23 +1144,53 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
       }
 
       /* ========================================================
-         CREATE CLASS ENROLLMENTS
+         CREATE ENROLLMENTS + REMEMBER ENROLLMENT IDS
       ======================================================== */
 
+      const enrollmentByClassId = new Map();
+
       for (const classId of selectedClassIds) {
-        await api.post(`/students/${studentId}/classes`, {
-          class_slot_id: Number(classId),
-        });
+        const enrollmentResponse = await api.post(
+          `/students/${studentId}/classes`,
+          {
+            class_slot_id: Number(classId),
+          },
+        );
+
+        const enrollment =
+          enrollmentResponse.data?.enrollment || enrollmentResponse.data;
+
+        const enrollmentId = Number(
+          enrollment?.id || enrollment?.enrollment_id,
+        );
+
+        if (!enrollmentId) {
+          throw new Error(
+            `Enrollment for class ${classId} was created but no enrollment ID was returned.`,
+          );
+        }
+
+        enrollmentByClassId.set(Number(classId), enrollmentId);
       }
 
       /* ========================================================
-         CREATE FEES
+         CREATE PERIOD-BASED FEES
       ======================================================== */
 
-      for (const group of selectedSubjectGroups) {
-        const payment = payments[group.subject_id] || {};
+      for (const slot of selectedClasses) {
+        const classSlotId = Number(slot.id);
 
-        const totalAmount = Number(payment.total_amount);
+        const enrollmentId = enrollmentByClassId.get(classSlotId);
+
+        if (!enrollmentId) {
+          throw new Error(
+            `Enrollment ID was not found for ${classLabel(slot, subjects)}.`,
+          );
+        }
+
+        const payment = payments[classSlotId] || {};
+
+        const monthlyAmount = Number(payment.total_amount);
 
         const paidAmount =
           payment.paid_amount === "" ||
@@ -1231,51 +1199,79 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
             ? 0
             : Number(payment.paid_amount);
 
-        /* ------------------------------------------------------
-           CREATE FEE
-        ------------------------------------------------------ */
+        /*
+         * The visible payment date is Gregorian because
+         * this is an HTML date input.
+         *
+         * The current fees API requires Solar Hijri,
+         * so the backend conversion is handled by
+         * /students/create-complete-compatible logic
+         * through this request.
+         *
+         * We send the Gregorian date in the additional
+         * field and the backend fees route receives the
+         * Solar value generated below.
+         */
 
-        const feeResponse = await api.post("/fees", {
-          student_id: studentId,
+        const paymentDate = payment.payment_date || today();
 
-          subject_id: Number(group.subject_id),
-
-          total_amount: totalAmount,
-
-          /*
-           * Academic year is based on Afghanistan local date.
-           */
-          academic_year: afghanistanYear(),
-
-          description: "Student enrollment",
+        const solarResponse = await api.post("/fees/solar-date", {
+          gregorian_date: paymentDate,
         });
 
-        const fee = feeResponse.data?.fee || feeResponse.data;
+        const solarDate = solarResponse.data?.solar_date;
 
-        const feeId = Number(fee?.id);
-
-        if (!feeId) {
+        if (!solarDate) {
           throw new Error(
-            `Fee for ${group.subject_name} was created but no fee ID was returned.`,
+            `Could not convert payment date for ${classLabel(slot, subjects)}.`,
           );
         }
 
-        /* ------------------------------------------------------
-           CREATE PAYMENT IF MONEY WAS PAID
-        ------------------------------------------------------ */
+        const [solarYear, solarMonth, solarDay] = String(solarDate)
+          .split("/")
+          .map(Number);
 
-        if (paidAmount > 0) {
-          await api.post(`/fees/${feeId}/payment`, {
-            amount: paidAmount,
+        const monthDays =
+          solarMonth >= 1 && solarMonth <= 6
+            ? 31
+            : solarMonth >= 7 && solarMonth <= 11
+              ? 30
+              : solarDay;
 
-            payment_date: payment.payment_date || today(),
-          });
-        }
+        const feePayload = {
+          student_id: studentId,
+
+          enrollment_id: enrollmentId,
+
+          from_solar_date: `${solarYear}/${String(solarMonth).padStart(
+            2,
+            "0",
+          )}/01`,
+
+          to_solar_date: `${solarYear}/${String(solarMonth).padStart(
+            2,
+            "0",
+          )}/${String(monthDays).padStart(2, "0")}`,
+
+          monthly_amounts: [
+            {
+              solar_year: solarYear,
+              solar_month: solarMonth,
+              monthly_amount: monthlyAmount,
+            },
+          ],
+
+          initial_paid_amount: paidAmount,
+
+          initial_payment_solar_date: solarDate,
+
+          initial_payment_comment: payment.comment?.trim() || null,
+
+          description: "Student enrollment",
+        };
+
+        await api.post("/fees", feePayload);
       }
-
-      /* ========================================================
-         EVERYTHING FINISHED SUCCESSFULLY
-      ======================================================== */
 
       toast.success("Student saved successfully.");
 
@@ -1307,20 +1303,8 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
       onClose={saving ? undefined : onClose}
       wide
     >
-      {/* ========================================================
-          EVERYTHING IS INSIDE THIS FORM
-      ======================================================== */}
-
       <form onSubmit={handleSave} className="flex flex-col min-h-0 flex-1">
-        {/* ======================================================
-            SCROLLABLE CONTENT
-        ====================================================== */}
-
         <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-5">
-          {/* ====================================================
-              STUDENT INFORMATION
-          ==================================================== */}
-
           <Section
             icon={UserRound}
             title="Student Information"
@@ -1505,8 +1489,7 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
 
                             <div className="flex flex-wrap gap-3 mt-1">
                               <span className="text-[9px] text-slate-600">
-                                {formatTime(slot.start_time)}
-                                {" - "}
+                                {formatTime(slot.start_time)} -{" "}
                                 {formatTime(slot.end_time)}
                               </span>
 
@@ -1569,9 +1552,9 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
             <Section
               icon={CreditCard}
               title="Subject Payments"
-              subtitle="Enter the fee for each selected subject"
+              subtitle="Enter the fee for each selected class"
             >
-              {selectedSubjectGroups.length === 0 ? (
+              {selectedClasses.length === 0 ? (
                 <div className="py-8 text-center rounded-lg border border-white/[0.06] bg-[#0b0d10]">
                   <Wallet className="w-5 h-5 mx-auto text-slate-700 mb-2" />
 
@@ -1581,8 +1564,10 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {selectedSubjectGroups.map((group) => {
-                    const payment = payments[group.subject_id] || {};
+                  {selectedClasses.map((slot) => {
+                    const classSlotId = Number(slot.id);
+
+                    const payment = payments[classSlotId] || {};
 
                     const total = Number(payment.total_amount || 0);
 
@@ -1592,7 +1577,7 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
 
                     return (
                       <div
-                        key={group.subject_id}
+                        key={classSlotId}
                         className="p-4 rounded-xl border border-white/[0.06] bg-[#0b0d10]"
                       >
                         <div className="flex items-center gap-2 mb-4">
@@ -1602,12 +1587,13 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
 
                           <div>
                             <p className="text-[11px] font-semibold text-slate-300">
-                              {group.subject_name}
+                              {classLabel(slot, subjects)}
                             </p>
 
                             <p className="text-[8px] text-slate-700">
-                              {group.classes.length} class selected
-                              {group.classes.length !== 1 ? "s" : ""}
+                              {getTeacherName(slot)} •{" "}
+                              {formatTime(slot.start_time)}-
+                              {formatTime(slot.end_time)}
                             </p>
                           </div>
                         </div>
@@ -1618,30 +1604,22 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
                             required
                             type="number"
                             min="0"
-                            step="0.01"
+                            step="10"
                             value={payment.total_amount || ""}
                             onChange={(value) =>
-                              updatePayment(
-                                group.subject_id,
-                                "total_amount",
-                                value,
-                              )
+                              updatePayment(classSlotId, "total_amount", value)
                             }
-                            placeholder="Total fee"
+                            placeholder="Monthly fee"
                           />
 
                           <Field
                             label="Amount Paid (AFN)"
                             type="number"
                             min="0"
-                            step="0.01"
+                            step="10"
                             value={payment.paid_amount || ""}
                             onChange={(value) =>
-                              updatePayment(
-                                group.subject_id,
-                                "paid_amount",
-                                value,
-                              )
+                              updatePayment(classSlotId, "paid_amount", value)
                             }
                             placeholder="0"
                           />
@@ -1651,12 +1629,19 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
                             type="date"
                             value={payment.payment_date || ""}
                             onChange={(value) =>
-                              updatePayment(
-                                group.subject_id,
-                                "payment_date",
-                                value,
-                              )
+                              updatePayment(classSlotId, "payment_date", value)
                             }
+                          />
+                        </div>
+
+                        <div className="mt-3">
+                          <Field
+                            label="Comment"
+                            value={payment.comment || ""}
+                            onChange={(value) =>
+                              updatePayment(classSlotId, "comment", value)
+                            }
+                            placeholder="Optional payment comment"
                           />
                         </div>
 
@@ -1678,9 +1663,7 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
           )}
         </div>
 
-        {/* ======================================================
-            SAVE BUTTON — ALWAYS VISIBLE
-        ====================================================== */}
+        {/* SAVE */}
 
         <div className="shrink-0 mt-4 pt-4 border-t border-white/[0.08] bg-[#121519] flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
           <button
@@ -1711,6 +1694,7 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
           </button>
         </div>
       </form>
+
       <PasswordConfirmModal
         open={passwordConfirmOpen}
         title={
@@ -1758,7 +1742,6 @@ function EnrollmentModal({
   const [selectedIds, setSelectedIds] = useState(new Set());
 
   const [passwordConfirmOpen, setPasswordConfirmOpen] = useState(false);
-  const [pendingSave, setPendingSave] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -1863,7 +1846,7 @@ function EnrollmentModal({
     });
   }
 
-  async function save() {
+  function save() {
     if (saving) return;
 
     setPasswordConfirmOpen(true);
@@ -1934,10 +1917,6 @@ function EnrollmentModal({
         </div>
       ) : (
         <div className="min-h-0 flex flex-col flex-1">
-          {/* ====================================================
-              SCROLLABLE ENROLLMENT CONTENT
-          ==================================================== */}
-
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <SelectField
@@ -2080,10 +2059,6 @@ function EnrollmentModal({
             )}
           </div>
 
-          {/* ====================================================
-              SAVE BUTTON — ALWAYS VISIBLE
-          ==================================================== */}
-
           <div className="shrink-0 flex justify-end gap-2 mt-4 pt-4 border-t border-white/[0.06] bg-[#121519]">
             <button
               type="button"
@@ -2115,6 +2090,7 @@ function EnrollmentModal({
           </div>
         </div>
       )}
+
       <PasswordConfirmModal
         open={passwordConfirmOpen}
         title="Confirm class changes"
@@ -2143,10 +2119,6 @@ function ModalShell({ title, subtitle, children, onClose, wide = false }) {
           wide ? "max-w-5xl" : "max-w-2xl"
         } h-auto max-h-[95vh] rounded-2xl bg-[#121519] border border-white/10 shadow-[0_20px_80px_rgba(0,0,0,0.55)] overflow-hidden flex flex-col`}
       >
-        {/* ======================================================
-            FIXED HEADER
-        ====================================================== */}
-
         <div className="shrink-0 px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
           <div className="min-w-0">
             <h3 className="text-sm font-semibold text-white">{title}</h3>
@@ -2163,10 +2135,6 @@ function ModalShell({ title, subtitle, children, onClose, wide = false }) {
             <X className="w-4 h-4" />
           </button>
         </div>
-
-        {/* ======================================================
-            FLEXIBLE BODY
-        ====================================================== */}
 
         <div className="min-h-0 flex-1 p-5 overflow-hidden flex flex-col">
           {children}

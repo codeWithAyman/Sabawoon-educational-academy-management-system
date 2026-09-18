@@ -1,11 +1,18 @@
 const { jalaaliToDate, getJalaaliMonthDays } = require("./solarDate");
 
+/**
+ * Parse a Solar Hijri date string.
+ *
+ * Accepts:
+ *   1405/06/26
+ *   1405-06-26
+ */
 function parseSolarDate(value) {
   if (typeof value !== "string") {
     throw new Error("Solar Hijri date must be a string");
   }
 
-  const match = value.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  const match = value.trim().match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
 
   if (!match) {
     throw new Error("Invalid Solar Hijri date. Expected YYYY/MM/DD");
@@ -25,10 +32,27 @@ function parseSolarDate(value) {
   };
 }
 
+/**
+ * Format a Solar Hijri date.
+ *
+ * Example:
+ *   formatSolarDate(1405, 6, 26)
+ *   => 1405/06/26
+ */
 function formatSolarDate(jy, jm, jd) {
-  return `${jy}/${String(jm).padStart(2, "0")}/${String(jd).padStart(2, "0")}`;
+  return `${String(jy).padStart(4, "0")}/${String(jm).padStart(
+    2,
+    "0",
+  )}/${String(jd).padStart(2, "0")}`;
 }
 
+/**
+ * Calculate a fee period using one monthly fee amount.
+ *
+ * For ranges crossing multiple Solar Hijri months,
+ * each month's amount is calculated according to that
+ * month's number of days.
+ */
 function calculateFeePeriod(fromSolarDate, toSolarDate, monthlyAmount) {
   const start = parseSolarDate(fromSolarDate);
   const end = parseSolarDate(toSolarDate);
@@ -102,5 +126,6 @@ function calculateFeePeriod(fromSolarDate, toSolarDate, monthlyAmount) {
 
 module.exports = {
   parseSolarDate,
+  formatSolarDate,
   calculateFeePeriod,
 };
