@@ -1,481 +1,804 @@
-import { useEffect, useState } from "react";
-import api from "../lib/api";
-import { useAuth } from "../context/AuthContext";
-import { useToast } from "../components/Toast";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+
 import {
-  Plus,
-  Loader2,
-  Trash2,
-  Calendar,
+  BookOpen,
+  CalendarDays,
+  Check,
   Clock3,
-  MapPin,
-  UserRound,
+  Edit3,
+  Loader2,
+  MessageSquareText,
+  RefreshCw,
+  Save,
+  Users,
+  X,
 } from "lucide-react";
 
-const DAYS = [
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
+import api from "../lib/api";
+
+const SUBJECT_COLORS = [
+  {
+    bg: "bg-blue-500/[0.045]",
+    border: "border-blue-400/10",
+    text: "text-blue-300",
+    accent: "bg-blue-400",
+  },
+  {
+    bg: "bg-violet-500/[0.045]",
+    border: "border-violet-400/10",
+    text: "text-violet-300",
+    accent: "bg-violet-400",
+  },
+  {
+    bg: "bg-emerald-500/[0.045]",
+    border: "border-emerald-400/10",
+    text: "text-emerald-300",
+    accent: "bg-emerald-400",
+  },
+  {
+    bg: "bg-amber-500/[0.045]",
+    border: "border-amber-400/10",
+    text: "text-amber-300",
+    accent: "bg-amber-400",
+  },
+  {
+    bg: "bg-rose-500/[0.045]",
+    border: "border-rose-400/10",
+    text: "text-rose-300",
+    accent: "bg-rose-400",
+  },
+  {
+    bg: "bg-cyan-500/[0.045]",
+    border: "border-cyan-400/10",
+    text: "text-cyan-300",
+    accent: "bg-cyan-400",
+  },
+  {
+    bg: "bg-fuchsia-500/[0.045]",
+    border: "border-fuchsia-400/10",
+    text: "text-fuchsia-300",
+    accent: "bg-fuchsia-400",
+  },
+  {
+    bg: "bg-lime-500/[0.045]",
+    border: "border-lime-400/10",
+    text: "text-lime-300",
+    accent: "bg-lime-400",
+  },
 ];
 
-export default function Timetable() {
-  const { user } = useAuth();
-  const toast = useToast();
-  const canEdit = ["admin", "teacher"].includes(user.role);
+const DAY_ORDER = {
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+  sunday: 7,
+};
 
-  const [rows, setRows] = useState(null);
-  const [classes, setClasses] = useState([]);
-  const [subjects, setSubjects] = useState([]);
-  const [teachers, setTeachers] = useState([]);
-  const [classId, setClassId] = useState("");
-  const [adding, setAdding] = useState(false);
-  const [deleting, setDeleting] = useState(null);
+const DAY_NAMES = {
+  monday: "Monday",
+  tuesday: "Tuesday",
+  wednesday: "Wednesday",
+  thursday: "Thursday",
+  friday: "Friday",
+  saturday: "Saturday",
+  sunday: "Sunday",
+};
 
-  const [form, setForm] = useState({
-    class_id: "",
-    day_of_week: "Monday",
-    period: 1,
-    subject_id: "",
-    teacher_id: "",
-    start_time: "",
-    end_time: "",
-    room: "",
+function normalizeClassRow(row) {
+  return {
+    ...row,
+    id: Number(row.id),
+    subject_id:
+      row.subject_id === null || row.subject_id === undefined
+        ? null
+        : Number(row.subject_id),
+    teacher_id:
+      row.teacher_id === null || row.teacher_id === undefined
+        ? null
+        : Number(row.teacher_id),
+    student_count: Number(row.student_count || 0),
+    comments: typeof row.comments === "string" ? row.comments.trim() : "",
+    books: Array.isArray(row.books) ? row.books : [],
+  };
+}
+
+function getStartTime(row) {
+  return row.timetable_start_time || row.class_start_time || "";
+}
+
+function getEndTime(row) {
+  return row.timetable_end_time || row.class_end_time || "";
+}
+
+function formatTime(time) {
+  if (!time) return "—";
+
+  const match = String(time).match(/^(\d{1,2}):(\d{2})/);
+
+  if (!match) return String(time);
+
+  let hour = Number(match[1]);
+  const minute = match[2];
+
+  const suffix = hour >= 12 ? "PM" : "AM";
+
+  hour = hour % 12;
+
+  if (hour === 0) hour = 12;
+
+  return `${hour}:${minute} ${suffix}`;
+}
+
+function formatTimeRange(row) {
+  const start = getStartTime(row);
+  const end = getEndTime(row);
+
+  if (!start && !end) return "—";
+
+  if (!end) return formatTime(start);
+
+  return `${formatTime(start)} – ${formatTime(end)}`;
+}
+
+function getDayName(value) {
+  if (!value) return "Unscheduled";
+
+  const normalized = String(value).toLowerCase();
+
+  return DAY_NAMES[normalized] || value;
+}
+
+function getDaySort(value) {
+  return DAY_ORDER[String(value || "").toLowerCase()] || 99;
+}
+
+function colorForSubject(index) {
+  return SUBJECT_COLORS[index % SUBJECT_COLORS.length];
+}
+
+function mergeClassAndTimetable(classes, timetable) {
+  const timetableByClass = new Map();
+
+  timetable.forEach((entry) => {
+    const classSlotId = Number(entry.id);
+
+    if (!timetableByClass.has(classSlotId)) {
+      timetableByClass.set(classSlotId, []);
+    }
+
+    timetableByClass.get(classSlotId).push(entry);
   });
 
-  async function load() {
-    try {
-      const q = classId ? `?class_id=${classId}` : "";
-      const { data } = await api.get("/timetable" + q);
-      setRows(data);
-    } catch {
-      toast.error("Failed to load timetable");
-      setRows([]);
-    }
-  }
+  const merged = [];
 
-  useEffect(() => {
-    if (canEdit) {
-      api
-        .get("/classes")
-        .then((r) => setClasses(r.data))
-        .catch(() => toast.error("Failed to load classes"));
+  classes.forEach((classRow) => {
+    const entries = timetableByClass.get(Number(classRow.id)) || [];
 
-      api
-        .get("/users?role=teacher")
-        .then((r) => setTeachers(r.data))
-        .catch(() => toast.error("Failed to load teachers"));
-    }
+    if (!entries.length) {
+      merged.push(
+        normalizeClassRow({
+          ...classRow,
+          timetable_id: null,
+          day_of_week: null,
+          timetable_start_time: classRow.start_time,
+          timetable_end_time: classRow.end_time,
+          room: null,
+          books: classRow.books || [],
+          student_count: classRow.student_count || 0,
+        }),
+      );
 
-    load();
-  }, []);
-
-  useEffect(() => {
-    load();
-  }, [classId]);
-
-  useEffect(() => {
-    if (!form.class_id) {
-      setSubjects([]);
       return;
     }
 
-    api
-      .get(`/classes/${form.class_id}/subjects`)
-      .then((r) => setSubjects(r.data))
-      .catch(() => {
-        setSubjects([]);
-        toast.error("Failed to load subjects");
-      });
-  }, [form.class_id]);
-
-  async function add(e) {
-    e.preventDefault();
-
-    try {
-      await api.post("/timetable", form);
-      toast.success("Timetable entry created");
-      setAdding(false);
-      setForm({
-        class_id: "",
-        day_of_week: "Monday",
-        period: 1,
-        subject_id: "",
-        teacher_id: "",
-        start_time: "",
-        end_time: "",
-        room: "",
-      });
-      load();
-    } catch (e) {
-      toast.error(
-        e.response?.data?.error || "Failed to create timetable entry",
+    entries.forEach((entry) => {
+      merged.push(
+        normalizeClassRow({
+          ...classRow,
+          ...entry,
+          id: classRow.id,
+          subject_id: classRow.subject_id,
+          subject_name: classRow.subject_name,
+          subject_code: classRow.subject_code,
+          teacher_id: classRow.teacher_id,
+          teacher_name: classRow.teacher_name,
+          class_start_time: classRow.start_time,
+          class_end_time: classRow.end_time,
+          comments: classRow.comments,
+          books: classRow.books || [],
+          student_count: classRow.student_count || 0,
+        }),
       );
-    }
-  }
-
-  async function del(id) {
-    if (!confirm("Delete this timetable entry?")) return;
-
-    setDeleting(id);
-
-    try {
-      await api.delete(`/timetable/${id}`);
-      toast.success("Timetable entry deleted");
-      load();
-    } catch (e) {
-      toast.error(
-        e.response?.data?.error || "Failed to delete timetable entry",
-      );
-    } finally {
-      setDeleting(null);
-    }
-  }
-
-  const grouped = {};
-
-  (rows || []).forEach((r) => {
-    (grouped[r.day_of_week] = grouped[r.day_of_week] || []).push(r);
+    });
   });
 
+  return merged;
+}
+
+function ClassItem({ row, onComment }) {
+  const hasComment = Boolean(row.comments && row.comments.trim());
+
+  const bookNames = Array.isArray(row.books)
+    ? row.books
+        .map((book) => book?.name)
+        .filter(Boolean)
+        .join(", ")
+    : "";
+
   return (
-    <div className="min-h-full bg-[#0b0d10] text-slate-100 p-5 sm:p-6">
-      <div className="max-w-[1600px] mx-auto space-y-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-[#f2bd19]/10 border border-[#f2bd19]/20 grid place-items-center">
-                <Calendar className="w-5 h-5 text-[#f2bd19]" />
-              </div>
-              <div>
-                <h2 className="text-xl font-bold tracking-tight text-white">
-                  Timetable
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Manage weekly class schedules
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {canEdit && (
-            <div className="flex flex-col sm:flex-row gap-2">
-              <select
-                className="w-full sm:w-44 h-10 px-3 rounded-lg bg-[#121519] border border-white/10 text-sm text-slate-200 outline-none transition focus:border-[#f2bd19]/50"
-                value={classId}
-                onChange={(e) => setClassId(e.target.value)}
-              >
-                <option value="">All classes</option>
-                {classes.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-
-              <button
-                className="h-10 px-4 rounded-lg bg-[#f2bd19] text-[#0b0d10] text-sm font-bold flex items-center justify-center gap-2 transition hover:bg-[#ffd34d] active:scale-[0.98]"
-                onClick={() => setAdding(!adding)}
-              >
-                <Plus className="w-4 h-4" />
-                New entry
-              </button>
-            </div>
-          )}
+    <div
+      className="
+        grid min-w-0
+        grid-cols-[minmax(0,1.1fr)_minmax(88px,0.9fr)_minmax(0,1.05fr)_minmax(48px,0.45fr)_minmax(0,1.4fr)]
+        items-center
+        gap-3
+        border-t border-white/[0.055]
+        px-4 py-3
+        transition-colors
+        hover:bg-white/[0.018]
+      "
+    >
+      {/* TEACHER */}
+      <div className="min-w-0">
+        <div className="truncate text-[12px] font-medium text-gray-200">
+          {row.teacher_name || "—"}
         </div>
 
-        {adding && canEdit && (
-          <form
-            onSubmit={add}
-            className="rounded-xl bg-[#121519] border border-white/10 p-5 shadow-[0_10px_40px_rgba(0,0,0,0.25)]"
-          >
-            <div className="flex items-center justify-between mb-5">
-              <div>
-                <h3 className="text-sm font-semibold text-white">
-                  Create timetable entry
-                </h3>
-                <p className="text-xs text-slate-500 mt-1">
-                  Add a class period to the weekly schedule
-                </p>
-              </div>
+        <div className="mt-0.5 truncate text-[9px] uppercase tracking-[0.08em] text-gray-700">
+          Teacher
+        </div>
+      </div>
+
+      {/* TIME */}
+      <div className="flex min-w-0 items-center gap-2">
+        <Clock3 size={13} className="shrink-0 text-gray-600" />
+
+        <span
+          className="truncate text-[11px] text-gray-400"
+          title={formatTimeRange(row)}
+        >
+          {formatTimeRange(row)}
+        </span>
+      </div>
+
+      {/* LEVEL / BOOK */}
+      <div className="min-w-0">
+        <div
+          className={[
+            "truncate text-[10px]",
+            bookNames ? "text-gray-400" : "text-gray-700",
+          ].join(" ")}
+          title={bookNames || "No level / book"}
+        >
+          {bookNames || "No level / book"}
+        </div>
+
+        <div className="mt-0.5 truncate text-[9px] uppercase tracking-[0.08em] text-gray-700">
+          Level / Book
+        </div>
+      </div>
+
+      {/* STUDENTS */}
+      <div className="flex min-w-0 items-center gap-1.5">
+        <Users size={13} className="shrink-0 text-gray-600" />
+
+        <span className="truncate text-[11px] text-gray-400">
+          {row.student_count}
+        </span>
+      </div>
+
+      {/* COMMENTS */}
+      <div className="flex min-w-0 items-center gap-2">
+        <span
+          className={[
+            "min-w-0 flex-1 truncate text-[10px]",
+            hasComment ? "text-gray-400" : "text-gray-700",
+          ].join(" ")}
+          title={hasComment ? row.comments : "No comments"}
+        >
+          {hasComment ? row.comments : "No comments"}
+        </span>
+
+        <button
+          type="button"
+          onClick={() => onComment(row)}
+          className={[
+            "inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-[9px] font-medium transition",
+            hasComment
+              ? "border-white/10 bg-white/[0.035] text-gray-300 hover:border-white/20 hover:bg-white/[0.06] hover:text-white"
+              : "border-white/[0.07] text-gray-600 hover:border-[#f2bd19]/25 hover:bg-[#f2bd19]/[0.04] hover:text-[#f2bd19]",
+          ].join(" ")}
+        >
+          {hasComment ? <Edit3 size={10} /> : <MessageSquareText size={10} />}
+
+          <span className="whitespace-nowrap">
+            {hasComment ? "Edit note" : "Add note"}
+          </span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SubjectColumn({ subject, rows, color, onComment }) {
+  const sortedRows = useMemo(() => {
+    return [...rows].sort((a, b) => {
+      const dayDifference =
+        getDaySort(a.day_of_week) - getDaySort(b.day_of_week);
+
+      if (dayDifference !== 0) return dayDifference;
+
+      const aTime = getStartTime(a) || "99:99";
+      const bTime = getStartTime(b) || "99:99";
+
+      if (aTime !== bTime) {
+        return aTime.localeCompare(bTime);
+      }
+
+      return String(a.teacher_name || "").localeCompare(
+        String(b.teacher_name || ""),
+      );
+    });
+  }, [rows]);
+
+  return (
+    <div
+      className={[
+        "min-w-0 overflow-hidden rounded-xl border",
+        color.border,
+        color.bg,
+      ].join(" ")}
+    >
+      {/* SUBJECT HEADER */}
+      <div className="flex min-w-0 items-center justify-between gap-3 border-b border-white/[0.055] px-4 py-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <div
+            className={["h-7 w-1 shrink-0 rounded-full", color.accent].join(
+              " ",
+            )}
+          />
+
+          <div className="min-w-0">
+            <div
+              className={[
+                "truncate text-[13px] font-semibold",
+                color.text,
+              ].join(" ")}
+              title={subject.name}
+            >
+              {subject.name}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">
-                  Class
-                </label>
-                <select
-                  required
-                  className="w-full h-10 px-3 rounded-lg bg-[#0d1013] border border-white/10 text-sm text-slate-200 outline-none focus:border-[#f2bd19]/50"
-                  value={form.class_id}
-                  onChange={(e) =>
-                    setForm({ ...form, class_id: e.target.value })
-                  }
-                >
-                  <option value="">Select class</option>
-                  {classes.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
+            {subject.code && (
+              <div className="mt-0.5 truncate text-[9px] uppercase tracking-[0.08em] text-gray-700">
+                {subject.code}
               </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">
-                  Day
-                </label>
-                <select
-                  className="w-full h-10 px-3 rounded-lg bg-[#0d1013] border border-white/10 text-sm text-slate-200 outline-none focus:border-[#f2bd19]/50"
-                  value={form.day_of_week}
-                  onChange={(e) =>
-                    setForm({ ...form, day_of_week: e.target.value })
-                  }
-                >
-                  {DAYS.map((day) => (
-                    <option key={day}>{day}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">
-                  Period
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  required
-                  className="w-full h-10 px-3 rounded-lg bg-[#0d1013] border border-white/10 text-sm text-slate-200 outline-none focus:border-[#f2bd19]/50"
-                  value={form.period}
-                  onChange={(e) =>
-                    setForm({
-                      ...form,
-                      period: parseInt(e.target.value) || 1,
-                    })
-                  }
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">
-                  Subject
-                </label>
-                <select
-                  className="w-full h-10 px-3 rounded-lg bg-[#0d1013] border border-white/10 text-sm text-slate-200 outline-none focus:border-[#f2bd19]/50 disabled:opacity-40"
-                  value={form.subject_id}
-                  onChange={(e) =>
-                    setForm({ ...form, subject_id: e.target.value })
-                  }
-                  disabled={!form.class_id}
-                >
-                  <option value="">
-                    {form.class_id ? "Select subject" : "Select class first"}
-                  </option>
-                  {subjects.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">
-                  Teacher
-                </label>
-                <select
-                  className="w-full h-10 px-3 rounded-lg bg-[#0d1013] border border-white/10 text-sm text-slate-200 outline-none focus:border-[#f2bd19]/50"
-                  value={form.teacher_id}
-                  onChange={(e) =>
-                    setForm({ ...form, teacher_id: e.target.value })
-                  }
-                >
-                  <option value="">No teacher</option>
-                  {teachers.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.full_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="flex items-center gap-1.5 text-xs font-medium text-slate-400 mb-1.5">
-                  <Clock3 className="w-3.5 h-3.5" />
-                  Start time
-                </label>
-                <input
-                  type="time"
-                  className="w-full h-10 px-3 rounded-lg bg-[#0d1013] border border-white/10 text-sm text-slate-200 outline-none focus:border-[#f2bd19]/50"
-                  value={form.start_time}
-                  onChange={(e) =>
-                    setForm({ ...form, start_time: e.target.value })
-                  }
-                />
-              </div>
-
-              <div>
-                <label className="flex items-center gap-1.5 text-xs font-medium text-slate-400 mb-1.5">
-                  <Clock3 className="w-3.5 h-3.5" />
-                  End time
-                </label>
-                <input
-                  type="time"
-                  className="w-full h-10 px-3 rounded-lg bg-[#0d1013] border border-white/10 text-sm text-slate-200 outline-none focus:border-[#f2bd19]/50"
-                  value={form.end_time}
-                  onChange={(e) =>
-                    setForm({ ...form, end_time: e.target.value })
-                  }
-                />
-              </div>
-
-              <div>
-                <label className="flex items-center gap-1.5 text-xs font-medium text-slate-400 mb-1.5">
-                  <MapPin className="w-3.5 h-3.5" />
-                  Room
-                </label>
-                <input
-                  className="w-full h-10 px-3 rounded-lg bg-[#0d1013] border border-white/10 text-sm text-slate-200 outline-none focus:border-[#f2bd19]/50 placeholder:text-slate-600"
-                  placeholder="e.g. Room 3"
-                  value={form.room}
-                  onChange={(e) => setForm({ ...form, room: e.target.value })}
-                />
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-2 mt-5 pt-4 border-t border-white/5">
-              <button
-                type="button"
-                onClick={() => setAdding(false)}
-                className="h-10 px-4 rounded-lg border border-white/10 bg-white/[0.02] text-sm font-medium text-slate-400 hover:text-white hover:bg-white/[0.05] transition"
-              >
-                Cancel
-              </button>
-
-              <button
-                type="submit"
-                className="h-10 px-5 rounded-lg bg-[#f2bd19] text-[#0b0d10] text-sm font-bold hover:bg-[#ffd34d] transition"
-              >
-                Create entry
-              </button>
-            </div>
-          </form>
-        )}
-
-        {!rows ? (
-          <div className="rounded-xl bg-[#121519] border border-white/10 p-16 grid place-items-center">
-            <div className="flex flex-col items-center gap-3">
-              <Loader2 className="w-6 h-6 text-[#f2bd19] animate-spin" />
-              <span className="text-xs text-slate-500">
-                Loading timetable...
-              </span>
-            </div>
+            )}
           </div>
-        ) : rows.length === 0 ? (
-          <div className="rounded-xl bg-[#121519] border border-white/10 p-16 text-center">
-            <div className="w-14 h-14 mx-auto rounded-xl bg-[#f2bd19]/10 border border-[#f2bd19]/15 grid place-items-center mb-4">
-              <Calendar className="w-7 h-7 text-[#f2bd19]/70" />
+        </div>
+
+        <div className="flex shrink-0 items-center gap-1.5 text-[9px] text-gray-600">
+          <BookOpen size={11} />
+          <span>
+            {rows.length} {rows.length === 1 ? "class" : "classes"}
+          </span>
+        </div>
+      </div>
+
+      {/* TABLE HEADER */}
+      <div
+        className="
+          grid min-w-0
+          grid-cols-[minmax(0,1.1fr)_minmax(88px,0.9fr)_minmax(0,1.05fr)_minmax(48px,0.45fr)_minmax(0,1.4fr)]
+          items-center
+          gap-3
+          px-4 py-2
+          text-[8px]
+          font-semibold
+          uppercase
+          tracking-[0.11em]
+          text-gray-700
+        "
+      >
+        <span>Teacher</span>
+        <span>Time</span>
+        <span>Level / Book</span>
+        <span>Students</span>
+        <span>Comments</span>
+      </div>
+
+      {sortedRows.map((row, index) => (
+        <ClassItem
+          key={`${row.id}-${row.timetable_id || "none"}-${index}`}
+          row={row}
+          onComment={onComment}
+        />
+      ))}
+    </div>
+  );
+}
+
+function CommentModal({ row, onClose, onSaved }) {
+  const [value, setValue] = useState(row?.comments || "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setValue(row?.comments || "");
+    setError("");
+  }, [row]);
+
+  if (!row) return null;
+
+  const hasComment = Boolean(row.comments && row.comments.trim());
+
+  async function handleSave() {
+    if (saving) return;
+
+    setSaving(true);
+    setError("");
+
+    try {
+      const response = await api.put(`/timetable/class/${row.id}/comments`, {
+        comments: value,
+      });
+
+      const savedComments =
+        typeof response?.data?.comments === "string"
+          ? response.data.comments
+          : value.trim();
+
+      onSaved(row.id, savedComments);
+      onClose();
+    } catch (err) {
+      setError(
+        err?.response?.data?.message ||
+          "Unable to save the comment. Please try again.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !saving) {
+          onClose();
+        }
+      }}
+    >
+      <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-white/10 bg-[#121519] shadow-2xl">
+        {/* HEADER */}
+        <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <MessageSquareText
+                size={16}
+                className="shrink-0 text-[#f2bd19]"
+              />
+
+              <h2 className="truncate text-sm font-semibold text-white">
+                {hasComment ? "Edit class note" : "Add class note"}
+              </h2>
             </div>
-            <h3 className="text-sm font-semibold text-slate-300">
-              No timetable entries
-            </h3>
-            <p className="text-xs text-slate-500 mt-1">
-              {canEdit
-                ? "Create a new entry to build the weekly schedule."
-                : "There are currently no scheduled classes."}
+
+            <p className="mt-1 truncate text-[10px] text-gray-600">
+              {row.subject_name || "Class"} · {row.teacher_name || "Teacher"}
             </p>
           </div>
-        ) : (
-          <div className="grid lg:grid-cols-2 gap-4">
-            {DAYS.filter((day) => grouped[day]).map((day) => (
-              <div
-                key={day}
-                className="rounded-xl bg-[#121519] border border-white/10 overflow-hidden"
-              >
-                <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-8 h-8 rounded-lg bg-[#f2bd19]/10 border border-[#f2bd19]/15 grid place-items-center">
-                      <Calendar className="w-4 h-4 text-[#f2bd19]" />
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-semibold text-white">
-                        {day}
-                      </h3>
-                      <p className="text-[11px] text-slate-500">
-                        {grouped[day].length}{" "}
-                        {grouped[day].length === 1 ? "period" : "periods"}
-                      </p>
-                    </div>
-                  </div>
-                </div>
 
-                <div className="p-3 space-y-2">
-                  {grouped[day].map((r) => (
-                    <div
-                      key={r.id}
-                      className="group flex items-center gap-3 p-3 rounded-lg bg-[#0d1013] border border-white/5 hover:border-[#f2bd19]/20 transition"
-                    >
-                      <div className="w-11 h-11 shrink-0 rounded-lg bg-[#f2bd19]/10 border border-[#f2bd19]/15 grid place-items-center">
-                        <span className="text-xs font-bold text-[#f2bd19]">
-                          P{r.period}
-                        </span>
-                      </div>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            className="rounded-lg p-1.5 text-gray-600 transition hover:bg-white/[0.05] hover:text-gray-300 disabled:opacity-50"
+          >
+            <X size={16} />
+          </button>
+        </div>
 
-                      <div className="flex-1 min-w-0">
-                        <div className="font-semibold text-sm text-slate-200 truncate">
-                          {r.subject_name || "—"}
-                        </div>
+        {/* BODY */}
+        <div className="p-5">
+          <label className="mb-2 block text-[10px] font-medium uppercase tracking-[0.1em] text-gray-600">
+            Comments
+          </label>
 
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-[11px] text-slate-500">
-                          <span className="flex items-center gap-1">
-                            <UserRound className="w-3 h-3" />
-                            {r.teacher_name || "No teacher"}
-                          </span>
+          <textarea
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+            maxLength={5000}
+            rows={6}
+            autoFocus
+            placeholder="Add a note about this class..."
+            className="
+              w-full
+              resize-none
+              rounded-xl
+              border
+              border-white/[0.08]
+              bg-[#0b0d10]
+              px-3.5
+              py-3
+              text-[12px]
+              leading-5
+              text-gray-200
+              outline-none
+              placeholder:text-gray-700
+              focus:border-[#f2bd19]/30
+              focus:ring-1
+              focus:ring-[#f2bd19]/10
+            "
+          />
 
-                          {r.room && (
-                            <span className="flex items-center gap-1">
-                              <MapPin className="w-3 h-3" />
-                              {r.room}
-                            </span>
-                          )}
+          <div className="mt-2 flex items-center justify-between">
+            <span className="text-[9px] text-gray-700">
+              {value.length}/5000
+            </span>
 
-                          {r.start_time && (
-                            <span className="flex items-center gap-1">
-                              <Clock3 className="w-3 h-3" />
-                              {r.start_time.slice(0, 5)}
-                              {r.end_time && ` - ${r.end_time.slice(0, 5)}`}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      {canEdit && (
-                        <button
-                          type="button"
-                          onClick={() => del(r.id)}
-                          disabled={deleting === r.id}
-                          className="w-8 h-8 shrink-0 rounded-lg grid place-items-center text-slate-600 hover:text-red-400 hover:bg-red-500/10 transition disabled:opacity-40"
-                          title="Delete entry"
-                        >
-                          {deleting === r.id ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <Trash2 className="w-4 h-4" />
-                          )}
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
+            {error && (
+              <span className="max-w-[75%] text-right text-[10px] text-red-400">
+                {error}
+              </span>
+            )}
           </div>
-        )}
+        </div>
+
+        {/* FOOTER */}
+        <div className="flex items-center justify-end gap-2 border-t border-white/[0.06] px-5 py-4">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            className="rounded-lg border border-white/[0.07] px-3.5 py-2 text-[10px] font-medium text-gray-500 transition hover:bg-white/[0.04] hover:text-gray-300 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving}
+            className="inline-flex items-center gap-2 rounded-lg bg-[#f2bd19] px-3.5 py-2 text-[10px] font-semibold text-black transition hover:bg-[#f7c52c] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {saving ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Save size={12} />
+            )}
+
+            {saving ? "Saving..." : "Save note"}
+          </button>
+        </div>
       </div>
+    </div>
+  );
+}
+
+export default function Timetable() {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [selectedClass, setSelectedClass] = useState(null);
+
+  const loadTimetable = useCallback(async (showRefresh = false) => {
+    if (showRefresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
+
+    setError("");
+
+    try {
+      const [classesResponse, timetableResponse] = await Promise.all([
+        api.get("/classes"),
+        api.get("/timetable"),
+      ]);
+
+      const classesData = Array.isArray(classesResponse.data)
+        ? classesResponse.data
+        : [];
+
+      const timetableData = Array.isArray(timetableResponse.data)
+        ? timetableResponse.data
+        : [];
+
+      const merged = mergeClassAndTimetable(classesData, timetableData);
+
+      setRows(merged);
+    } catch (err) {
+      setError(
+        err?.response?.data?.message ||
+          "Unable to load the timetable. Please try again.",
+      );
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadTimetable();
+  }, [loadTimetable]);
+
+  const subjects = useMemo(() => {
+    const map = new Map();
+
+    rows.forEach((row) => {
+      const key =
+        row.subject_id !== null && row.subject_id !== undefined
+          ? String(row.subject_id)
+          : `name:${row.subject_name || "unknown"}`;
+
+      if (!map.has(key)) {
+        map.set(key, {
+          id: key,
+          name: row.subject_name || "Unnamed subject",
+          code: row.subject_code || "",
+          rows: [],
+        });
+      }
+
+      map.get(key).rows.push(row);
+    });
+
+    return Array.from(map.values()).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+  }, [rows]);
+
+  const subjectPairs = useMemo(() => {
+    const pairs = [];
+
+    for (let i = 0; i < subjects.length; i += 2) {
+      pairs.push(subjects.slice(i, i + 2));
+    }
+
+    return pairs;
+  }, [subjects]);
+
+  function handleCommentSaved(classSlotId, comments) {
+    setRows((currentRows) =>
+      currentRows.map((row) =>
+        Number(row.id) === Number(classSlotId)
+          ? {
+              ...row,
+              comments,
+            }
+          : row,
+      ),
+    );
+
+    setSelectedClass((current) => {
+      if (!current || Number(current.id) !== Number(classSlotId)) {
+        return current;
+      }
+
+      return {
+        ...current,
+        comments,
+      };
+    });
+  }
+
+  return (
+    <div className="min-w-0 w-full">
+      {/* PAGE HEADER */}
+      <div className="mb-5 flex min-w-0 items-center justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2.5">
+            <CalendarDays size={18} className="shrink-0 text-[#f2bd19]" />
+
+            <h1 className="truncate text-lg font-semibold text-white">
+              Timetable
+            </h1>
+          </div>
+
+          <p className="mt-1 truncate text-[11px] text-gray-600">
+            Weekly class schedule and class notes
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadTimetable(true)}
+          disabled={loading || refreshing}
+          className="
+            inline-flex
+            shrink-0
+            items-center
+            gap-2
+            rounded-lg
+            border
+            border-white/[0.08]
+            bg-white/[0.025]
+            px-3
+            py-2
+            text-[10px]
+            font-medium
+            text-gray-500
+            transition
+            hover:border-white/[0.14]
+            hover:bg-white/[0.045]
+            hover:text-gray-300
+            disabled:cursor-not-allowed
+            disabled:opacity-50
+          "
+        >
+          <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
+          Refresh
+        </button>
+      </div>
+
+      {/* ERROR */}
+      {error && (
+        <div className="mb-5 flex min-w-0 items-start gap-3 rounded-xl border border-red-500/10 bg-red-500/[0.04] px-4 py-3">
+          <X size={14} className="mt-0.5 shrink-0 text-red-400" />
+
+          <div className="min-w-0">
+            <div className="text-[11px] font-medium text-red-300">
+              Unable to load timetable
+            </div>
+
+            <div className="mt-0.5 break-words text-[10px] text-red-400/70">
+              {error}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* LOADING */}
+      {loading ? (
+        <div className="flex min-h-[280px] items-center justify-center rounded-xl border border-white/[0.06] bg-[#121519]">
+          <div className="flex items-center gap-2.5 text-[11px] text-gray-600">
+            <Loader2 size={15} className="animate-spin" />
+            Loading timetable...
+          </div>
+        </div>
+      ) : subjects.length === 0 ? (
+        <div className="flex min-h-[280px] flex-col items-center justify-center rounded-xl border border-white/[0.06] bg-[#121519] px-6 text-center">
+          <Check size={22} className="mb-3 text-gray-700" />
+
+          <div className="text-sm font-medium text-gray-500">
+            No classes found
+          </div>
+
+          <div className="mt-1 text-[10px] text-gray-700">
+            Active classes will appear here automatically.
+          </div>
+        </div>
+      ) : (
+        <div className="min-w-0 space-y-4">
+          {subjectPairs.map((pair, pairIndex) => (
+            <div
+              key={pairIndex}
+              className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-2"
+            >
+              {pair.map((subject, subjectIndex) => (
+                <SubjectColumn
+                  key={subject.id}
+                  subject={subject}
+                  rows={subject.rows}
+                  color={colorForSubject(pairIndex * 2 + subjectIndex)}
+                  onComment={setSelectedClass}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <CommentModal
+        row={selectedClass}
+        onClose={() => setSelectedClass(null)}
+        onSaved={handleCommentSaved}
+      />
     </div>
   );
 }

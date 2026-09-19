@@ -1,45 +1,34 @@
 const jalaali = require("jalaali-js");
 
-/**
- * Convert a JavaScript Date or PostgreSQL date value
- * into a Solar Hijri date object.
- */
 function dateToJalaali(date) {
   const d = date instanceof Date ? date : new Date(date);
 
-  return jalaali.toJalaali(d.getFullYear(), d.getMonth() + 1, d.getDate());
+  if (Number.isNaN(d.getTime())) {
+    throw new Error("Invalid Gregorian date");
+  }
+
+  return jalaali.toJalaali(
+    d.getUTCFullYear(),
+    d.getUTCMonth() + 1,
+    d.getUTCDate(),
+  );
 }
 
-/**
- * Convert Solar Hijri date to JavaScript Date.
- *
- * Accepts:
- *   jalaaliToDate(1405, 6, 26)
- */
 function jalaaliToDate(year, month, day) {
-  if (!jalaali.isValidJalaaliDate(year, month, day)) {
+  const numericYear = Number(year);
+  const numericMonth = Number(month);
+  const numericDay = Number(day);
+
+  if (!jalaali.isValidJalaaliDate(numericYear, numericMonth, numericDay)) {
     throw new Error("Invalid Solar Hijri date");
   }
 
-  const result = jalaali.toGregorian(year, month, day);
+  const result = jalaali.toGregorian(numericYear, numericMonth, numericDay);
 
-  return new Date(result.gy, result.gm - 1, result.gd);
+  // Noon UTC prevents timezone/date rollover problems.
+  return new Date(Date.UTC(result.gy, result.gm - 1, result.gd, 12, 0, 0, 0));
 }
 
-/**
- * Parse a Solar Hijri date string.
- *
- * Accepts:
- *   1405/06/26
- *   1405-06-26
- *
- * Returns:
- *   {
- *     year: 1405,
- *     month: 6,
- *     day: 26
- *   }
- */
 function parseSolarDate(value) {
   if (typeof value !== "string") {
     throw new Error("Solar Hijri date must be a string");
@@ -59,41 +48,39 @@ function parseSolarDate(value) {
     throw new Error("Invalid Solar Hijri date");
   }
 
+  const gregorianDate = jalaaliToDate(year, month, day);
+
   return {
     year,
     month,
     day,
+    gregorianDate,
   };
 }
 
-/**
- * Get the number of days in a Solar Hijri month.
- */
 function getJalaaliMonthDays(year, month) {
-  if (month >= 1 && month <= 6) {
+  const numericYear = Number(year);
+  const numericMonth = Number(month);
+
+  if (!Number.isInteger(numericYear) || !Number.isInteger(numericMonth)) {
+    throw new Error("Invalid Solar Hijri year or month");
+  }
+
+  if (numericMonth >= 1 && numericMonth <= 6) {
     return 31;
   }
 
-  if (month >= 7 && month <= 11) {
+  if (numericMonth >= 7 && numericMonth <= 11) {
     return 30;
   }
 
-  if (month === 12) {
-    return jalaali.isLeapJalaaliYear(year) ? 30 : 29;
+  if (numericMonth === 12) {
+    return jalaali.isLeapJalaaliYear(numericYear) ? 30 : 29;
   }
 
   throw new Error("Invalid Solar Hijri month");
 }
 
-/**
- * Format a Solar Hijri date.
- *
- * Example:
- *   formatJalaali(1405, 6, 26)
- *
- * Returns:
- *   1405/06/26
- */
 function formatJalaali(year, month, day) {
   return `${String(year).padStart(4, "0")}/${String(month).padStart(
     2,
@@ -101,9 +88,6 @@ function formatJalaali(year, month, day) {
   )}/${String(day).padStart(2, "0")}`;
 }
 
-/**
- * Alias used by the fee-period module.
- */
 function formatSolarDate(year, month, day) {
   return formatJalaali(year, month, day);
 }

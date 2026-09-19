@@ -1,376 +1,222 @@
 const express = require("express");
-const { query } = require("../db/pool");
-const { authRequired, requireRoles } = require("../middleware/auth");
-const { asyncH } = require("../utils/helpers");
 
 const router = express.Router();
 
-const DAY_ORDER = `
-  CASE t.day_of_week
-    WHEN 'Monday' THEN 1
-    WHEN 'Tuesday' THEN 2
-    WHEN 'Wednesday' THEN 3
-    WHEN 'Thursday' THEN 4
-    WHEN 'Friday' THEN 5
-    WHEN 'Saturday' THEN 6
-    WHEN 'Sunday' THEN 7
-    ELSE 8
-  END
-`;
+const { query } = require("../db/pool");
+const { authRequired, requireRoles } = require("../middleware/auth");
 
-/*
-  TIMETABLE
-  ----------
-  Timetable entries are separate schedule records.
+const asyncH = (fn) => (req, res, next) =>
+  Promise.resolve(fn(req, res, next)).catch(next);
 
-  Current class-slot rules:
-  - No days stored on class_slots.
-  - No room stored on class_slots.
-  - No academic year stored on class_slots.
-  - Teachers are records in the teachers table.
-  - Teachers do not have login accounts.
+async function getTimetableRows(classSlotId = null) {
+  const values = [];
+  let where = "WHERE cs.is_active = TRUE";
 
-  Current application login roles:
-  - admin
-  - attendance
-
-  Therefore timetable management is currently admin-only.
-*/
-
-/*
-  GET /api/timetable
-
-  Returns timetable entries joined with:
-  - subject
-  - teacher
-  - class slot
-
-  Optional filters:
-    ?day_of_week=Monday
-    ?class_slot_id=1
-*/
-router.get(
-  "/",
-  authRequired,
-  asyncH(async (req, res) => {
-    const { day_of_week, class_slot_id } = req.query;
-
-    const conditions = [];
-    const params = [];
-
-    if (day_of_week) {
-      params.push(day_of_week);
-      conditions.push(`t.day_of_week = $${params.length}`);
-    }
-
-    if (class_slot_id) {
-      params.push(class_slot_id);
-      conditions.push(`t.class_slot_id = $${params.length}`);
-    }
-
-    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-
-    const result = await query(
-      `SELECT
-         t.id,
-         t.class_slot_id,
-         t.day_of_week,
-         t.start_time,
-         t.end_time,
-
-         cs.subject_id,
-         s.name AS subject_name,
-         s.code AS subject_code,
-
-         cs.teacher_id,
-         teachers.full_name AS teacher_name,
-
-         cs.start_time AS class_slot_start_time,
-         cs.end_time AS class_slot_end_time,
-         cs.is_active AS class_slot_active
-
-       FROM timetable t
-
-       JOIN class_slots cs
-         ON cs.id = t.class_slot_id
-
-       JOIN subjects s
-         ON s.id = cs.subject_id
-
-       JOIN teachers
-         ON teachers.id = cs.teacher_id
-
-       ${where}
-
-       ORDER BY
-         ${DAY_ORDER},
-         t.start_time,
-         t.id`,
-      params,
-    );
-
-    res.json(result.rows);
-  }),
-);
-
-/*
-  GET /api/timetable/class/:classSlotId
-
-  Get the complete timetable for one class slot.
-*/
-router.get(
-  "/class/:classSlotId([0-9]+)",
-  authRequired,
-  asyncH(async (req, res) => {
-    const slotResult = await query(
-      `SELECT
-         cs.id,
-         cs.subject_id,
-         s.name AS subject_name,
-         s.code AS subject_code,
-
-         cs.teacher_id,
-         teachers.full_name AS teacher_name,
-
-         cs.start_time,
-         cs.end_time,
-         cs.is_active
-
-       FROM class_slots cs
-
-       JOIN subjects s
-         ON s.id = cs.subject_id
-
-       JOIN teachers
-         ON teachers.id = cs.teacher_id
-
-       WHERE cs.id = $1`,
-      [req.params.classSlotId],
-    );
-
-    if (!slotResult.rows.length) {
-      return res.status(404).json({
-        error: "Class slot not found",
-      });
-    }
-
-    const slot = slotResult.rows[0];
-
-    const timetableResult = await query(
-      `SELECT
-         id,
-         class_slot_id,
-         day_of_week,
-         start_time,
-         end_time
-       FROM timetable
-       WHERE class_slot_id = $1
-       ORDER BY
-         ${DAY_ORDER},
-         start_time,
-         id`,
-      [req.params.classSlotId],
-    );
-
-    res.json({
-      class_slot: slot,
-      timetable: timetableResult.rows,
-    });
-  }),
-);
-
-/*
-  POST /api/timetable
-
-  Creates one timetable entry.
-
-  Body:
-  {
-    class_slot_id,
-    day_of_week,
-    start_time,
-    end_time
+  if (classSlotId !== null) {
+    values.push(classSlotId);
+    where += ` AND cs.id = $${values.length}`;
   }
 
-  Admin only.
-*/
-router.post(
+  const result = await query(
+    `
+      SELECT
+        cs.id,
+
+        cs.subject_id,
+        s.name AS subject_name,
+        s.code AS subject_code,
+
+        cs.teacher_id,
+        t.full_name AS teacher_name,
+
+        cs.start_time AS class_start_time,
+        cs.end_time AS class_end_time,
+
+        cs.comments,
+
+        tt.id AS timetable_id,
+        tt.day_of_week,
+
+        COALESCE(tt.start_time, cs.start_time) AS timetable_start_time,
+        COALESCE(tt.end_time, cs.end_time) AS timetable_end_time,
+
+        tt.room,
+
+        CASE
+          WHEN tt.id IS NULL THEN FALSE
+          ELSE TRUE
+        END AS has_timetable_entry,
+
+        cs.is_active,
+        cs.created_at,
+
+        COALESCE(
+          (
+            SELECT COUNT(*)
+            FROM student_enrollments se
+            WHERE se.class_slot_id = cs.id
+              AND se.is_active = TRUE
+          ),
+          0
+        )::INTEGER AS student_count,
+
+        COALESCE(
+          (
+            SELECT json_agg(
+              json_build_object(
+                'id', b.id,
+                'name', b.name
+              )
+              ORDER BY b.name
+            )
+            FROM class_slot_books cb
+            INNER JOIN subject_books b
+              ON b.id = cb.book_id
+            WHERE cb.class_slot_id = cs.id
+          ),
+          '[]'::json
+        ) AS books
+
+      FROM class_slots cs
+
+      INNER JOIN subjects s
+        ON s.id = cs.subject_id
+
+      INNER JOIN teachers t
+        ON t.id = cs.teacher_id
+
+      LEFT JOIN timetable tt
+        ON tt.class_slot_id = cs.id
+
+      ${where}
+
+      ORDER BY
+        CASE
+          WHEN tt.id IS NULL THEN 99
+          WHEN LOWER(tt.day_of_week) = 'monday' THEN 1
+          WHEN LOWER(tt.day_of_week) = 'tuesday' THEN 2
+          WHEN LOWER(tt.day_of_week) = 'wednesday' THEN 3
+          WHEN LOWER(tt.day_of_week) = 'thursday' THEN 4
+          WHEN LOWER(tt.day_of_week) = 'friday' THEN 5
+          WHEN LOWER(tt.day_of_week) = 'saturday' THEN 6
+          WHEN LOWER(tt.day_of_week) = 'sunday' THEN 7
+          ELSE 98
+        END,
+
+        COALESCE(tt.start_time, cs.start_time),
+
+        s.name,
+
+        t.full_name
+    `,
+    values,
+  );
+
+  return result.rows;
+}
+
+/*
+ * GET /api/timetable
+ *
+ * Returns every active class from class_slots.
+ *
+ * If a timetable record exists:
+ *   - day_of_week comes from timetable
+ *   - room comes from timetable
+ *   - time comes from timetable
+ *
+ * If no timetable record exists:
+ *   - the class still appears
+ *   - day/room are null
+ *   - class time comes from class_slots
+ */
+router.get(
   "/",
   authRequired,
-  requireRoles("admin"),
   asyncH(async (req, res) => {
-    const { class_slot_id, day_of_week, start_time, end_time } = req.body;
+    const rows = await getTimetableRows();
 
-    if (!class_slot_id || !day_of_week || !start_time || !end_time) {
-      return res.status(400).json({
-        error: "Class slot, day, start time and end time are required",
-      });
-    }
-
-    const validDays = [
-      "Monday",
-      "Tuesday",
-      "Wednesday",
-      "Thursday",
-      "Saturday",
-      "Sunday",
-    ];
-
-    if (!validDays.includes(day_of_week)) {
-      return res.status(400).json({
-        error: "Invalid day of week. Friday is not available.",
-      });
-    }
-
-    const slotResult = await query(
-      `SELECT
-         id,
-         start_time AS slot_start_time,
-         end_time AS slot_end_time,
-         is_active
-       FROM class_slots
-       WHERE id = $1`,
-      [class_slot_id],
-    );
-
-    if (!slotResult.rows.length) {
-      return res.status(404).json({
-        error: "Class slot not found",
-      });
-    }
-
-    const slot = slotResult.rows[0];
-
-    if (!slot.is_active) {
-      return res.status(400).json({
-        error: "This class slot is inactive",
-      });
-    }
-
-    if (end_time <= start_time) {
-      return res.status(400).json({
-        error: "End time must be after start time",
-      });
-    }
-
-    const result = await query(
-      `INSERT INTO timetable
-       (
-         class_slot_id,
-         day_of_week,
-         start_time,
-         end_time
-       )
-       VALUES ($1, $2, $3, $4)
-       RETURNING *`,
-      [class_slot_id, day_of_week, start_time, end_time],
-    );
-
-    res.status(201).json(result.rows[0]);
+    res.json(rows);
   }),
 );
 
 /*
-  PUT /api/timetable/:id
+ * GET /api/timetable/class/:classSlotId
+ */
+router.get(
+  "/class/:classSlotId",
+  authRequired,
+  asyncH(async (req, res) => {
+    const classSlotId = Number(req.params.classSlotId);
 
-  Update timetable entry.
+    if (!Number.isInteger(classSlotId) || classSlotId <= 0) {
+      return res.status(400).json({
+        message: "Invalid class slot ID.",
+      });
+    }
 
-  Admin only.
-*/
+    const rows = await getTimetableRows(classSlotId);
+
+    if (!rows.length) {
+      return res.status(404).json({
+        message: "Active class not found.",
+      });
+    }
+
+    res.json(rows[0]);
+  }),
+);
+
+/*
+ * PUT /api/timetable/class/:classSlotId/comments
+ *
+ * Comments belong to class_slots, not timetable.
+ */
 router.put(
-  "/:id([0-9]+)",
+  "/class/:classSlotId/comments",
   authRequired,
-  requireRoles("admin"),
+  requireRoles("admin", "teacher"),
   asyncH(async (req, res) => {
-    const existingResult = await query(
-      `SELECT *
-       FROM timetable
-       WHERE id = $1`,
-      [req.params.id],
-    );
+    const classSlotId = Number(req.params.classSlotId);
 
-    if (!existingResult.rows.length) {
-      return res.status(404).json({
-        error: "Timetable entry not found",
+    if (!Number.isInteger(classSlotId) || classSlotId <= 0) {
+      return res.status(400).json({
+        message: "Invalid class slot ID.",
       });
     }
 
-    const existing = existingResult.rows[0];
+    const comments =
+      typeof req.body?.comments === "string" ? req.body.comments.trim() : "";
 
-    const { day_of_week, start_time, end_time } = req.body;
-
-    const newDay = day_of_week ?? existing.day_of_week;
-    const newStart = start_time ?? existing.start_time;
-    const newEnd = end_time ?? existing.end_time;
-
-    const validDays = [
-      "Monday",
-      "Tuesday",
-      "Wednesday",
-      "Thursday",
-      "Saturday",
-      "Sunday",
-    ];
-
-    if (!validDays.includes(newDay)) {
+    if (comments.length > 5000) {
       return res.status(400).json({
-        error: "Invalid day of week. Friday is not available.",
-      });
-    }
-
-    if (newEnd <= newStart) {
-      return res.status(400).json({
-        error: "End time must be after start time",
+        message: "Comments cannot exceed 5000 characters.",
       });
     }
 
     const result = await query(
-      `UPDATE timetable
-       SET
-         day_of_week = $1,
-         start_time = $2,
-         end_time = $3
-       WHERE id = $4
-       RETURNING *`,
-      [newDay, newStart, newEnd, req.params.id],
+      `
+        UPDATE class_slots
+        SET comments = $1
+        WHERE id = $2
+          AND is_active = TRUE
+        RETURNING
+          id,
+          comments
+      `,
+      [comments || null, classSlotId],
     );
 
-    res.json(result.rows[0]);
-  }),
-);
-
-/*
-  DELETE /api/timetable/:id
-
-  Admin only.
-*/
-router.delete(
-  "/:id([0-9]+)",
-  authRequired,
-  requireRoles("admin"),
-  asyncH(async (req, res) => {
-    const existingResult = await query(
-      `SELECT id
-       FROM timetable
-       WHERE id = $1`,
-      [req.params.id],
-    );
-
-    if (!existingResult.rows.length) {
+    if (!result.rows.length) {
       return res.status(404).json({
-        error: "Timetable entry not found",
+        message: "Active class not found.",
       });
     }
-
-    await query(
-      `DELETE FROM timetable
-       WHERE id = $1`,
-      [req.params.id],
-    );
 
     res.json({
-      ok: true,
-      message: "Timetable entry deleted successfully",
+      message: "Comment saved.",
+      id: result.rows[0].id,
+      comments: result.rows[0].comments,
     });
   }),
 );
