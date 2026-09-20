@@ -5,11 +5,17 @@ const { asyncH } = require("../utils/helpers");
 
 const router = express.Router();
 
-/*
-|--------------------------------------------------------------------------
-| GET ALL ACTIVE CLASS SLOTS
-|--------------------------------------------------------------------------
-*/
+function normalizeOptionalText(value) {
+  if (value === undefined || value === null) return null;
+
+  const text = String(value).trim();
+
+  return text || null;
+}
+
+/* =========================================================
+   ACTIVE CLASSES
+========================================================= */
 
 router.get(
   "/",
@@ -21,12 +27,12 @@ router.get(
         cs.subject_id,
         s.name AS subject_name,
         s.code AS subject_code,
-
         cs.teacher_id,
         t.full_name AS teacher_name,
-
         cs.start_time,
         cs.end_time,
+        cs.academic_year,
+        cs.level,
         cs.is_active,
         cs.created_at,
 
@@ -55,10 +61,8 @@ router.get(
         ) AS student_count
 
       FROM class_slots cs
-
       INNER JOIN subjects s
         ON s.id = cs.subject_id
-
       INNER JOIN teachers t
         ON t.id = cs.teacher_id
 
@@ -74,11 +78,9 @@ router.get(
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| GET ALL SUBJECTS
-|--------------------------------------------------------------------------
-*/
+/* =========================================================
+   SUBJECTS
+========================================================= */
 
 router.get(
   "/subjects/all",
@@ -114,19 +116,12 @@ router.get(
         ) AS books
 
       FROM subjects s
-
       ORDER BY s.name
     `);
 
     res.json(r.rows);
   }),
 );
-
-/*
-|--------------------------------------------------------------------------
-| CREATE SUBJECT
-|--------------------------------------------------------------------------
-*/
 
 router.post(
   "/subjects",
@@ -144,11 +139,8 @@ router.post(
     try {
       const r = await query(
         `
-          INSERT INTO subjects (
-            name,
-            code
-          )
-          VALUES ($1, $2)
+          INSERT INTO subjects(name, code)
+          VALUES($1, $2)
           RETURNING *
         `,
         [
@@ -172,12 +164,6 @@ router.post(
     }
   }),
 );
-
-/*
-|--------------------------------------------------------------------------
-| UPDATE SUBJECT
-|--------------------------------------------------------------------------
-*/
 
 router.put(
   "/subjects/:id",
@@ -231,59 +217,52 @@ router.put(
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| DELETE SUBJECT
-|--------------------------------------------------------------------------
-|
-| Permanent deletion.
-| PostgreSQL will reject this if the subject is still used by a class slot.
-|
-*/
-
 router.delete(
   "/subjects/:id",
   authRequired,
   requireRoles("admin"),
   asyncH(async (req, res) => {
-    try {
-      const r = await query(
-        `
-          DELETE FROM subjects
-          WHERE id = $1
-          RETURNING id
-        `,
-        [req.params.id],
-      );
+    const usage = await query(
+      `
+        SELECT EXISTS(
+          SELECT 1
+          FROM class_slots
+          WHERE subject_id = $1
+        ) AS in_use
+      `,
+      [req.params.id],
+    );
 
-      if (!r.rows.length) {
-        return res.status(404).json({
-          error: "Subject not found",
-        });
-      }
-
-      res.json({
-        ok: true,
+    if (usage.rows[0].in_use) {
+      return res.status(409).json({
+        error:
+          "This subject cannot be deleted because it is used by a class time slot. Archive or stop using the class instead.",
+        code: "SUBJECT_IN_USE",
       });
-    } catch (error) {
-      if (error.code === "23503") {
-        return res.status(409).json({
-          error:
-            "This subject cannot be deleted because it is being used by a class time slot.",
-          code: "SUBJECT_IN_USE",
-        });
-      }
-
-      throw error;
     }
+
+    const r = await query(
+      `
+        DELETE FROM subjects
+        WHERE id = $1
+        RETURNING id
+      `,
+      [req.params.id],
+    );
+
+    if (!r.rows.length) {
+      return res.status(404).json({
+        error: "Subject not found",
+      });
+    }
+
+    res.json({ ok: true });
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| GET BOOKS FOR SUBJECT
-|--------------------------------------------------------------------------
-*/
+/* =========================================================
+   SUBJECT BOOKS
+========================================================= */
 
 router.get(
   "/subjects/:id([0-9]+)/books",
@@ -322,12 +301,6 @@ router.get(
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| CREATE BOOK
-|--------------------------------------------------------------------------
-*/
-
 router.post(
   "/subjects/:id([0-9]+)/books",
   authRequired,
@@ -359,11 +332,8 @@ router.post(
     try {
       const r = await query(
         `
-          INSERT INTO subject_books (
-            subject_id,
-            name
-          )
-          VALUES ($1, $2)
+          INSERT INTO subject_books(subject_id, name)
+          VALUES($1, $2)
           RETURNING *
         `,
         [req.params.id, String(name).trim()],
@@ -382,12 +352,6 @@ router.post(
     }
   }),
 );
-
-/*
-|--------------------------------------------------------------------------
-| UPDATE BOOK
-|--------------------------------------------------------------------------
-*/
 
 router.put(
   "/books/:id([0-9]+)",
@@ -433,22 +397,30 @@ router.put(
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| DELETE BOOK
-|--------------------------------------------------------------------------
-|
-| Permanent deletion.
-| class_slot_books uses ON DELETE CASCADE, so deleting a book also removes
-| that book from any class slots where it was selected.
-|
-*/
-
 router.delete(
   "/books/:id([0-9]+)",
   authRequired,
   requireRoles("admin"),
   asyncH(async (req, res) => {
+    const usage = await query(
+      `
+        SELECT EXISTS(
+          SELECT 1
+          FROM class_slot_books
+          WHERE book_id = $1
+        ) AS in_use
+      `,
+      [req.params.id],
+    );
+
+    if (usage.rows[0].in_use) {
+      return res.status(409).json({
+        error:
+          "This book cannot be deleted because it is attached to a class. Create a new book instead of removing historical class information.",
+        code: "BOOK_IN_USE",
+      });
+    }
+
     const r = await query(
       `
         DELETE FROM subject_books
@@ -464,17 +436,13 @@ router.delete(
       });
     }
 
-    res.json({
-      ok: true,
-    });
+    res.json({ ok: true });
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| GET ONE CLASS SLOT
-|--------------------------------------------------------------------------
-*/
+/* =========================================================
+   SINGLE CLASS
+========================================================= */
 
 router.get(
   "/:id([0-9]+)",
@@ -487,12 +455,12 @@ router.get(
           cs.subject_id,
           s.name AS subject_name,
           s.code AS subject_code,
-
           cs.teacher_id,
           t.full_name AS teacher_name,
-
           cs.start_time,
           cs.end_time,
+          cs.academic_year,
+          cs.level,
           cs.is_active,
           cs.created_at,
 
@@ -514,10 +482,8 @@ router.get(
           ) AS books
 
         FROM class_slots cs
-
         INNER JOIN subjects s
           ON s.id = cs.subject_id
-
         INNER JOIN teachers t
           ON t.id = cs.teacher_id
 
@@ -536,11 +502,9 @@ router.get(
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| NORMALIZE BOOK IDS
-|--------------------------------------------------------------------------
-*/
+/* =========================================================
+   BOOK HELPERS
+========================================================= */
 
 function normalizeBookIds(value) {
   if (value === undefined || value === null) {
@@ -567,12 +531,6 @@ function normalizeBookIds(value) {
 
   return ids;
 }
-
-/*
-|--------------------------------------------------------------------------
-| VALIDATE BOOKS BELONG TO SUBJECT
-|--------------------------------------------------------------------------
-*/
 
 async function validateBookIdsForSubject(client, subjectId, bookIds) {
   if (!bookIds || bookIds.length === 0) {
@@ -601,12 +559,6 @@ async function validateBookIdsForSubject(client, subjectId, bookIds) {
   }
 }
 
-/*
-|--------------------------------------------------------------------------
-| ADD BOOKS TO CLASS SLOT
-|--------------------------------------------------------------------------
-*/
-
 async function insertClassBooks(client, classSlotId, bookIds) {
   if (!bookIds || bookIds.length === 0) {
     return;
@@ -615,29 +567,32 @@ async function insertClassBooks(client, classSlotId, bookIds) {
   for (const bookId of bookIds) {
     await client.query(
       `
-        INSERT INTO class_slot_books (
-          class_slot_id,
-          book_id
-        )
-        VALUES ($1, $2)
+        INSERT INTO class_slot_books(class_slot_id, book_id)
+        VALUES($1, $2)
       `,
       [classSlotId, bookId],
     );
   }
 }
 
-/*
-|--------------------------------------------------------------------------
-| CREATE CLASS SLOT
-|--------------------------------------------------------------------------
-*/
+/* =========================================================
+   CREATE CLASS
+========================================================= */
 
 router.post(
   "/",
   authRequired,
   requireRoles("admin"),
   asyncH(async (req, res) => {
-    const { subject_id, teacher_id, start_time, end_time, book_ids } = req.body;
+    const {
+      subject_id,
+      teacher_id,
+      start_time,
+      end_time,
+      book_ids,
+      academic_year,
+      level,
+    } = req.body;
 
     if (!subject_id || !teacher_id || !start_time || !end_time) {
       return res.status(400).json({
@@ -659,6 +614,10 @@ router.post(
       });
     }
 
+    const normalizedAcademicYear = normalizeOptionalText(academic_year);
+
+    const normalizedLevel = normalizeOptionalText(level);
+
     const client = await pool.connect();
 
     try {
@@ -666,9 +625,7 @@ router.post(
 
       const teacher = await client.query(
         `
-          SELECT
-            id,
-            full_name
+          SELECT id, full_name
           FROM teachers
           WHERE id = $1
         `,
@@ -708,23 +665,26 @@ router.post(
 
       const classResult = await client.query(
         `
-          INSERT INTO class_slots (
+          INSERT INTO class_slots(
             subject_id,
             teacher_id,
             start_time,
             end_time,
+            academic_year,
+            level,
             is_active
           )
-          VALUES (
-            $1,
-            $2,
-            $3,
-            $4,
-            TRUE
-          )
+          VALUES($1, $2, $3, $4, $5, $6, TRUE)
           RETURNING *
         `,
-        [subject_id, teacher_id, start_time, end_time],
+        [
+          subject_id,
+          teacher_id,
+          start_time,
+          end_time,
+          normalizedAcademicYear,
+          normalizedLevel,
+        ],
       );
 
       const classSlot = classResult.rows[0];
@@ -740,12 +700,12 @@ router.post(
             cs.subject_id,
             s.name AS subject_name,
             s.code AS subject_code,
-
             cs.teacher_id,
             t.full_name AS teacher_name,
-
             cs.start_time,
             cs.end_time,
+            cs.academic_year,
+            cs.level,
             cs.is_active,
             cs.created_at,
 
@@ -767,10 +727,8 @@ router.post(
             ) AS books
 
           FROM class_slots cs
-
           INNER JOIN subjects s
             ON s.id = cs.subject_id
-
           INNER JOIN teachers t
             ON t.id = cs.teacher_id
 
@@ -792,18 +750,9 @@ router.post(
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| UPDATE CLASS SLOT
-|--------------------------------------------------------------------------
-|
-| If book_ids is supplied:
-|   The existing book selection is completely replaced.
-|
-| If book_ids is omitted:
-|   Existing book selection is preserved.
-|
-*/
+/* =========================================================
+   UPDATE CLASS
+========================================================= */
 
 router.put(
   "/:id([0-9]+)",
@@ -816,6 +765,8 @@ router.put(
       start_time,
       end_time,
       book_ids,
+      academic_year,
+      level,
       is_active,
     } = req.body;
 
@@ -840,6 +791,8 @@ router.put(
             teacher_id,
             start_time,
             end_time,
+            academic_year,
+            level,
             is_active
           FROM class_slots
           WHERE id = $1
@@ -858,6 +811,19 @@ router.put(
 
       const current = existing.rows[0];
 
+      const assessmentCheck = await client.query(
+        `
+          SELECT EXISTS(
+            SELECT 1
+            FROM exams
+            WHERE class_slot_id = $1
+          ) AS has_exams
+        `,
+        [req.params.id],
+      );
+
+      const hasExams = assessmentCheck.rows[0].has_exams;
+
       const finalSubjectId =
         subject_id !== undefined ? subject_id : current.subject_id;
 
@@ -868,6 +834,53 @@ router.put(
         start_time !== undefined ? start_time : current.start_time;
 
       const finalEndTime = end_time !== undefined ? end_time : current.end_time;
+
+      const finalAcademicYear =
+        academic_year !== undefined
+          ? normalizeOptionalText(academic_year)
+          : current.academic_year;
+
+      const finalLevel =
+        level !== undefined ? normalizeOptionalText(level) : current.level;
+
+      let currentBookIds = [];
+
+      if (book_ids !== undefined) {
+        const currentBooks = await client.query(
+          `
+            SELECT book_id
+            FROM class_slot_books
+            WHERE class_slot_id = $1
+            ORDER BY book_id
+          `,
+          [req.params.id],
+        );
+
+        currentBookIds = currentBooks.rows.map((row) => Number(row.book_id));
+      }
+
+      const identityChanged =
+        Number(finalSubjectId) !== Number(current.subject_id) ||
+        Number(finalTeacherId) !== Number(current.teacher_id) ||
+        String(finalStartTime) !== String(current.start_time) ||
+        String(finalEndTime) !== String(current.end_time) ||
+        String(finalAcademicYear || "") !==
+          String(current.academic_year || "") ||
+        String(finalLevel || "") !== String(current.level || "") ||
+        (book_ids !== undefined &&
+          JSON.stringify(
+            [...(normalizedBookIds || [])].sort((a, b) => a - b),
+          ) !== JSON.stringify(currentBookIds));
+
+      if (hasExams && identityChanged) {
+        await client.query("ROLLBACK");
+
+        return res.status(409).json({
+          error:
+            "This class has assessments and its historical identity is locked. Archive this class and create a new class for a different teacher, subject, time, level, academic year, or book.",
+          code: "CLASS_HISTORY_LOCKED",
+        });
+      }
 
       if (String(finalEndTime) <= String(finalStartTime)) {
         await client.query("ROLLBACK");
@@ -919,7 +932,7 @@ router.put(
         );
       }
 
-      const updated = await client.query(
+      await client.query(
         `
           UPDATE class_slots
           SET
@@ -927,15 +940,18 @@ router.put(
             teacher_id = $2,
             start_time = $3,
             end_time = $4,
-            is_active = COALESCE($5, is_active)
-          WHERE id = $6
-          RETURNING *
+            academic_year = $5,
+            level = $6,
+            is_active = COALESCE($7, is_active)
+          WHERE id = $8
         `,
         [
           finalSubjectId,
           finalTeacherId,
           finalStartTime,
           finalEndTime,
+          finalAcademicYear,
+          finalLevel,
           is_active ?? null,
           req.params.id,
         ],
@@ -962,12 +978,12 @@ router.put(
             cs.subject_id,
             s.name AS subject_name,
             s.code AS subject_code,
-
             cs.teacher_id,
             t.full_name AS teacher_name,
-
             cs.start_time,
             cs.end_time,
+            cs.academic_year,
+            cs.level,
             cs.is_active,
             cs.created_at,
 
@@ -989,10 +1005,8 @@ router.put(
             ) AS books
 
           FROM class_slots cs
-
           INNER JOIN subjects s
             ON s.id = cs.subject_id
-
           INNER JOIN teachers t
             ON t.id = cs.teacher_id
 
@@ -1014,15 +1028,9 @@ router.put(
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| DEACTIVATE CLASS SLOT
-|--------------------------------------------------------------------------
-|
-| We do not physically delete the class slot.
-| This preserves historical relationships such as attendance/enrollment.
-|
-*/
+/* =========================================================
+   ARCHIVE CLASS
+========================================================= */
 
 router.delete(
   "/:id([0-9]+)",
@@ -1045,17 +1053,13 @@ router.delete(
       });
     }
 
-    res.json({
-      ok: true,
-    });
+    res.json({ ok: true });
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| GET STUDENTS IN CLASS SLOT
-|--------------------------------------------------------------------------
-*/
+/* =========================================================
+   CLASS STUDENTS
+========================================================= */
 
 router.get(
   "/:id([0-9]+)/students",
@@ -1065,12 +1069,10 @@ router.get(
       `
         SELECT
           se.id AS enrollment_id,
-
           st.id AS student_id,
           st.roll_number,
           st.guardian_name,
           st.guardian_phone,
-
           se.enrolled_on,
           se.is_active
 
@@ -1092,12 +1094,6 @@ router.get(
     res.json(r.rows);
   }),
 );
-
-/*
-|--------------------------------------------------------------------------
-| ENROLL STUDENT INTO CLASS SLOT
-|--------------------------------------------------------------------------
-*/
 
 router.post(
   "/:id([0-9]+)/students",
@@ -1130,7 +1126,7 @@ router.post(
 
     const student = await query(
       `
-        SELECT id
+        SELECT id, is_active
         FROM students
         WHERE id = $1
       `,
@@ -1143,17 +1139,22 @@ router.post(
       });
     }
 
+    if (!student.rows[0].is_active) {
+      return res.status(409).json({
+        error: "Archived students cannot be enrolled in classes",
+      });
+    }
+
     const r = await query(
       `
-        INSERT INTO student_enrollments (
+        INSERT INTO student_enrollments(
           student_id,
           class_slot_id
         )
-        VALUES ($1, $2)
+        VALUES($1, $2)
 
-        ON CONFLICT (student_id, class_slot_id)
-        DO UPDATE SET
-          is_active = TRUE
+        ON CONFLICT(student_id, class_slot_id)
+        DO UPDATE SET is_active = TRUE
 
         RETURNING *
       `,
@@ -1164,12 +1165,6 @@ router.post(
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| REMOVE STUDENT FROM CLASS SLOT
-|--------------------------------------------------------------------------
-*/
-
 router.delete(
   "/:id([0-9]+)/students/:studentId",
   authRequired,
@@ -1179,8 +1174,10 @@ router.delete(
       `
         UPDATE student_enrollments
         SET is_active = FALSE
+
         WHERE class_slot_id = $1
           AND student_id = $2
+
         RETURNING id
       `,
       [req.params.id, req.params.studentId],
@@ -1192,9 +1189,7 @@ router.delete(
       });
     }
 
-    res.json({
-      ok: true,
-    });
+    res.json({ ok: true });
   }),
 );
 

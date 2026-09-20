@@ -119,7 +119,11 @@ function buildMonthlyPeriodFromGregorianDate(paymentDate, monthlyAmount) {
 
 /* =========================================================
    GET /api/students
-   Get all students + active class enrollments
+   Get all ACTIVE students + active class enrollments
+
+   Archived students remain in the database for historical
+   records but are intentionally hidden from the normal
+   Students page.
 ========================================================= */
 
 router.get("/", authRequired, async (req, res, next) => {
@@ -141,6 +145,7 @@ router.get("/", authRequired, async (req, res, next) => {
         s.guardian_phone,
         s.guardian_email,
         s.admission_date,
+        s.is_active,
 
         COALESCE(
           json_agg(
@@ -201,12 +206,15 @@ router.get("/", authRequired, async (req, res, next) => {
         ON t.id = cs.teacher_id
 
       WHERE
-        $1 = ''
-        OR s.full_name ILIKE '%' || $1 || '%'
-        OR s.phone ILIKE '%' || $1 || '%'
-        OR s.roll_number ILIKE '%' || $1 || '%'
-        OR s.guardian_name ILIKE '%' || $1 || '%'
-        OR s.guardian_phone ILIKE '%' || $1 || '%'
+        s.is_active = TRUE
+        AND (
+          $1 = ''
+          OR s.full_name ILIKE '%' || $1 || '%'
+          OR s.phone ILIKE '%' || $1 || '%'
+          OR s.roll_number ILIKE '%' || $1 || '%'
+          OR s.guardian_name ILIKE '%' || $1 || '%'
+          OR s.guardian_phone ILIKE '%' || $1 || '%'
+        )
 
       GROUP BY s.id
       ORDER BY s.id DESC
@@ -240,7 +248,8 @@ router.get("/:id([0-9]+)", authRequired, async (req, res, next) => {
         s.guardian_name,
         s.guardian_phone,
         s.guardian_email,
-        s.admission_date
+        s.admission_date,
+        s.is_active
       FROM students s
       WHERE s.id = $1
       `,
@@ -710,6 +719,20 @@ router.put(
 
 /* =========================================================
    DELETE /api/students/:id
+
+   IMPORTANT:
+   This is an ARCHIVE, not a physical database delete.
+
+   Student history must remain available for:
+   - Attendance
+   - Payments
+   - Exams
+   - Marks
+   - Reports
+   - Historical records
+
+   The student row therefore remains permanently in the
+   database with is_active = FALSE.
 ========================================================= */
 
 router.delete(
@@ -720,21 +743,38 @@ router.delete(
     try {
       const result = await query(
         `
-        DELETE FROM students
+        UPDATE students
+        SET is_active = FALSE
         WHERE id = $1
-        RETURNING id, full_name, roll_number
+          AND is_active = TRUE
+        RETURNING id, full_name, roll_number, is_active
         `,
         [req.params.id],
       );
 
       if (!result.rows.length) {
-        return res.status(404).json({
-          error: "Student not found",
+        const existing = await query(
+          `
+          SELECT id, is_active
+          FROM students
+          WHERE id = $1
+          `,
+          [req.params.id],
+        );
+
+        if (!existing.rows.length) {
+          return res.status(404).json({
+            error: "Student not found",
+          });
+        }
+
+        return res.status(409).json({
+          error: "Student is already archived",
         });
       }
 
       res.json({
-        message: "Student deleted successfully",
+        message: "Student archived successfully",
         student: result.rows[0],
       });
     } catch (err) {
@@ -763,7 +803,9 @@ router.post(
 
       const student = await query(
         `
-        SELECT id
+        SELECT
+          id,
+          is_active
         FROM students
         WHERE id = $1
         `,
@@ -773,6 +815,12 @@ router.post(
       if (!student.rows.length) {
         return res.status(404).json({
           error: "Student not found",
+        });
+      }
+
+      if (!student.rows[0].is_active) {
+        return res.status(409).json({
+          error: "Archived students cannot be enrolled in classes",
         });
       }
 
@@ -876,6 +924,10 @@ router.post(
 
 /* =========================================================
    DELETE /api/students/:id/classes/:classSlotId
+
+   This removes the CURRENT enrollment only.
+   It does NOT delete the student or historical student
+   records.
 ========================================================= */
 
 router.delete(

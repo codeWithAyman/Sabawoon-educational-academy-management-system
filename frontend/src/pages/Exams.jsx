@@ -1,972 +1,1218 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+
 import {
-  Award,
-  Plus,
-  Search,
-  Trash2,
-  ChevronRight,
-  ArrowLeft,
-  Save,
-  Loader2,
-  Clock3,
-  UserRound,
   BookOpen,
+  CalendarDays,
+  Edit3,
+  FileText,
+  Loader2,
+  RefreshCw,
+  Save,
+  Search,
+  Users,
+  X,
 } from "lucide-react";
+
 import api from "../lib/api";
-import { useAuth } from "../context/AuthContext";
-import { useToast } from "../components/Toast";
 
-function formatTime(value) {
-  if (!value) return "";
+const SUBJECT_COLORS = [
+  {
+    bg: "bg-blue-500/[0.045]",
+    border: "border-blue-400/10",
+    text: "text-blue-300",
+    accent: "bg-blue-400",
+  },
+  {
+    bg: "bg-violet-500/[0.045]",
+    border: "border-violet-400/10",
+    text: "text-violet-300",
+    accent: "bg-violet-400",
+  },
+  {
+    bg: "bg-emerald-500/[0.045]",
+    border: "border-emerald-400/10",
+    text: "text-emerald-300",
+    accent: "bg-emerald-400",
+  },
+  {
+    bg: "bg-amber-500/[0.045]",
+    border: "border-amber-400/10",
+    text: "text-amber-300",
+    accent: "bg-amber-400",
+  },
+  {
+    bg: "bg-rose-500/[0.045]",
+    border: "border-rose-400/10",
+    text: "text-rose-300",
+    accent: "bg-rose-400",
+  },
+  {
+    bg: "bg-cyan-500/[0.045]",
+    border: "border-cyan-400/10",
+    text: "text-cyan-300",
+    accent: "bg-cyan-400",
+  },
+  {
+    bg: "bg-fuchsia-500/[0.045]",
+    border: "border-fuchsia-400/10",
+    text: "text-fuchsia-300",
+    accent: "bg-fuchsia-400",
+  },
+  {
+    bg: "bg-lime-500/[0.045]",
+    border: "border-lime-400/10",
+    text: "text-lime-300",
+    accent: "bg-lime-400",
+  },
+];
 
-  const parts = String(value).split(":");
-  const hour = Number(parts[0]);
-  const minute = parts[1] || "00";
+function colorForSubject(index) {
+  return SUBJECT_COLORS[index % SUBJECT_COLORS.length];
+}
 
-  if (!Number.isFinite(hour)) return value;
+function formatTime(time) {
+  if (!time) return "—";
+
+  const match = String(time).match(/^(\d{1,2}):(\d{2})/);
+
+  if (!match) return String(time);
+
+  let hour = Number(match[1]);
+  const minute = match[2];
 
   const suffix = hour >= 12 ? "PM" : "AM";
-  const displayHour = hour % 12 || 12;
 
-  return `${displayHour}:${minute} ${suffix}`;
+  hour %= 12;
+
+  if (hour === 0) hour = 12;
+
+  return `${hour}:${minute} ${suffix}`;
+}
+
+function formatTimeRange(row) {
+  const start = row.start_time || "";
+  const end = row.end_time || "";
+
+  if (!start && !end) return "—";
+  if (!end) return formatTime(start);
+
+  return `${formatTime(start)} – ${formatTime(end)}`;
 }
 
 function formatDate(value) {
   if (!value) return "—";
 
-  const text = String(value).slice(0, 10);
+  const date = new Date(`${String(value).slice(0, 10)}T00:00:00`);
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
-    return value;
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
   }
 
-  const [year, month, day] = text.split("-");
-  return `${day}/${month}/${year}`;
+  return date.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
 
-function slotLabel(slot) {
-  const time = `${formatTime(slot.start_time)} – ${formatTime(slot.end_time)}`;
+function getToday() {
+  const now = new Date();
 
-  const room = slot.room ? ` · ${slot.room}` : "";
-  const days = slot.days ? ` · ${slot.days}` : "";
-
-  return `${slot.subject_name} · ${time}${days}${room}`;
+  return [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+  ].join("-");
 }
 
-export default function Exams() {
-  const { user } = useAuth();
-  const toast = useToast();
+function getApiError(error, fallback) {
+  return (
+    error?.response?.data?.message || error?.response?.data?.error || fallback
+  );
+}
 
-  const isAdmin = user?.role === "admin";
-  const isTeacher = user?.role === "teacher";
+function normalizeBooks(books) {
+  if (!Array.isArray(books)) return [];
 
-  const [slots, setSlots] = useState([]);
-  const [assessments, setAssessments] = useState([]);
+  return books
+    .map((book) => ({
+      id: book?.id === null || book?.id === undefined ? null : Number(book.id),
 
-  const [selectedSlot, setSelectedSlot] = useState("");
-  const [search, setSearch] = useState("");
+      name: typeof book?.name === "string" ? book.name.trim() : "",
+    }))
+    .filter((book) => book.name);
+}
 
-  const [showCreate, setShowCreate] = useState(false);
-  const [selectedAssessment, setSelectedAssessment] = useState(null);
+function normalizeClassRow(row) {
+  return {
+    ...row,
 
+    id: Number(row.id),
+
+    subject_id:
+      row.subject_id === null || row.subject_id === undefined
+        ? null
+        : Number(row.subject_id),
+
+    teacher_id:
+      row.teacher_id === null || row.teacher_id === undefined
+        ? null
+        : Number(row.teacher_id),
+
+    student_count: Number(row.student_count || 0),
+
+    level: typeof row.level === "string" ? row.level.trim() : (row.level ?? ""),
+
+    books: normalizeBooks(row.books),
+
+    subject_name: row.subject_name || "",
+
+    subject_code: row.subject_code || "",
+
+    teacher_name: row.teacher_name || "",
+  };
+}
+
+function getLevelBookText(row) {
+  const level =
+    row.level === null || row.level === undefined
+      ? ""
+      : String(row.level).trim();
+
+  const books = Array.isArray(row.books)
+    ? row.books
+        .map((book) => book?.name)
+        .filter(Boolean)
+        .join(", ")
+    : "";
+
+  return [level, books].filter(Boolean).join(" · ");
+}
+
+function normalizeAssessment(row) {
+  return {
+    ...row,
+
+    id: Number(row.id),
+
+    class_slot_id: Number(row.class_slot_id),
+
+    total_marks: Number(row.total_marks || 0),
+
+    score_count: Number(row.score_count || 0),
+
+    books: normalizeBooks(row.books),
+  };
+}
+
+function EmptyState({ message }) {
+  return (
+    <div className="flex min-h-[220px] items-center justify-center rounded-xl border border-white/[0.06] bg-[#121519]">
+      <div className="text-center">
+        <FileText size={22} className="mx-auto mb-3 text-gray-700" />
+
+        <div className="text-sm font-medium text-gray-500">{message}</div>
+      </div>
+    </div>
+  );
+}
+
+function ScoresModal({ assessment, row, onClose, onSaved }) {
+  const [students, setStudents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [scoresLoading, setScoresLoading] = useState(false);
+  const [error, setError] = useState("");
 
-  const [scores, setScores] = useState([]);
-
-  const [form, setForm] = useState({
-    name: "",
-    class_slot_id: "",
-    exam_date: "",
-    total_marks: "100",
-    academic_year: "",
-  });
-
-  const loadData = async () => {
-    try {
-      setLoading(true);
-
-      const [slotResponse, assessmentResponse] = await Promise.all([
-        api.get("/marks/assignments"),
-        api.get("/marks/assessments"),
-      ]);
-
-      setSlots(slotResponse.data || []);
-      setAssessments(assessmentResponse.data || []);
-    } catch (err) {
-      toast.error(err.response?.data?.error || "Failed to load reports");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const totalMarks = Number(assessment.total_marks || 0);
 
   useEffect(() => {
-    loadData();
-  }, []);
+    let cancelled = false;
 
-  const filteredSlots = useMemo(() => {
-    return slots.filter((slot) => {
-      if (!search.trim()) return true;
+    async function loadScores() {
+      setLoading(true);
+      setError("");
 
-      const value = search.toLowerCase();
+      try {
+        const response = await api.get(
+          `/marks/assessments/${assessment.id}/scores`,
+        );
 
-      return (
-        String(slot.subject_name || "")
-          .toLowerCase()
-          .includes(value) ||
-        String(slot.teacher_name || "")
-          .toLowerCase()
-          .includes(value) ||
-        String(slot.room || "")
-          .toLowerCase()
-          .includes(value) ||
-        String(slot.days || "")
-          .toLowerCase()
-          .includes(value)
-      );
-    });
-  }, [slots, search]);
+        const data = response?.data || {};
 
-  const filteredAssessments = useMemo(() => {
-    return assessments.filter((assessment) => {
-      if (
-        selectedSlot &&
-        String(assessment.class_slot_id) !== String(selectedSlot)
-      ) {
-        return false;
+        const incoming = Array.isArray(data.students) ? data.students : [];
+
+        if (cancelled) return;
+
+        /*
+         * IMPORTANT:
+         * The backend returns marks_obtained.
+         * The database does NOT have a score column.
+         */
+        setStudents(
+          incoming.map((student) => ({
+            ...student,
+
+            _studentId: Number(student.student_id),
+
+            _marksObtained:
+              student.marks_obtained === null ||
+              student.marks_obtained === undefined
+                ? ""
+                : String(student.marks_obtained),
+          })),
+        );
+      } catch (err) {
+        if (!cancelled) {
+          setError(getApiError(err, "Unable to load student scores."));
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
+    }
 
-      if (!search.trim()) return true;
+    loadScores();
 
-      const value = search.toLowerCase();
+    return () => {
+      cancelled = true;
+    };
+  }, [assessment.id]);
 
-      return (
-        String(assessment.name || "")
-          .toLowerCase()
-          .includes(value) ||
-        String(assessment.subject_name || "")
-          .toLowerCase()
-          .includes(value) ||
-        String(assessment.teacher_name || "")
-          .toLowerCase()
-          .includes(value)
-      );
-    });
-  }, [assessments, selectedSlot, search]);
-
-  const selectedFormSlot = useMemo(() => {
-    return slots.find(
-      (slot) =>
-        String(slot.id || slot.class_slot_id) === String(form.class_slot_id),
+  function updateMarks(studentId, value) {
+    setStudents((current) =>
+      current.map((student) =>
+        Number(student._studentId) === Number(studentId)
+          ? {
+              ...student,
+              _marksObtained: value,
+            }
+          : student,
+      ),
     );
-  }, [slots, form.class_slot_id]);
+  }
 
-  const resetForm = () => {
-    setForm({
-      name: "",
-      class_slot_id: "",
-      exam_date: "",
-      total_marks: "100",
-      academic_year: "",
-    });
-  };
+  async function handleSave() {
+    if (saving) return;
 
-  const startCreate = () => {
-    resetForm();
-    setShowCreate(true);
-  };
-
-  const handleCreate = async (event) => {
-    event.preventDefault();
-
-    if (
-      !form.name.trim() ||
-      !form.class_slot_id ||
-      !form.exam_date ||
-      !form.total_marks
-    ) {
-      toast.error("Please complete all required fields");
-      return;
-    }
-
-    const totalMarks = Number(form.total_marks);
-
-    if (!Number.isFinite(totalMarks) || totalMarks <= 0) {
-      toast.error("Maximum marks must be greater than zero");
-      return;
-    }
+    setSaving(true);
+    setError("");
 
     try {
-      setSaving(true);
+      const scores = students.map((student) => ({
+        student_id: Number(student._studentId),
 
-      await api.post("/marks/assessments", {
-        name: form.name.trim(),
-        class_slot_id: Number(form.class_slot_id),
-        exam_date: form.exam_date,
-        total_marks: totalMarks,
-        academic_year: form.academic_year.trim() || null,
-        is_published: false,
+        /*
+         * IMPORTANT:
+         * Send marks_obtained because that
+         * is the actual database column.
+         */
+        marks_obtained:
+          student._marksObtained === "" ? null : Number(student._marksObtained),
+      }));
+
+      for (const item of scores) {
+        if (!Number.isInteger(item.student_id) || item.student_id < 0) {
+          throw new Error("Invalid student ID.");
+        }
+
+        if (
+          item.marks_obtained !== null &&
+          (!Number.isFinite(item.marks_obtained) ||
+            item.marks_obtained < 0 ||
+            item.marks_obtained > totalMarks)
+        ) {
+          throw new Error(`Scores must be between 0 and ${totalMarks}.`);
+        }
+      }
+
+      await api.put(`/marks/assessments/${assessment.id}/scores`, {
+        scores,
       });
 
-      toast.success("Assessment created successfully");
-
-      setShowCreate(false);
-      resetForm();
-
-      await loadData();
+      onSaved();
+      onClose();
     } catch (err) {
-      toast.error(err.response?.data?.error || "Failed to create assessment");
+      setError(getApiError(err, err?.message || "Unable to save scores."));
     } finally {
       setSaving(false);
     }
-  };
+  }
 
-  const openAssessment = async (assessment) => {
-    try {
-      setSelectedAssessment(assessment);
-      setScoresLoading(true);
+  const levelBookText = getLevelBookText(row);
 
-      const response = await api.get(
-        `/marks/assessments/${assessment.id}/scores`,
-      );
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 px-4 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !saving) {
+          onClose();
+        }
+      }}
+    >
+      <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#121519] shadow-2xl">
+        {/* HEADER */}
+        <div className="flex items-start justify-between gap-4 border-b border-white/[0.06] px-5 py-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <Edit3 size={16} className="text-[#f2bd19]" />
 
-      setScores(response.data?.students || []);
-    } catch (err) {
-      toast.error(err.response?.data?.error || "Failed to load assessment");
+              <h2 className="truncate text-sm font-semibold text-white">
+                {assessment.name}
+              </h2>
+            </div>
 
-      setSelectedAssessment(null);
-      setScores([]);
-    } finally {
-      setScoresLoading(false);
-    }
-  };
+            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-gray-600">
+              <span>{row.subject_name}</span>
 
-  const updateScore = (studentId, value) => {
-    setScores((current) =>
-      current.map((student) =>
-        Number(student.student_id) === Number(studentId)
-          ? {
-              ...student,
-              marks_obtained: value,
-            }
-          : student,
-      ),
-    );
-  };
+              <span>
+                Teacher:{" "}
+                <span className="text-gray-400">{row.teacher_name || "—"}</span>
+              </span>
 
-  const updateGrade = (studentId, value) => {
-    setScores((current) =>
-      current.map((student) =>
-        Number(student.student_id) === Number(studentId)
-          ? {
-              ...student,
-              grade: value,
-            }
-          : student,
-      ),
-    );
-  };
+              <span>
+                Time:{" "}
+                <span className="text-gray-400">{formatTimeRange(row)}</span>
+              </span>
 
-  const updateRemarks = (studentId, value) => {
-    setScores((current) =>
-      current.map((student) =>
-        Number(student.student_id) === Number(studentId)
-          ? {
-              ...student,
-              remarks: value,
-            }
-          : student,
-      ),
-    );
-  };
+              <span>
+                Level / Book:{" "}
+                <span className="text-gray-400">{levelBookText || "—"}</span>
+              </span>
 
-  const saveScores = async () => {
-    if (!selectedAssessment) return;
-
-    try {
-      setSaving(true);
-
-      const total = Number(selectedAssessment.total_marks);
-
-      const payload = scores
-        .filter(
-          (student) =>
-            student.marks_obtained !== null &&
-            student.marks_obtained !== undefined &&
-            student.marks_obtained !== "",
-        )
-        .map((student) => ({
-          student_id: Number(student.student_id),
-          marks_obtained: Number(student.marks_obtained),
-          grade: student.grade || null,
-          remarks: student.remarks || null,
-        }));
-
-      const invalid = payload.find(
-        (score) =>
-          !Number.isFinite(score.marks_obtained) ||
-          score.marks_obtained < 0 ||
-          score.marks_obtained > total,
-      );
-
-      if (invalid) {
-        toast.error(`Scores must be between 0 and ${total}`);
-        return;
-      }
-
-      await api.put(`/marks/assessments/${selectedAssessment.id}/scores`, {
-        scores: payload,
-      });
-
-      toast.success("Scores saved successfully");
-
-      await openAssessment(selectedAssessment);
-      await loadData();
-    } catch (err) {
-      toast.error(err.response?.data?.error || "Failed to save scores");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const deleteAssessment = async (assessment) => {
-    if (
-      !window.confirm(
-        `Delete "${assessment.name}"? This will also delete its scores.`,
-      )
-    ) {
-      return;
-    }
-
-    try {
-      setSaving(true);
-
-      await api.delete(`/marks/assessments/${assessment.id}`);
-
-      toast.success("Assessment deleted successfully");
-
-      if (selectedAssessment?.id === assessment.id) {
-        setSelectedAssessment(null);
-        setScores([]);
-      }
-
-      await loadData();
-    } catch (err) {
-      toast.error(err.response?.data?.error || "Failed to delete assessment");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (selectedAssessment) {
-    const totalMarks = Number(selectedAssessment.total_marks);
-
-    return (
-      <div className="relative min-h-full overflow-hidden">
-        <div className="pointer-events-none absolute inset-0 overflow-hidden">
-          <div className="absolute left-1/2 top-[-220px] h-[500px] w-[500px] -translate-x-1/2 -translate-y-0 rounded-full bg-[#f2bd19]/[0.035] blur-[130px]" />
-        </div>
-
-        <div className="relative space-y-6">
-          <button
-            onClick={() => {
-              setSelectedAssessment(null);
-              setScores([]);
-            }}
-            className="inline-flex items-center gap-2 text-sm text-slate-400 transition hover:text-white"
-          >
-            <ArrowLeft size={16} />
-            Back to Reports
-          </button>
-
-          <div className="rounded-xl border border-white/[0.07] bg-[#121519] p-5 shadow-xl">
-            <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-              <div>
-                <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-[#f2bd19]">
-                  <Award size={14} />
-                  Academic Report
-                </div>
-
-                <h1 className="text-2xl font-semibold text-white">
-                  {selectedAssessment.name}
-                </h1>
-
-                <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-sm text-slate-400">
-                  <span className="inline-flex items-center gap-2">
-                    <BookOpen size={14} />
-                    {selectedAssessment.subject_name}
-                  </span>
-
-                  <span className="inline-flex items-center gap-2">
-                    <Clock3 size={14} />
-                    {formatTime(selectedAssessment.start_time)} –{" "}
-                    {formatTime(selectedAssessment.end_time)}
-                  </span>
-
-                  <span className="inline-flex items-center gap-2">
-                    <UserRound size={14} />
-                    {selectedAssessment.teacher_name}
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap gap-2 text-sm">
-                <div className="rounded-lg border border-white/[0.06] bg-[#0d1013] px-4 py-2 text-slate-300">
-                  Max marks:{" "}
-                  <span className="font-semibold text-white">
-                    {selectedAssessment.total_marks}
-                  </span>
-                </div>
-
-                <div className="rounded-lg border border-white/[0.06] bg-[#0d1013] px-4 py-2 text-slate-300">
-                  Date:{" "}
-                  <span className="font-semibold text-white">
-                    {formatDate(selectedAssessment.exam_date)}
-                  </span>
-                </div>
-              </div>
+              <span>
+                Total: <span className="text-gray-400">{totalMarks}</span>
+              </span>
             </div>
           </div>
 
-          <div className="rounded-xl border border-white/[0.07] bg-[#121519] shadow-xl">
-            <div className="flex flex-col gap-3 border-b border-white/[0.06] p-5 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <h2 className="font-semibold text-white">Student Results</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            className="rounded-lg p-1.5 text-gray-600 hover:bg-white/[0.05] hover:text-gray-300"
+          >
+            <X size={16} />
+          </button>
+        </div>
 
-                <p className="mt-1 text-sm text-slate-500">
-                  Enter scores, grades, and remarks for enrolled students.
-                </p>
-              </div>
-
-              <button
-                onClick={saveScores}
-                disabled={saving || scoresLoading}
-                className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#f2bd19] px-4 py-2 text-sm font-semibold text-black transition hover:bg-[#ffd34f] disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {saving ? (
-                  <Loader2 size={16} className="animate-spin" />
-                ) : (
-                  <Save size={16} />
-                )}
-                Save Scores
-              </button>
-            </div>
-
-            {scoresLoading ? (
-              <div className="flex items-center justify-center py-16 text-slate-400">
-                <Loader2 size={22} className="mr-2 animate-spin" />
+        {/* BODY */}
+        <div className="min-h-0 flex-1 overflow-auto p-5">
+          {loading ? (
+            <div className="flex min-h-[250px] items-center justify-center">
+              <div className="flex items-center gap-2 text-[11px] text-gray-600">
+                <Loader2 size={15} className="animate-spin" />
                 Loading students...
               </div>
-            ) : scores.length === 0 ? (
-              <div className="px-5 py-16 text-center text-slate-500">
-                No students are enrolled in this class slot.
+            </div>
+          ) : error ? (
+            <div className="rounded-xl border border-red-500/10 bg-red-500/[0.04] px-4 py-3 text-[10px] text-red-400">
+              {error}
+            </div>
+          ) : students.length === 0 ? (
+            <EmptyState message="No active students are enrolled in this class." />
+          ) : (
+            <div className="overflow-hidden rounded-xl border border-white/[0.06]">
+              <div className="grid grid-cols-[minmax(0,1fr)_100px_140px_100px] gap-3 bg-[#0b0d10] px-4 py-2.5 text-[8px] font-semibold uppercase tracking-[0.11em] text-gray-700">
+                <span>Student</span>
+                <span>Roll</span>
+                <span>Marks</span>
+                <span>Percentage</span>
               </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[950px] text-left">
-                  <thead>
-                    <tr className="border-b border-white/[0.06] text-xs uppercase tracking-wider text-slate-500">
-                      <th className="px-5 py-4">Roll No.</th>
-                      <th className="px-5 py-4">Guardian</th>
-                      <th className="px-5 py-4">Score</th>
-                      <th className="px-5 py-4">Percentage</th>
-                      <th className="px-5 py-4">Grade</th>
-                      <th className="px-5 py-4">Remarks</th>
-                    </tr>
-                  </thead>
 
-                  <tbody>
-                    {scores.map((student) => {
-                      const value =
-                        student.marks_obtained === null ||
-                        student.marks_obtained === undefined
-                          ? ""
-                          : student.marks_obtained;
+              {students.map((student) => {
+                const percentage =
+                  student._marksObtained === "" || totalMarks <= 0
+                    ? null
+                    : (Number(student._marksObtained) / totalMarks) * 100;
 
-                      const percentage =
-                        value === "" || totalMarks <= 0
-                          ? null
-                          : ((Number(value) / totalMarks) * 100).toFixed(1);
+                return (
+                  <div
+                    key={student._studentId}
+                    className="grid grid-cols-[minmax(0,1fr)_100px_140px_100px] items-center gap-3 border-t border-white/[0.045] px-4 py-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-[11px] font-medium text-gray-300">
+                        {student.full_name || "Unnamed student"}
+                      </div>
 
-                      return (
-                        <tr
-                          key={student.student_id}
-                          className="border-b border-white/[0.04] last:border-0"
-                        >
-                          <td className="px-5 py-4 font-medium text-white">
-                            {student.roll_number}
-                          </td>
+                      <div className="mt-0.5 text-[9px] text-gray-700">
+                        ID {student._studentId}
+                      </div>
+                    </div>
 
-                          <td className="px-5 py-4 text-sm text-slate-400">
-                            {student.guardian_name || "—"}
-                          </td>
+                    <div className="text-[10px] text-gray-500">
+                      {student.roll_number || "—"}
+                    </div>
 
-                          <td className="px-5 py-4">
-                            <input
-                              type="number"
-                              min="0"
-                              max={totalMarks}
-                              value={value}
-                              onChange={(event) =>
-                                updateScore(
-                                  student.student_id,
-                                  event.target.value,
-                                )
-                              }
-                              className="w-24 rounded-lg border border-white/[0.08] bg-[#0d1013] px-3 py-2 text-sm text-white outline-none transition focus:border-[#f2bd19]/60"
-                            />
-                          </td>
+                    <input
+                      type="number"
+                      min="0"
+                      max={totalMarks}
+                      step="0.01"
+                      value={student._marksObtained}
+                      onChange={(event) =>
+                        updateMarks(student._studentId, event.target.value)
+                      }
+                      placeholder="Marks"
+                      className="w-full rounded-lg border border-white/[0.07] bg-[#0b0d10] px-3 py-2 text-[11px] text-gray-200 outline-none placeholder:text-gray-700 focus:border-[#f2bd19]/30"
+                    />
 
-                          <td className="px-5 py-4 text-sm text-slate-400">
-                            {percentage === null ? "—" : `${percentage}%`}
-                          </td>
+                    <div className="text-[10px] text-gray-500">
+                      {percentage === null ? "—" : `${percentage.toFixed(1)}%`}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
-                          <td className="px-5 py-4">
-                            <input
-                              type="text"
-                              maxLength={5}
-                              value={student.grade || ""}
-                              onChange={(event) =>
-                                updateGrade(
-                                  student.student_id,
-                                  event.target.value,
-                                )
-                              }
-                              placeholder="A"
-                              className="w-20 rounded-lg border border-white/[0.08] bg-[#0d1013] px-3 py-2 text-sm text-white uppercase outline-none transition focus:border-[#f2bd19]/60"
-                            />
-                          </td>
+        {/* FOOTER */}
+        <div className="flex items-center justify-between gap-3 border-t border-white/[0.06] px-5 py-4">
+          <div className="text-[10px] text-red-400">{error}</div>
 
-                          <td className="px-5 py-4">
-                            <input
-                              type="text"
-                              value={student.remarks || ""}
-                              onChange={(event) =>
-                                updateRemarks(
-                                  student.student_id,
-                                  event.target.value,
-                                )
-                              }
-                              placeholder="Optional"
-                              className="w-52 rounded-lg border border-white/[0.08] bg-[#0d1013] px-3 py-2 text-sm text-white outline-none transition focus:border-[#f2bd19]/60"
-                            />
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={saving}
+              className="rounded-lg border border-white/[0.07] px-3.5 py-2 text-[10px] text-gray-500 hover:bg-white/[0.04] hover:text-gray-300"
+            >
+              Cancel
+            </button>
+
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving || loading || students.length === 0}
+              className="inline-flex items-center gap-2 rounded-lg bg-[#f2bd19] px-3.5 py-2 text-[10px] font-semibold text-black hover:bg-[#f7c52c] disabled:opacity-60"
+            >
+              {saving ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <Save size={12} />
+              )}
+
+              {saving ? "Saving..." : "Save Scores"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| CLASS ROW
+|--------------------------------------------------------------------------
+*/
+function ClassItem({ row, assessments, onOpen }) {
+  const levelBookText = getLevelBookText(row);
+
+  return (
+    <div className="grid min-w-0 grid-cols-[minmax(0,1.1fr)_minmax(88px,0.9fr)_minmax(0,1.05fr)_minmax(48px,0.45fr)_minmax(100px,0.7fr)] items-center gap-3 border-t border-white/[0.055] px-4 py-3 hover:bg-white/[0.018]">
+      <div className="min-w-0">
+        <div className="truncate text-[12px] font-medium text-gray-200">
+          {row.teacher_name || "—"}
+        </div>
+
+        <div className="mt-0.5 text-[9px] uppercase tracking-[0.08em] text-gray-700">
+          Teacher
+        </div>
+      </div>
+
+      <div className="truncate text-[11px] text-gray-400">
+        {formatTimeRange(row)}
+      </div>
+
+      <div className="min-w-0">
+        <div className="truncate text-[10px] text-gray-400">
+          {levelBookText || "No level / book"}
+        </div>
+
+        <div className="mt-0.5 text-[9px] uppercase tracking-[0.08em] text-gray-700">
+          Level / Book
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+        <Users size={13} className="text-gray-600" />
+
+        {row.student_count}
+      </div>
+
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={() => onOpen(row)}
+          className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.025] px-2.5 py-1.5 text-[9px] text-gray-500 hover:border-[#f2bd19]/25 hover:text-[#f2bd19]"
+        >
+          <FileText size={10} />
+          {assessments.length}{" "}
+          {assessments.length === 1 ? "assessment" : "assessments"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| SUBJECT COLUMN
+|--------------------------------------------------------------------------
+*/
+function SubjectColumn({ subject, rows, color, assessmentsByClass, onOpen }) {
+  const sortedRows = useMemo(
+    () =>
+      [...rows].sort((a, b) =>
+        String(a.start_time || "").localeCompare(String(b.start_time || "")),
+      ),
+    [rows],
+  );
+
+  return (
+    <div
+      className={`min-w-0 overflow-hidden rounded-xl border ${color.border} ${color.bg}`}
+    >
+      <div className="flex items-center justify-between gap-3 border-b border-white/[0.055] px-4 py-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <div className={`h-7 w-1 shrink-0 rounded-full ${color.accent}`} />
+
+          <div className="min-w-0">
+            <div className={`truncate text-[13px] font-semibold ${color.text}`}>
+              {subject.name}
+            </div>
+
+            {subject.code && (
+              <div className="mt-0.5 text-[9px] uppercase tracking-[0.08em] text-gray-700">
+                {subject.code}
               </div>
             )}
           </div>
         </div>
+
+        <div className="text-[9px] text-gray-600">
+          <BookOpen size={11} className="mr-1 inline" />
+          {rows.length} {rows.length === 1 ? "class" : "classes"}
+        </div>
       </div>
+
+      <div className="grid grid-cols-[minmax(0,1.1fr)_minmax(88px,0.9fr)_minmax(0,1.05fr)_minmax(48px,0.45fr)_minmax(100px,0.7fr)] gap-3 px-4 py-2 text-[8px] font-semibold uppercase tracking-[0.11em] text-gray-700">
+        <span>Teacher</span>
+        <span>Time</span>
+        <span>Level / Book</span>
+        <span>Students</span>
+        <span className="text-right">Assessments</span>
+      </div>
+
+      {sortedRows.map((row) => (
+        <ClassItem
+          key={row.id}
+          row={row}
+          assessments={assessmentsByClass.get(Number(row.id)) || []}
+          onOpen={onOpen}
+        />
+      ))}
+    </div>
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| CLASS WORKSPACE
+|--------------------------------------------------------------------------
+*/
+function ClassWorkspace({
+  row,
+  assessments,
+  onClose,
+  onNewAssessment,
+  onOpenAssessment,
+}) {
+  const levelBookText = getLevelBookText(row);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm">
+      <div className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#121519]">
+        <div className="flex items-start justify-between gap-4 border-b border-white/[0.06] px-5 py-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <BookOpen size={16} className="text-[#f2bd19]" />
+
+              <h2 className="truncate text-sm font-semibold text-white">
+                {row.subject_name}
+              </h2>
+            </div>
+
+            <div className="mt-2 flex flex-wrap gap-4 text-[10px] text-gray-600">
+              <span>
+                Teacher:{" "}
+                <span className="text-gray-400">{row.teacher_name || "—"}</span>
+              </span>
+
+              <span>
+                Time:{" "}
+                <span className="text-gray-400">{formatTimeRange(row)}</span>
+              </span>
+
+              <span>
+                Level / Book:{" "}
+                <span className="text-gray-400">{levelBookText || "—"}</span>
+              </span>
+
+              <span>
+                Students:{" "}
+                <span className="text-gray-400">{row.student_count}</span>
+              </span>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-gray-600 hover:bg-white/[0.05] hover:text-gray-300"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-3">
+          <div>
+            <div className="text-[11px] font-medium text-gray-300">
+              Assessments
+            </div>
+
+            <div className="mt-0.5 text-[9px] text-gray-700">
+              Assessments and scores for this class
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onNewAssessment}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-[#f2bd19] px-3 py-2 text-[10px] font-semibold text-black hover:bg-[#f7c52c]"
+          >
+            <FileText size={11} />
+            New Assessment
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-5">
+          {assessments.length === 0 ? (
+            <EmptyState message="No assessments yet." />
+          ) : (
+            <div className="space-y-2">
+              {assessments.map((assessment) => (
+                <div
+                  key={assessment.id}
+                  className="flex items-center justify-between gap-4 rounded-xl border border-white/[0.06] bg-[#0b0d10] px-4 py-3"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-[12px] font-medium text-gray-200">
+                      {assessment.name}
+                    </div>
+
+                    <div className="mt-1 text-[9px] text-gray-600">
+                      Date:{" "}
+                      <span className="text-gray-400">
+                        {formatDate(assessment.exam_date)}
+                      </span>
+                      <span className="mx-2">·</span>
+                      Total:{" "}
+                      <span className="text-gray-400">
+                        {assessment.total_marks}
+                      </span>
+                      <span className="mx-2">·</span>
+                      Scores:{" "}
+                      <span className="text-gray-400">
+                        {assessment.score_count}
+                      </span>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => onOpenAssessment(assessment, row)}
+                    className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-white/[0.07] px-3 py-2 text-[9px] text-gray-500 hover:border-[#f2bd19]/25 hover:text-[#f2bd19]"
+                  >
+                    <Edit3 size={10} />
+                    Scores
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| NEW ASSESSMENT MODAL
+|--------------------------------------------------------------------------
+*/
+function NewAssessmentModal({ row, onClose, onCreated }) {
+  const [name, setName] = useState("");
+
+  const [examDate, setExamDate] = useState(getToday());
+
+  const [totalMarks, setTotalMarks] = useState("100");
+
+  const [saving, setSaving] = useState(false);
+
+  const [error, setError] = useState("");
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+
+    if (saving) return;
+
+    if (!name.trim()) {
+      setError("Assessment name is required.");
+      return;
+    }
+
+    const total = Number(totalMarks);
+
+    if (!Number.isFinite(total) || total <= 0) {
+      setError("Total marks must be greater than zero.");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+
+    try {
+      const response = await api.post("/marks/assessments", {
+        name: name.trim(),
+        class_slot_id: Number(row.id),
+        exam_date: examDate,
+        total_marks: total,
+        is_published: false,
+      });
+
+      onCreated(normalizeAssessment(response.data));
+
+      onClose();
+    } catch (err) {
+      setError(getApiError(err, "Unable to create assessment."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const levelBookText = getLevelBookText(row);
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm">
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-lg overflow-hidden rounded-2xl border border-white/10 bg-[#121519]"
+      >
+        <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <FileText size={16} className="text-[#f2bd19]" />
+
+              <h2 className="text-sm font-semibold text-white">
+                New Assessment
+              </h2>
+            </div>
+
+            <p className="mt-1 text-[10px] text-gray-600">
+              {row.subject_name} · {row.teacher_name}
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            className="rounded-lg p-1.5 text-gray-600 hover:bg-white/[0.05] hover:text-gray-300"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="space-y-4 p-5">
+          <div className="rounded-xl border border-white/[0.05] bg-[#0b0d10] px-3 py-3 text-[10px] text-gray-500">
+            <div>
+              Teacher:{" "}
+              <span className="text-gray-300">{row.teacher_name || "—"}</span>
+            </div>
+
+            <div className="mt-1">
+              Time:{" "}
+              <span className="text-gray-300">{formatTimeRange(row)}</span>
+            </div>
+
+            <div className="mt-1">
+              Level / Book:{" "}
+              <span className="text-gray-300">{levelBookText || "—"}</span>
+            </div>
+          </div>
+
+          <div>
+            <label className="mb-2 block text-[10px] uppercase tracking-[0.1em] text-gray-600">
+              Assessment name
+            </label>
+
+            <input
+              autoFocus
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="e.g. Final Exam"
+              className="w-full rounded-xl border border-white/[0.08] bg-[#0b0d10] px-3.5 py-3 text-[12px] text-gray-200 outline-none placeholder:text-gray-700 focus:border-[#f2bd19]/30"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-2 block text-[10px] uppercase tracking-[0.1em] text-gray-600">
+                Date
+              </label>
+
+              <input
+                type="date"
+                value={examDate}
+                onChange={(event) => setExamDate(event.target.value)}
+                className="w-full rounded-xl border border-white/[0.08] bg-[#0b0d10] px-3 py-3 text-[11px] text-gray-300 outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-[10px] uppercase tracking-[0.1em] text-gray-600">
+                Total marks
+              </label>
+
+              <input
+                type="number"
+                min="1"
+                step="0.01"
+                value={totalMarks}
+                onChange={(event) => setTotalMarks(event.target.value)}
+                className="w-full rounded-xl border border-white/[0.08] bg-[#0b0d10] px-3 py-3 text-[11px] text-gray-300 outline-none"
+              />
+            </div>
+          </div>
+
+          {error && (
+            <div className="rounded-lg border border-red-500/10 bg-red-500/[0.04] px-3 py-2 text-[10px] text-red-400">
+              {error}
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-white/[0.06] px-5 py-4">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            className="rounded-lg border border-white/[0.07] px-3.5 py-2 text-[10px] text-gray-500 hover:text-gray-300"
+          >
+            Cancel
+          </button>
+
+          <button
+            type="submit"
+            disabled={saving}
+            className="inline-flex items-center gap-2 rounded-lg bg-[#f2bd19] px-3.5 py-2 text-[10px] font-semibold text-black disabled:opacity-60"
+          >
+            {saving ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Save size={12} />
+            )}
+
+            {saving ? "Creating..." : "Create Assessment"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| MAIN REPORTS PAGE
+|--------------------------------------------------------------------------
+*/
+export default function Exams() {
+  const [classes, setClasses] = useState([]);
+
+  const [assessments, setAssessments] = useState([]);
+
+  const [loading, setLoading] = useState(true);
+
+  const [refreshing, setRefreshing] = useState(false);
+
+  const [error, setError] = useState("");
+
+  const [search, setSearch] = useState("");
+
+  const [selectedClass, setSelectedClass] = useState(null);
+
+  const [newAssessmentClass, setNewAssessmentClass] = useState(null);
+
+  const [selectedAssessment, setSelectedAssessment] = useState(null);
+
+  const [selectedAssessmentClass, setSelectedAssessmentClass] = useState(null);
+
+  const loadReports = useCallback(async (showRefresh = false) => {
+    if (showRefresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
+
+    setError("");
+
+    try {
+      /*
+       * EXACTLY like Timetable:
+       * /classes is the source for class data.
+       */
+      const [classesResponse, assessmentsResponse] = await Promise.all([
+        api.get("/classes"),
+        api.get("/marks/assessments"),
+      ]);
+
+      const classData = Array.isArray(classesResponse.data)
+        ? classesResponse.data
+        : [];
+
+      const assessmentData = Array.isArray(assessmentsResponse.data)
+        ? assessmentsResponse.data
+        : [];
+
+      setClasses(
+        classData
+          .map(normalizeClassRow)
+          .filter((row) => row.is_active !== false),
+      );
+
+      setAssessments(assessmentData.map(normalizeAssessment));
+    } catch (err) {
+      setError(getApiError(err, "Unable to load reports."));
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadReports();
+  }, [loadReports]);
+
+  const assessmentsByClass = useMemo(() => {
+    const map = new Map();
+
+    assessments.forEach((assessment) => {
+      const classId = Number(assessment.class_slot_id);
+
+      if (!map.has(classId)) {
+        map.set(classId, []);
+      }
+
+      map.get(classId).push(assessment);
+    });
+
+    return map;
+  }, [assessments]);
+
+  const filteredClasses = useMemo(() => {
+    const term = search.trim().toLowerCase();
+
+    if (!term) {
+      return classes;
+    }
+
+    return classes.filter((row) => {
+      const levelBook = getLevelBookText(row);
+
+      const text = [
+        row.subject_name,
+        row.subject_code,
+        row.teacher_name,
+        row.level,
+        levelBook,
+        ...row.books.map((book) => book.name),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return text.includes(term);
+    });
+  }, [classes, search]);
+
+  const subjects = useMemo(() => {
+    const map = new Map();
+
+    filteredClasses.forEach((row) => {
+      const key =
+        row.subject_id !== null
+          ? String(row.subject_id)
+          : `name:${row.subject_name}`;
+
+      if (!map.has(key)) {
+        map.set(key, {
+          id: key,
+          name: row.subject_name || "Unnamed subject",
+          code: row.subject_code || "",
+          rows: [],
+        });
+      }
+
+      map.get(key).rows.push(row);
+    });
+
+    return Array.from(map.values()).sort((a, b) =>
+      a.name.localeCompare(b.name),
     );
+  }, [filteredClasses]);
+
+  const subjectPairs = useMemo(() => {
+    const result = [];
+
+    for (let i = 0; i < subjects.length; i += 2) {
+      result.push(subjects.slice(i, i + 2));
+    }
+
+    return result;
+  }, [subjects]);
+
+  function openAssessment(assessment, row) {
+    setSelectedAssessment(assessment);
+
+    setSelectedAssessmentClass(row);
+  }
+
+  function handleCreated(assessment) {
+    setAssessments((current) => [...current, assessment]);
+
+    loadReports(true);
   }
 
   return (
-    <div className="relative min-h-full overflow-hidden">
-      <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        <div className="absolute left-1/2 top-[-220px] h-[500px] w-[500px] -translate-x-1/2 rounded-full bg-[#f2bd19]/[0.035] blur-[130px]" />
-        <div className="absolute bottom-[-260px] right-[-120px] h-[450px] w-[450px] rounded-full bg-[#f2bd19]/[0.018] blur-[120px]" />
+    <div className="min-w-0 w-full">
+      {/* HEADER */}
+      <div className="mb-5 flex items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2.5">
+            <FileText size={18} className="text-[#f2bd19]" />
+
+            <h1 className="text-lg font-semibold text-white">Reports</h1>
+          </div>
+
+          <p className="mt-1 text-[11px] text-gray-600">
+            Assessments and student results by subject
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => loadReports(true)}
+          disabled={loading || refreshing}
+          className="inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.025] px-3 py-2 text-[10px] text-gray-500 hover:text-gray-300 disabled:opacity-50"
+        >
+          <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
+          Refresh
+        </button>
       </div>
 
-      <div className="relative space-y-6">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-[#f2bd19]">
-              <Award size={14} />
-              Academic Results
-            </div>
+      {/* SEARCH */}
+      <div className="mb-5">
+        <div className="relative max-w-md">
+          <Search
+            size={13}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-700"
+          />
 
-            <h1 className="text-2xl font-semibold text-white">Reports</h1>
-
-            <p className="mt-2 max-w-2xl text-sm text-slate-400">
-              Create assessments and manage student academic results by subject,
-              class time, and teacher.
-            </p>
-          </div>
-
-          {(isAdmin || isTeacher) && (
-            <button
-              onClick={startCreate}
-              className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#f2bd19] px-4 py-2.5 text-sm font-semibold text-black transition hover:bg-[#ffd34f]"
-            >
-              <Plus size={17} />
-              Add Assessment
-            </button>
-          )}
-        </div>
-
-        <div className="grid gap-4 lg:grid-cols-[1fr_1fr_1.5fr]">
-          <div>
-            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-500">
-              Class Slot
-            </label>
-
-            <select
-              value={selectedSlot}
-              onChange={(event) => setSelectedSlot(event.target.value)}
-              className="w-full rounded-lg border border-white/[0.08] bg-[#121519] px-3 py-2.5 text-sm text-white outline-none focus:border-[#f2bd19]/60"
-            >
-              <option value="">All class slots</option>
-
-              {slots.map((slot) => (
-                <option key={slot.class_slot_id} value={slot.class_slot_id}>
-                  {slotLabel(slot)}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="hidden lg:block">
-            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-500">
-              Your Access
-            </label>
-
-            <div className="flex h-[42px] items-center rounded-lg border border-white/[0.08] bg-[#121519] px-3 text-sm text-slate-400">
-              {isAdmin
-                ? "Administrator — all class slots"
-                : "Teacher — assigned class slots only"}
-            </div>
-          </div>
-
-          <div>
-            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-500">
-              Search
-            </label>
-
-            <div className="relative">
-              <Search
-                size={16}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500"
-              />
-
-              <input
-                type="text"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search subject, teacher, room..."
-                className="w-full rounded-lg border border-white/[0.08] bg-[#121519] py-2.5 pl-9 pr-3 text-sm text-white outline-none focus:border-[#f2bd19]/60"
-              />
-            </div>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-white/[0.07] bg-[#121519] shadow-xl">
-          <div className="border-b border-white/[0.06] px-5 py-4">
-            <h2 className="font-semibold text-white">Assessments</h2>
-
-            <p className="mt-1 text-sm text-slate-500">
-              {filteredAssessments.length} assessment
-              {filteredAssessments.length === 1 ? "" : "s"}
-            </p>
-          </div>
-
-          {loading ? (
-            <div className="flex items-center justify-center py-16 text-slate-400">
-              <Loader2 size={22} className="mr-2 animate-spin" />
-              Loading Reports...
-            </div>
-          ) : filteredAssessments.length === 0 ? (
-            <div className="px-5 py-16 text-center">
-              <Award className="mx-auto mb-3 text-slate-600" size={30} />
-
-              <p className="text-sm text-slate-400">No assessments found.</p>
-
-              {(isAdmin || isTeacher) && (
-                <button
-                  onClick={startCreate}
-                  className="mt-4 text-sm font-medium text-[#f2bd19] hover:underline"
-                >
-                  Create your first assessment
-                </button>
-              )}
-            </div>
-          ) : (
-            <div className="divide-y divide-white/[0.05]">
-              {filteredAssessments.map((assessment) => (
-                <div
-                  key={assessment.id}
-                  className="flex flex-col gap-4 px-5 py-4 transition hover:bg-white/[0.015] lg:flex-row lg:items-center lg:justify-between"
-                >
-                  <button
-                    onClick={() => openAssessment(assessment)}
-                    className="flex min-w-0 flex-1 items-center gap-4 text-left"
-                  >
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#f2bd19]/10 text-[#f2bd19]">
-                      <Award size={18} />
-                    </div>
-
-                    <div className="min-w-0">
-                      <h3 className="truncate font-medium text-white">
-                        {assessment.name}
-                      </h3>
-
-                      <p className="mt-1 truncate text-sm text-slate-500">
-                        {assessment.subject_name} ·{" "}
-                        {formatTime(assessment.start_time)} –{" "}
-                        {formatTime(assessment.end_time)} ·{" "}
-                        {assessment.teacher_name}
-                      </p>
-                    </div>
-
-                    <ChevronRight
-                      size={17}
-                      className="ml-auto shrink-0 text-slate-600"
-                    />
-                  </button>
-
-                  <div className="flex items-center gap-3 lg:shrink-0">
-                    <div className="text-right">
-                      <div className="text-sm font-medium text-slate-300">
-                        {assessment.score_count} scored
-                      </div>
-
-                      <div className="mt-1 text-xs text-slate-600">
-                        {formatDate(assessment.exam_date)}
-                      </div>
-                    </div>
-
-                    {isAdmin && (
-                      <button
-                        onClick={() => deleteAssessment(assessment)}
-                        disabled={saving}
-                        className="rounded-lg border border-red-500/10 p-2 text-slate-500 transition hover:border-red-500/30 hover:text-red-400"
-                        title="Delete assessment"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="rounded-xl border border-white/[0.07] bg-[#121519] shadow-xl">
-          <div className="border-b border-white/[0.06] px-5 py-4">
-            <h2 className="font-semibold text-white">Available Class Slots</h2>
-
-            <p className="mt-1 text-sm text-slate-500">
-              Assessments are attached to these exact subject time slots.
-            </p>
-          </div>
-
-          {filteredSlots.length === 0 ? (
-            <div className="px-5 py-10 text-center text-sm text-slate-500">
-              No class slots found.
-            </div>
-          ) : (
-            <div className="grid gap-3 p-5 md:grid-cols-2 xl:grid-cols-3">
-              {filteredSlots.map((slot) => (
-                <button
-                  key={slot.class_slot_id}
-                  onClick={() => setSelectedSlot(String(slot.class_slot_id))}
-                  className={`rounded-xl border p-4 text-left transition ${
-                    String(selectedSlot) === String(slot.class_slot_id)
-                      ? "border-[#f2bd19]/30 bg-[#f2bd19]/[0.06]"
-                      : "border-white/[0.07] bg-[#0d1013] hover:border-white/[0.14]"
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="font-semibold text-white">
-                        {slot.subject_name}
-                      </div>
-
-                      <div className="mt-2 flex items-center gap-2 text-sm text-slate-400">
-                        <Clock3 size={14} />
-                        {formatTime(slot.start_time)} –{" "}
-                        {formatTime(slot.end_time)}
-                      </div>
-                    </div>
-
-                    <BookOpen size={17} className="text-[#f2bd19]" />
-                  </div>
-
-                  <div className="mt-3 text-xs text-slate-500">
-                    Teacher: {slot.teacher_name}
-                  </div>
-
-                  <div className="mt-1 text-xs text-slate-600">
-                    {slot.days}
-                    {slot.room ? ` · ${slot.room}` : ""}
-                    {" · "}
-                    {slot.student_count} students
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search subject, teacher, level or book..."
+            className="w-full rounded-lg border border-white/[0.07] bg-[#121519] py-2.5 pl-9 pr-3 text-[10px] text-gray-300 outline-none placeholder:text-gray-700"
+          />
         </div>
       </div>
 
-      {showCreate && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-xl rounded-xl border border-white/[0.08] bg-[#121519] shadow-2xl">
-            <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">
-              <div>
-                <h2 className="font-semibold text-white">Add Assessment</h2>
+      {/* ERROR */}
+      {error && (
+        <div className="mb-5 rounded-xl border border-red-500/10 bg-red-500/[0.04] px-4 py-3 text-[10px] text-red-400">
+          {error}
+        </div>
+      )}
 
-                <p className="mt-1 text-xs text-slate-500">
-                  Attach the assessment to an exact subject time slot.
-                </p>
-              </div>
-
-              <button
-                onClick={() => setShowCreate(false)}
-                className="flex h-8 w-8 items-center justify-center rounded-lg text-lg text-slate-500 transition hover:bg-white/[0.05] hover:text-white"
-                aria-label="Close"
-              >
-                ×
-              </button>
-            </div>
-
-            <form onSubmit={handleCreate} className="space-y-4 p-5">
-              <div>
-                <label className="mb-2 block text-sm text-slate-400">
-                  Assessment Name
-                </label>
-
-                <input
-                  value={form.name}
-                  onChange={(event) =>
-                    setForm({
-                      ...form,
-                      name: event.target.value,
-                    })
-                  }
-                  placeholder="e.g. Monthly Test"
-                  className="w-full rounded-lg border border-white/[0.08] bg-[#0d1013] px-3 py-2.5 text-sm text-white outline-none focus:border-[#f2bd19]/60"
-                />
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm text-slate-400">
-                  Subject / Class Time
-                </label>
-
-                <select
-                  value={form.class_slot_id}
-                  onChange={(event) =>
-                    setForm({
-                      ...form,
-                      class_slot_id: event.target.value,
-                    })
-                  }
-                  className="w-full rounded-lg border border-white/[0.08] bg-[#0d1013] px-3 py-2.5 text-sm text-white outline-none focus:border-[#f2bd19]/60"
-                >
-                  <option value="">Select class slot</option>
-
-                  {slots.map((slot) => (
-                    <option key={slot.class_slot_id} value={slot.class_slot_id}>
-                      {slotLabel(slot)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {selectedFormSlot && (
-                <div className="rounded-lg border border-[#f2bd19]/10 bg-[#f2bd19]/[0.035] p-3 text-sm">
-                  <div className="font-medium text-white">
-                    {selectedFormSlot.subject_name}
-                  </div>
-
-                  <div className="mt-1 text-xs text-slate-500">
-                    {formatTime(selectedFormSlot.start_time)} –{" "}
-                    {formatTime(selectedFormSlot.end_time)}
-                    {" · "}
-                    {selectedFormSlot.days}
-                    {selectedFormSlot.room ? ` · ${selectedFormSlot.room}` : ""}
-                  </div>
-
-                  <div className="mt-1 text-xs text-slate-500">
-                    Teacher: {selectedFormSlot.teacher_name}
-                  </div>
-                </div>
-              )}
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <div>
-                  <label className="mb-2 block text-sm text-slate-400">
-                    Date
-                  </label>
-
-                  <input
-                    type="date"
-                    value={form.exam_date}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        exam_date: event.target.value,
-                      })
-                    }
-                    className="w-full rounded-lg border border-white/[0.08] bg-[#0d1013] px-3 py-2.5 text-sm text-white outline-none focus:border-[#f2bd19]/60"
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-2 block text-sm text-slate-400">
-                    Maximum Marks
-                  </label>
-
-                  <input
-                    type="number"
-                    min="1"
-                    value={form.total_marks}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        total_marks: event.target.value,
-                      })
-                    }
-                    className="w-full rounded-lg border border-white/[0.08] bg-[#0d1013] px-3 py-2.5 text-sm text-white outline-none focus:border-[#f2bd19]/60"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm text-slate-400">
-                  Academic Year
-                </label>
-
-                <input
-                  value={form.academic_year}
-                  onChange={(event) =>
-                    setForm({
-                      ...form,
-                      academic_year: event.target.value,
-                    })
-                  }
-                  placeholder="e.g. 2026-2027"
-                  className="w-full rounded-lg border border-white/[0.08] bg-[#0d1013] px-3 py-2.5 text-sm text-white outline-none focus:border-[#f2bd19]/60"
-                />
-              </div>
-
-              <div className="flex justify-end gap-3 border-t border-white/[0.06] pt-4">
-                <button
-                  type="button"
-                  onClick={() => setShowCreate(false)}
-                  className="rounded-lg border border-white/[0.08] px-4 py-2 text-sm text-slate-400 transition hover:text-white"
-                >
-                  Cancel
-                </button>
-
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="inline-flex items-center gap-2 rounded-lg bg-[#f2bd19] px-4 py-2 text-sm font-semibold text-black transition hover:bg-[#ffd34f] disabled:opacity-50"
-                >
-                  {saving && <Loader2 size={16} className="animate-spin" />}
-                  Create Assessment
-                </button>
-              </div>
-            </form>
+      {/* CONTENT */}
+      {loading ? (
+        <div className="flex min-h-[280px] items-center justify-center rounded-xl border border-white/[0.06] bg-[#121519]">
+          <div className="flex items-center gap-2 text-[11px] text-gray-600">
+            <Loader2 size={15} className="animate-spin" />
+            Loading reports...
           </div>
         </div>
+      ) : subjects.length === 0 ? (
+        <EmptyState message="No active classes found." />
+      ) : (
+        <div className="space-y-4">
+          {subjectPairs.map((pair, pairIndex) => (
+            <div
+              key={pairIndex}
+              className="grid grid-cols-1 gap-4 lg:grid-cols-2"
+            >
+              {pair.map((subject, subjectIndex) => (
+                <SubjectColumn
+                  key={subject.id}
+                  subject={subject}
+                  rows={subject.rows}
+                  color={colorForSubject(pairIndex * 2 + subjectIndex)}
+                  assessmentsByClass={assessmentsByClass}
+                  onOpen={setSelectedClass}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* CLASS WORKSPACE */}
+      {selectedClass && (
+        <ClassWorkspace
+          row={selectedClass}
+          assessments={assessmentsByClass.get(Number(selectedClass.id)) || []}
+          onClose={() => setSelectedClass(null)}
+          onNewAssessment={() => setNewAssessmentClass(selectedClass)}
+          onOpenAssessment={openAssessment}
+        />
+      )}
+
+      {/* NEW ASSESSMENT */}
+      {newAssessmentClass && (
+        <NewAssessmentModal
+          row={newAssessmentClass}
+          onClose={() => setNewAssessmentClass(null)}
+          onCreated={handleCreated}
+        />
+      )}
+
+      {/* SCORES */}
+      {selectedAssessment && selectedAssessmentClass && (
+        <ScoresModal
+          assessment={selectedAssessment}
+          row={selectedAssessmentClass}
+          onClose={() => {
+            setSelectedAssessment(null);
+
+            setSelectedAssessmentClass(null);
+          }}
+          onSaved={() => loadReports(true)}
+        />
       )}
     </div>
   );
