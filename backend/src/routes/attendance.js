@@ -10,21 +10,9 @@ const {
 
 const router = express.Router();
 
-/*
-|--------------------------------------------------------------------------
-| ACCESS
-|--------------------------------------------------------------------------
-*/
-
 const attendanceRoles = requireRoles("admin", "attendance");
 
 const VALID_STATUSES = ["present", "absent"];
-
-/*
-|--------------------------------------------------------------------------
-| SOLAR MONTH NAMES
-|--------------------------------------------------------------------------
-*/
 
 const SOLAR_MONTH_NAMES = {
   1: "حمل",
@@ -41,12 +29,6 @@ const SOLAR_MONTH_NAMES = {
   12: "حوت",
 };
 
-/*
-|--------------------------------------------------------------------------
-| WEEKDAY NAMES
-|--------------------------------------------------------------------------
-*/
-
 const WEEKDAY_NAMES = {
   0: "یکشنبه",
   1: "دوشنبه",
@@ -56,12 +38,6 @@ const WEEKDAY_NAMES = {
   5: "جمعه",
   6: "شنبه",
 };
-
-/*
-|--------------------------------------------------------------------------
-| HELPERS
-|--------------------------------------------------------------------------
-*/
 
 function getSolarMonthName(month) {
   return SOLAR_MONTH_NAMES[Number(month)] || "";
@@ -79,17 +55,19 @@ function normalizeDateString(value) {
   }
 
   if (value instanceof Date) {
-    return value.toISOString().slice(0, 10);
+    if (Number.isNaN(value.getTime())) {
+      return null;
+    }
+
+    return [
+      String(value.getFullYear()).padStart(4, "0"),
+      String(value.getMonth() + 1).padStart(2, "0"),
+      String(value.getDate()).padStart(2, "0"),
+    ].join("-");
   }
 
   return String(value).slice(0, 10);
 }
-
-/*
-|--------------------------------------------------------------------------
-| KABUL DATE
-|--------------------------------------------------------------------------
-*/
 
 function getKabulGregorianDate() {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -107,9 +85,6 @@ function getKabulGregorianDate() {
 function getKabulSolarToday() {
   const gregorianDate = getKabulGregorianDate();
 
-  /*
-   * Noon UTC avoids accidental day changes.
-   */
   const date = new Date(`${gregorianDate}T12:00:00Z`);
 
   const { jy, jm, jd } = dateToJalaali(date);
@@ -124,12 +99,6 @@ function getKabulSolarToday() {
   };
 }
 
-/*
-|--------------------------------------------------------------------------
-| GREGORIAN WEEKDAY
-|--------------------------------------------------------------------------
-*/
-
 function isFridayFromGregorian(value) {
   const date = value instanceof Date ? value : new Date(value);
 
@@ -139,15 +108,6 @@ function isFridayFromGregorian(value) {
 
   return date.getUTCDay() === 5;
 }
-
-/*
-|--------------------------------------------------------------------------
-| GET ALL DAYS IN A SOLAR MONTH
-|--------------------------------------------------------------------------
-|
-| Friday is intentionally excluded.
-|
-*/
 
 function getSolarMonthDays(year, month) {
   const numericYear = Number(year);
@@ -179,9 +139,6 @@ function getSolarMonthDays(year, month) {
       const gregorianDate = parsed.gregorianDate;
       const weekdayIndex = gregorianDate.getUTCDay();
 
-      /*
-       * Friday is always a holiday.
-       */
       if (weekdayIndex === 5) {
         continue;
       }
@@ -201,12 +158,6 @@ function getSolarMonthDays(year, month) {
 
   return days;
 }
-
-/*
-|--------------------------------------------------------------------------
-| GET CLASS SLOT
-|--------------------------------------------------------------------------
-*/
 
 async function getClassSlot(classSlotId) {
   const result = await query(
@@ -260,143 +211,150 @@ async function getClassSlot(classSlotId) {
 
 /*
 |--------------------------------------------------------------------------
-| GET PAYMENT STATUS FOR ONE DATE
+| PAYMENT INFORMATION
+|--------------------------------------------------------------------------
+|
+| Attendance reads payment truth directly from:
+|
+|   fees.status
+|   fees.due_amount
+|
+| Possible payment_status values:
+|
+|   paid
+|   partial
+|   pending
+|   no_fee
+|
+| Attendance does NOT calculate payment from attendance days.
 |--------------------------------------------------------------------------
 */
 
-async function getPaymentStatus(enrollmentId, gregorianDate) {
+async function getPaymentInfoForDate(enrollmentId, gregorianDate) {
   const result = await query(
     `
-      SELECT EXISTS (
-        SELECT 1
-        FROM fee_payment_allocations fpa
+      SELECT
+        f.id AS fee_id,
+        f.status AS payment_status,
+        f.total_amount AS payment_total_amount,
+        f.paid_amount AS payment_paid_amount,
+        f.due_amount AS payment_due_amount
 
-        INNER JOIN fee_period_months fpm
-          ON fpm.id = fpa.fee_period_month_id
+      FROM fee_periods fp
 
-        INNER JOIN fee_periods fp
-          ON fp.id = fpm.fee_period_id
+      INNER JOIN fees f
+        ON f.id = fp.fee_id
 
-        WHERE fp.enrollment_id = $1
+      WHERE fp.enrollment_id = $1
+        AND fp.from_date <= $2::date
+        AND fp.to_date >= $2::date
 
-          AND fpa.from_date <= $2::date
-          AND fpa.to_date >= $2::date
-      ) AS paid;
+      ORDER BY
+        fp.from_date DESC,
+        fp.id DESC
+
+      LIMIT 1
     `,
     [enrollmentId, gregorianDate],
   );
 
-  return result.rows[0]?.paid ? "paid" : "unpaid";
+  if (!result.rows.length) {
+    return {
+      fee_id: null,
+      payment_status: "no_fee",
+      payment_total_amount: 0,
+      payment_paid_amount: 0,
+      payment_due_amount: null,
+    };
+  }
+
+  const row = result.rows[0];
+
+  return {
+    fee_id: row.fee_id,
+    payment_status: row.payment_status || "pending",
+    payment_total_amount: Number(row.payment_total_amount || 0),
+    payment_paid_amount: Number(row.payment_paid_amount || 0),
+    payment_due_amount:
+      row.payment_due_amount === null || row.payment_due_amount === undefined
+        ? null
+        : Number(row.payment_due_amount),
+  };
 }
 
-/*
-|--------------------------------------------------------------------------
-| GET PAYMENT STATUS FOR ENTIRE SOLAR MONTH
-|--------------------------------------------------------------------------
-*/
-
-async function getMonthlyPaymentStatuses(enrollmentIds, monthDays) {
+async function getMonthlyPaymentInfos(
+  enrollmentIds,
+  firstGregorianDate,
+  lastGregorianDate,
+) {
   const statuses = new Map();
 
   for (const enrollmentId of enrollmentIds) {
-    statuses.set(enrollmentId, {
-      paidDays: 0,
-      totalDays: monthDays.length,
+    statuses.set(Number(enrollmentId), {
+      fee_id: null,
+      payment_status: "no_fee",
+      payment_total_amount: 0,
+      payment_paid_amount: 0,
+      payment_due_amount: null,
     });
   }
 
-  if (!enrollmentIds.length || !monthDays.length) {
+  if (!enrollmentIds.length) {
     return statuses;
   }
-
-  const firstDate = monthDays[0].gregorian_date;
-  const lastDate = monthDays[monthDays.length - 1].gregorian_date;
 
   const result = await query(
     `
       SELECT
         fp.enrollment_id,
-        fpa.from_date,
-        fpa.to_date
 
-      FROM fee_payment_allocations fpa
+        f.id AS fee_id,
+        f.status AS payment_status,
+        f.total_amount AS payment_total_amount,
+        f.paid_amount AS payment_paid_amount,
+        f.due_amount AS payment_due_amount,
 
-      INNER JOIN fee_period_months fpm
-        ON fpm.id = fpa.fee_period_month_id
+        fp.from_date,
+        fp.to_date
 
-      INNER JOIN fee_periods fp
-        ON fp.id = fpm.fee_period_id
+      FROM fee_periods fp
+
+      INNER JOIN fees f
+        ON f.id = fp.fee_id
 
       WHERE fp.enrollment_id = ANY($1::int[])
-
-        AND fpa.from_date <= $2::date
-        AND fpa.to_date >= $3::date
+        AND fp.from_date <= $2::date
+        AND fp.to_date >= $3::date
 
       ORDER BY
         fp.enrollment_id,
-        fpa.from_date
+        fp.from_date DESC,
+        fp.id DESC
     `,
-    [enrollmentIds, lastDate, firstDate],
+    [enrollmentIds, lastGregorianDate, firstGregorianDate],
   );
-
-  const allocationsByEnrollment = new Map();
 
   for (const row of result.rows) {
     const enrollmentId = Number(row.enrollment_id);
 
-    if (!allocationsByEnrollment.has(enrollmentId)) {
-      allocationsByEnrollment.set(enrollmentId, []);
-    }
-
-    allocationsByEnrollment.get(enrollmentId).push({
-      from_date: normalizeDateString(row.from_date),
-      to_date: normalizeDateString(row.to_date),
-    });
-  }
-
-  for (const enrollmentId of enrollmentIds) {
-    const allocations = allocationsByEnrollment.get(enrollmentId) || [];
-
-    let paidDays = 0;
-
-    for (const monthDay of monthDays) {
-      const covered = allocations.some(
-        (allocation) =>
-          allocation.from_date <= monthDay.gregorian_date &&
-          allocation.to_date >= monthDay.gregorian_date,
-      );
-
-      if (covered) {
-        paidDays += 1;
-      }
+    if (statuses.get(enrollmentId)?.fee_id) {
+      continue;
     }
 
     statuses.set(enrollmentId, {
-      paidDays,
-      totalDays: monthDays.length,
+      fee_id: row.fee_id,
+      payment_status: row.payment_status || "pending",
+      payment_total_amount: Number(row.payment_total_amount || 0),
+      payment_paid_amount: Number(row.payment_paid_amount || 0),
+      payment_due_amount:
+        row.payment_due_amount === null || row.payment_due_amount === undefined
+          ? null
+          : Number(row.payment_due_amount),
     });
   }
 
   return statuses;
 }
-
-function getMonthlyPaymentLabel(paymentInfo) {
-  if (!paymentInfo || paymentInfo.paidDays === 0) {
-    return "unpaid";
-  }
-
-  if (paymentInfo.paidDays >= paymentInfo.totalDays) {
-    return "paid";
-  }
-
-  return "partial";
-}
-
-/*
-|--------------------------------------------------------------------------
-| GET KABUL TODAY
-|--------------------------------------------------------------------------
-*/
 
 router.get(
   "/today",
@@ -406,12 +364,6 @@ router.get(
     res.json(getKabulSolarToday());
   }),
 );
-
-/*
-|--------------------------------------------------------------------------
-| GET ALL ATTENDANCE RECORDS
-|--------------------------------------------------------------------------
-*/
 
 router.get(
   "/",
@@ -431,19 +383,24 @@ router.get(
 
     if (parsedDate) {
       values.push(normalizeDateString(parsedDate.gregorianDate));
-
       conditions.push(`a.date = $${values.length}`);
     }
 
     if (class_slot_id) {
       values.push(Number(class_slot_id));
-
       conditions.push(`a.class_slot_id = $${values.length}`);
     }
 
-    if (student_id) {
-      values.push(Number(student_id));
+    if (student_id !== undefined && student_id !== "") {
+      const numericStudentId = Number(student_id);
 
+      if (!Number.isInteger(numericStudentId) || numericStudentId < 0) {
+        return res.status(400).json({
+          error: "Invalid student ID",
+        });
+      }
+
+      values.push(numericStudentId);
       conditions.push(`a.student_id = $${values.length}`);
     }
 
@@ -527,12 +484,6 @@ router.get(
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| GET ACTIVE CLASSES
-|--------------------------------------------------------------------------
-*/
-
 router.get(
   "/classes",
   authRequired,
@@ -599,12 +550,6 @@ router.get(
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| GET STUDENTS IN CLASS
-|--------------------------------------------------------------------------
-*/
-
 router.get(
   "/class/:classSlotId/students",
   authRequired,
@@ -658,12 +603,6 @@ router.get(
     res.json(result.rows);
   }),
 );
-
-/*
-|--------------------------------------------------------------------------
-| GET DAILY STUDENTS + ATTENDANCE
-|--------------------------------------------------------------------------
-*/
 
 router.get(
   "/class/:classSlotId/date/:date/students",
@@ -752,7 +691,7 @@ router.get(
     for (const student of studentsResult.rows) {
       const attendance = attendanceByStudent.get(Number(student.student_id));
 
-      const paymentStatus = await getPaymentStatus(
+      const paymentInfo = await getPaymentInfoForDate(
         student.enrollment_id,
         gregorianDate,
       );
@@ -765,7 +704,15 @@ router.get(
         father_name: student.father_name,
         enrolled_on: student.enrolled_on,
 
-        payment_status: paymentStatus,
+        fee_id: paymentInfo.fee_id,
+
+        payment_status: paymentInfo.payment_status,
+
+        payment_total_amount: paymentInfo.payment_total_amount,
+
+        payment_paid_amount: paymentInfo.payment_paid_amount,
+
+        payment_due_amount: paymentInfo.payment_due_amount,
 
         attendance_id: attendance?.id || null,
         status: attendance?.status || null,
@@ -783,12 +730,6 @@ router.get(
     });
   }),
 );
-
-/*
-|--------------------------------------------------------------------------
-| GET MONTHLY ATTENDANCE REGISTER
-|--------------------------------------------------------------------------
-*/
 
 router.get(
   "/month/:classSlotId/:year/:month",
@@ -869,10 +810,9 @@ router.get(
         SELECT
           a.id,
           a.student_id,
-          a.date,
+          a.date::text AS date,
           a.status,
           a.marked_by,
-
           u.full_name AS marked_by_name
 
         FROM attendance a
@@ -881,7 +821,6 @@ router.get(
           ON u.id = a.marked_by
 
         WHERE a.class_slot_id = $1
-
           AND a.date >= $2::date
           AND a.date <= $3::date
 
@@ -911,13 +850,14 @@ router.get(
       });
     }
 
-    const paymentStatuses = await getMonthlyPaymentStatuses(
+    const paymentInfos = await getMonthlyPaymentInfos(
       enrollmentIds,
-      monthDays,
+      firstGregorianDate,
+      lastGregorianDate,
     );
 
     const registerStudents = students.map((student) => {
-      const paymentInfo = paymentStatuses.get(Number(student.enrollment_id));
+      const paymentInfo = paymentInfos.get(Number(student.enrollment_id));
 
       const attendance = {};
 
@@ -949,11 +889,15 @@ router.get(
         father_name: student.father_name,
         enrolled_on: student.enrolled_on,
 
-        payment_status: getMonthlyPaymentLabel(paymentInfo),
+        fee_id: paymentInfo?.fee_id || null,
 
-        payment_paid_days: paymentInfo?.paidDays || 0,
+        payment_status: paymentInfo?.payment_status || "no_fee",
 
-        payment_total_days: paymentInfo?.totalDays || monthDays.length,
+        payment_total_amount: paymentInfo?.payment_total_amount || 0,
+
+        payment_paid_amount: paymentInfo?.payment_paid_amount || 0,
+
+        payment_due_amount: paymentInfo?.payment_due_amount ?? null,
 
         attendance,
       };
@@ -977,12 +921,6 @@ router.get(
     });
   }),
 );
-
-/*
-|--------------------------------------------------------------------------
-| SAVE MONTHLY ATTENDANCE REGISTER
-|--------------------------------------------------------------------------
-*/
 
 router.post(
   "/month",
@@ -1040,9 +978,6 @@ router.post(
       dayMap.set(monthDay.day, monthDay);
     }
 
-    /*
-     * Get all active enrollments for this class.
-     */
     const enrollmentsResult = await query(
       `
         SELECT
@@ -1066,15 +1001,12 @@ router.post(
       );
     }
 
-    /*
-     * Validate every record before opening the transaction.
-     */
     for (const record of records) {
       const studentId = Number(record.student_id);
       const day = Number(record.day);
       const status = record.status;
 
-      if (!Number.isInteger(studentId) || studentId <= 0) {
+      if (!Number.isInteger(studentId) || studentId < 0) {
         return res.status(400).json({
           error: "Invalid student ID in attendance records",
         });
@@ -1099,18 +1031,6 @@ router.post(
       }
     }
 
-    /*
-     * IMPORTANT:
-     *
-     * Normalize the incoming records first.
-     *
-     * If the frontend somehow sends the same student/day
-     * more than once, the LAST value wins.
-     *
-     * This makes the request deterministic and guarantees
-     * that the final state of every clicked cell is what gets
-     * written to PostgreSQL.
-     */
     const normalizedRecords = new Map();
 
     for (const record of records) {
@@ -1127,18 +1047,8 @@ router.post(
       });
     }
 
-    /*
-     * Convert Map back to an array.
-     */
     const recordsToSave = Array.from(normalizedRecords.values());
 
-    /*
-     * Resolve every Solar day to its Gregorian date BEFORE
-     * starting the transaction.
-     *
-     * This means all date conversion is finished before any
-     * database write begins.
-     */
     const preparedRecords = [];
 
     for (const record of recordsToSave) {
@@ -1167,13 +1077,6 @@ router.post(
     try {
       await client.query("BEGIN");
 
-      /*
-       * Save every changed cell sequentially.
-       *
-       * Do NOT use forEach(async ...).
-       *
-       * Each query is awaited before moving to the next one.
-       */
       for (const record of preparedRecords) {
         if (record.status === null) {
           const deleted = await client.query(
@@ -1238,10 +1141,6 @@ router.post(
         savedCount += 1;
       }
 
-      /*
-       * Commit only after EVERY record has successfully
-       * completed.
-       */
       await client.query("COMMIT");
 
       res.json({
@@ -1266,12 +1165,6 @@ router.post(
     }
   }),
 );
-
-/*
-|--------------------------------------------------------------------------
-| SAVE ONE DAILY ATTENDANCE RECORD
-|--------------------------------------------------------------------------
-*/
 
 router.post(
   "/mark",
@@ -1345,7 +1238,7 @@ router.post(
     for (const record of records) {
       const studentId = Number(record.student_id);
 
-      if (!Number.isInteger(studentId) || studentId <= 0) {
+      if (!Number.isInteger(studentId) || studentId < 0) {
         return res.status(400).json({
           error: "Invalid student ID",
         });
@@ -1429,12 +1322,6 @@ router.post(
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| CREATE ONE ATTENDANCE RECORD
-|--------------------------------------------------------------------------
-*/
-
 router.post(
   "/",
   authRequired,
@@ -1445,7 +1332,7 @@ router.post(
     const studentId = Number(student_id);
     const classSlotId = Number(class_slot_id);
 
-    if (!Number.isInteger(studentId) || studentId <= 0) {
+    if (!Number.isInteger(studentId) || studentId < 0) {
       return res.status(400).json({
         error: "Invalid student",
       });
@@ -1557,12 +1444,6 @@ router.post(
   }),
 );
 
-/*
-|--------------------------------------------------------------------------
-| UPDATE ONE ATTENDANCE RECORD
-|--------------------------------------------------------------------------
-*/
-
 router.put(
   "/:id",
   authRequired,
@@ -1609,15 +1490,6 @@ router.put(
     res.json(result.rows[0]);
   }),
 );
-
-/*
-|--------------------------------------------------------------------------
-| DELETE ATTENDANCE
-|--------------------------------------------------------------------------
-|
-| Admin only.
-|
-*/
 
 router.delete(
   "/:id",

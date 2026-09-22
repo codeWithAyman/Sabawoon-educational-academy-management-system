@@ -25,7 +25,8 @@ function jalaaliToDate(year, month, day) {
 
   const result = jalaali.toGregorian(numericYear, numericMonth, numericDay);
 
-  // Noon UTC prevents timezone/date rollover problems.
+  // Keep the Gregorian date at noon UTC so timezone conversion
+  // cannot move it to the previous or next calendar day.
   return new Date(Date.UTC(result.gy, result.gm - 1, result.gd, 12, 0, 0, 0));
 }
 

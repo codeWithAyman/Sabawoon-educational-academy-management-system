@@ -13,27 +13,31 @@ const {
 
 const router = express.Router();
 
-/*
-  ============================================================
-  HELPERS
-  ============================================================
-*/
+/* ============================================================
+   HELPERS
+============================================================ */
 
 function roundMoney(value) {
-  return Number(Number(value).toFixed(2));
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) {
+    return 0;
+  }
+
+  return Math.round(number / 10) * 10;
 }
 
 function isMultipleOfTen(value) {
   const number = Number(value);
-  return Number.isFinite(number) && number > 0 && number % 10 === 0;
+
+  return (
+    Number.isFinite(number) &&
+    Number.isInteger(number) &&
+    number > 0 &&
+    number % 10 === 0
+  );
 }
 
-/*
-  Get today's Gregorian date in Kabul.
-
-  PostgreSQL stores Gregorian dates.
-  User-visible dates are converted to Solar Hijri.
-*/
 function getKabulGregorianDate() {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Kabul",
@@ -51,9 +55,15 @@ function getKabulGregorianDate() {
   }
 
   return new Date(
-    Number(values.year),
-    Number(values.month) - 1,
-    Number(values.day),
+    Date.UTC(
+      Number(values.year),
+      Number(values.month) - 1,
+      Number(values.day),
+      12,
+      0,
+      0,
+      0,
+    ),
   );
 }
 
@@ -64,9 +74,6 @@ function getCurrentSolarDate() {
   return formatSolarDate(solar.jy, solar.jm, solar.jd);
 }
 
-/*
-  Convert a Solar Hijri month to its Gregorian first/last dates.
-*/
 function getSolarMonthDateRange(solarYear, solarMonth) {
   const monthDays = getJalaaliMonthDays(solarYear, solarMonth);
 
@@ -80,10 +87,6 @@ function getSolarMonthDateRange(solarYear, solarMonth) {
   };
 }
 
-/*
-  Get the actual Gregorian coverage boundaries for one
-  fee-period month.
-*/
 function getMonthCoverageRange(period, month) {
   const monthRange = getSolarMonthDateRange(
     Number(month.solar_year),
@@ -104,19 +107,18 @@ function getMonthCoverageRange(period, month) {
   };
 }
 
-/*
-  Add days to a Gregorian date without depending on
-  server timezone.
-*/
 function addDays(date, days) {
   const result = new Date(date);
-  result.setDate(result.getDate() + Number(days));
+
+  if (Number.isNaN(result.getTime())) {
+    throw new Error("Invalid Gregorian date");
+  }
+
+  result.setUTCDate(result.getUTCDate() + Number(days));
+
   return result;
 }
 
-/*
-  Calculate every Solar Hijri month touched by a fee period.
-*/
 function calculatePeriodMonths(
   fromSolarDate,
   toSolarDate,
@@ -166,7 +168,7 @@ function calculatePeriodMonths(
         `Monthly fee for ${solarYear}/${String(solarMonth).padStart(
           2,
           "0",
-        )} must be a multiple of 10`,
+        )} must be a positive multiple of 10`,
       );
     }
 
@@ -202,9 +204,9 @@ function calculatePeriodMonths(
 
       const monthlyAmount = Number(amountMap.get(key));
 
-      const calculatedAmount = roundMoney(
-        (monthlyAmount / monthDays) * coveredDays,
-      );
+      const rawCalculatedAmount = (monthlyAmount / monthDays) * coveredDays;
+
+      const calculatedAmount = roundMoney(rawCalculatedAmount);
 
       months.push({
         solar_year: jy,
@@ -251,12 +253,25 @@ function calculatePeriodMonths(
   };
 }
 
-/*
-  Calculate complete-day payment coverage.
+function calculateDaysAmount(monthlyAmount, monthDays, days) {
+  const amount = Number(monthlyAmount);
+  const totalDays = Number(monthDays);
+  const coveredDays = Number(days);
 
-  Any money that cannot complete another day remains
-  financially recorded but does not create attendance.
-*/
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0 ||
+    !Number.isFinite(totalDays) ||
+    totalDays <= 0 ||
+    !Number.isFinite(coveredDays) ||
+    coveredDays <= 0
+  ) {
+    return 0;
+  }
+
+  return roundMoney((amount / totalDays) * coveredDays);
+}
+
 function calculatePaidCoverage(paymentAmount, months) {
   let remaining = roundMoney(paymentAmount);
 
@@ -282,26 +297,27 @@ function calculatePaidCoverage(paymentAmount, months) {
       continue;
     }
 
-    const dailyRate = monthlyAmount / monthDays;
+    let completeDays = 0;
+    let completeDayAmount = 0;
 
-    const maximumMonthAmount = roundMoney(dailyRate * coveredDays);
+    for (let dayCount = 1; dayCount <= coveredDays; dayCount++) {
+      const amountForDays = calculateDaysAmount(
+        monthlyAmount,
+        monthDays,
+        dayCount,
+      );
 
-    const amountForMonth = Math.min(remaining, maximumMonthAmount);
-
-    if (amountForMonth <= 0) {
-      continue;
+      if (amountForDays <= remaining) {
+        completeDays = dayCount;
+        completeDayAmount = amountForDays;
+      } else {
+        break;
+      }
     }
 
-    const completeDays = Math.min(
-      coveredDays,
-      Math.floor((amountForMonth + 0.000001) / dailyRate),
-    );
-
-    if (completeDays <= 0) {
+    if (completeDays <= 0 || completeDayAmount <= 0) {
       continue;
     }
-
-    const completeDayAmount = roundMoney(dailyRate * completeDays);
 
     allocations.push({
       solar_year: Number(month.solar_year),
@@ -319,9 +335,6 @@ function calculatePaidCoverage(paymentAmount, months) {
   };
 }
 
-/*
-  Create exact Gregorian from/to dates for an allocation.
-*/
 function calculateAllocationDates(
   period,
   month,
@@ -340,9 +353,6 @@ function calculateAllocationDates(
   };
 }
 
-/*
-  Convert a DB date to Solar Hijri.
-*/
 function toSolarDateValue(date) {
   if (!date) {
     return null;
@@ -353,28 +363,88 @@ function toSolarDateValue(date) {
   return formatSolarDate(solar.jy, solar.jm, solar.jd);
 }
 
-/*
-  Get month rows for a fee.
-*/
+async function recordPaymentAudit(
+  client,
+  {
+    paymentId = null,
+    receiptNumber = null,
+    action,
+    req,
+    oldData = null,
+    newData = null,
+  },
+) {
+  await client.query(
+    `INSERT INTO fee_payment_audit (
+       fee_payment_id,
+       receipt_number,
+       action,
+       performed_by,
+       performed_by_name,
+       performed_by_role,
+       old_data,
+       new_data
+     )
+     VALUES (
+       $1,
+       $2,
+       $3,
+       $4,
+       $5,
+       $6,
+       $7::jsonb,
+       $8::jsonb
+     )`,
+    [
+      paymentId,
+      receiptNumber,
+      action,
+      req.user?.id ?? null,
+      req.user?.name ?? null,
+      req.user?.role ?? null,
+      oldData ? JSON.stringify(oldData) : null,
+      newData ? JSON.stringify(newData) : null,
+    ],
+  );
+}
+
+async function getPaymentForMonths(client, paymentId) {
+  const result = await client.query(
+    `SELECT DISTINCT
+       fpm.solar_year,
+       fpm.solar_month
+     FROM fee_payment_allocations fpa
+     JOIN fee_period_months fpm
+       ON fpm.id = fpa.fee_period_month_id
+     WHERE fpa.fee_payment_id = $1
+     ORDER BY
+       fpm.solar_year ASC,
+       fpm.solar_month ASC`,
+    [paymentId],
+  );
+
+  return result.rows.map((row) => `${row.solar_year}/${row.solar_month}`);
+}
+
 async function getFeeMonths(client, feeId) {
   const result = await client.query(
-    `SELECT 
-       fpm.id, 
-       fpm.fee_period_id, 
-       fpm.solar_year, 
-       fpm.solar_month, 
-       fpm.month_days, 
-       fpm.covered_days, 
-       fpm.monthly_amount, 
-       fpm.calculated_amount, 
-       fpm.created_at 
-     FROM fee_period_months fpm 
-     JOIN fee_periods fp 
-       ON fp.id = fpm.fee_period_id 
-     WHERE fp.fee_id = $1 
-     ORDER BY 
-       fpm.solar_year ASC, 
-       fpm.solar_month ASC, 
+    `SELECT
+       fpm.id,
+       fpm.fee_period_id,
+       fpm.solar_year,
+       fpm.solar_month,
+       fpm.month_days,
+       fpm.covered_days,
+       fpm.monthly_amount,
+       fpm.calculated_amount,
+       fpm.created_at
+     FROM fee_period_months fpm
+     JOIN fee_periods fp
+       ON fp.id = fpm.fee_period_id
+     WHERE fp.fee_id = $1
+     ORDER BY
+       fpm.solar_year ASC,
+       fpm.solar_month ASC,
        fpm.id ASC`,
     [feeId],
   );
@@ -382,34 +452,28 @@ async function getFeeMonths(client, feeId) {
   return result.rows;
 }
 
-/*
-  Rebuild payment allocations for one fee period.
-
-  This is used after editing/deleting a payment so the
-  covered attendance days remain correct.
-*/
 async function rebuildFeePeriodAllocations(client, feePeriodId) {
   await client.query(
-    `DELETE FROM fee_payment_allocations 
-     WHERE fee_period_month_id IN ( 
-       SELECT id 
-       FROM fee_period_months 
-       WHERE fee_period_id = $1 
+    `DELETE FROM fee_payment_allocations
+     WHERE fee_period_month_id IN (
+       SELECT id
+       FROM fee_period_months
+       WHERE fee_period_id = $1
      )`,
     [feePeriodId],
   );
 
   const periodResult = await client.query(
-    `SELECT 
-       id, 
-       fee_id, 
-       enrollment_id, 
-       from_date, 
-       to_date, 
-       covered_days, 
-       total_amount 
-     FROM fee_periods 
-     WHERE id = $1 
+    `SELECT
+       id,
+       fee_id,
+       enrollment_id,
+       from_date,
+       to_date,
+       covered_days,
+       total_amount
+     FROM fee_periods
+     WHERE id = $1
      FOR UPDATE`,
     [feePeriodId],
   );
@@ -421,38 +485,38 @@ async function rebuildFeePeriodAllocations(client, feePeriodId) {
   const period = periodResult.rows[0];
 
   const monthResult = await client.query(
-    `SELECT 
-       id, 
-       fee_period_id, 
-       solar_year, 
-       solar_month, 
-       month_days, 
-       covered_days, 
-       monthly_amount, 
-       calculated_amount 
-     FROM fee_period_months 
-     WHERE fee_period_id = $1 
-     ORDER BY 
-       solar_year ASC, 
-       solar_month ASC, 
+    `SELECT
+       id,
+       fee_period_id,
+       solar_year,
+       solar_month,
+       month_days,
+       covered_days,
+       monthly_amount,
+       calculated_amount
+     FROM fee_period_months
+     WHERE fee_period_id = $1
+     ORDER BY
+       solar_year ASC,
+       solar_month ASC,
        id ASC`,
     [feePeriodId],
   );
 
   const paymentResult = await client.query(
-    `SELECT 
-       id, 
-       fee_id, 
-       amount, 
-       payment_date, 
-       receipt_number, 
-       fee_period_id, 
-       created_at 
-     FROM fee_payments 
-     WHERE fee_period_id = $1 
-     ORDER BY 
-       payment_date ASC, 
-       id ASC 
+    `SELECT
+       id,
+       fee_id,
+       amount,
+       payment_date,
+       receipt_number,
+       fee_period_id,
+       created_at
+     FROM fee_payments
+     WHERE fee_period_id = $1
+     ORDER BY
+       payment_date ASC,
+       id ASC
      FOR UPDATE`,
     [feePeriodId],
   );
@@ -463,7 +527,9 @@ async function rebuildFeePeriodAllocations(client, feePeriodId) {
   for (const payment of paymentResult.rows) {
     const remainingMonths = monthResult.rows.map((month) => ({
       ...month,
+
       already_paid_days: Number(paidDaysByMonth.get(month.id) || 0),
+
       covered_days: Math.max(
         Number(month.covered_days) - Number(paidDaysByMonth.get(month.id) || 0),
         0,
@@ -500,24 +566,24 @@ async function rebuildFeePeriodAllocations(client, feePeriodId) {
       );
 
       const allocationResult = await client.query(
-        `INSERT INTO fee_payment_allocations 
-         ( 
-           fee_payment_id, 
-           fee_period_month_id, 
-           covered_days, 
-           allocated_amount, 
-           from_date, 
-           to_date 
-         ) 
-         VALUES 
-         ( 
-           $1, 
-           $2, 
-           $3, 
-           $4, 
-           $5, 
-           $6 
-         ) 
+        `INSERT INTO fee_payment_allocations
+         (
+           fee_payment_id,
+           fee_period_month_id,
+           covered_days,
+           allocated_amount,
+           from_date,
+           to_date
+         )
+         VALUES
+         (
+           $1,
+           $2,
+           $3,
+           $4,
+           $5,
+           $6
+         )
          RETURNING *`,
         [
           payment.id,
@@ -543,18 +609,14 @@ async function rebuildFeePeriodAllocations(client, feePeriodId) {
   };
 }
 
-/*
-  Recalculate the main fee totals from actual payment
-  transactions.
-*/
 async function recalculateFeeTotals(client, feeId) {
   const feeResult = await client.query(
-    `SELECT 
-       id, 
-       total_amount, 
-       status 
-     FROM fees 
-     WHERE id = $1 
+    `SELECT
+       id,
+       total_amount,
+       status
+     FROM fees
+     WHERE id = $1
      FOR UPDATE`,
     [feeId],
   );
@@ -566,15 +628,17 @@ async function recalculateFeeTotals(client, feeId) {
   const fee = feeResult.rows[0];
 
   const paidResult = await client.query(
-    `SELECT 
-       COALESCE(SUM(amount), 0) AS paid_amount 
-     FROM fee_payments 
+    `SELECT
+       COALESCE(SUM(amount), 0) AS paid_amount
+     FROM fee_payments
      WHERE fee_id = $1`,
     [feeId],
   );
 
   const paidAmount = roundMoney(Number(paidResult.rows[0].paid_amount));
+
   const totalAmount = roundMoney(Number(fee.total_amount));
+
   const dueAmount = Math.max(roundMoney(totalAmount - paidAmount), 0);
 
   let status = "pending";
@@ -586,14 +650,14 @@ async function recalculateFeeTotals(client, feeId) {
   }
 
   const latestPaymentResult = await client.query(
-    `SELECT 
-       payment_date, 
-       receipt_number 
-     FROM fee_payments 
-     WHERE fee_id = $1 
-     ORDER BY 
-       payment_date DESC, 
-       id DESC 
+    `SELECT
+       payment_date,
+       receipt_number
+     FROM fee_payments
+     WHERE fee_id = $1
+     ORDER BY
+       payment_date DESC,
+       id DESC
      LIMIT 1`,
     [feeId],
   );
@@ -601,14 +665,14 @@ async function recalculateFeeTotals(client, feeId) {
   const latestPayment = latestPaymentResult.rows[0] || null;
 
   const result = await client.query(
-    `UPDATE fees 
-     SET 
-       paid_amount = $1, 
-       due_amount = $2, 
-       status = $3, 
-       payment_date = $4, 
-       receipt_number = $5 
-     WHERE id = $6 
+    `UPDATE fees
+     SET
+       paid_amount = $1,
+       due_amount = $2,
+       status = $3,
+       payment_date = $4,
+       receipt_number = $5
+     WHERE id = $6
      RETURNING *`,
     [
       paidAmount,
@@ -623,11 +687,9 @@ async function recalculateFeeTotals(client, feeId) {
   return result.rows[0];
 }
 
-/*
-  ============================================================
-  LEGACY SUBJECT FEE CONFIGURATION
-  ============================================================
-*/
+/* ============================================================
+   LEGACY SUBJECT FEE CONFIGURATION
+============================================================ */
 
 router.get(
   "/subject-config",
@@ -635,14 +697,14 @@ router.get(
   requireRoles("admin", "staff"),
   asyncH(async (req, res) => {
     const result = await query(
-      `SELECT 
-         s.id AS subject_id, 
-         s.name AS subject_name, 
-         sfc.amount, 
-         sfc.updated_at 
-       FROM subjects s 
-       LEFT JOIN subject_fee_config sfc 
-         ON sfc.subject_id = s.id 
+      `SELECT
+         s.id AS subject_id,
+         s.name AS subject_name,
+         sfc.amount,
+         sfc.updated_at
+       FROM subjects s
+       LEFT JOIN subject_fee_config sfc
+         ON sfc.subject_id = s.id
        ORDER BY s.name ASC`,
     );
 
@@ -656,14 +718,14 @@ router.get(
   requireRoles("admin", "staff"),
   asyncH(async (req, res) => {
     const result = await query(
-      `SELECT 
-         s.id AS subject_id, 
-         s.name AS subject_name, 
-         sfc.amount, 
-         sfc.updated_at 
-       FROM subjects s 
-       LEFT JOIN subject_fee_config sfc 
-         ON sfc.subject_id = s.id 
+      `SELECT
+         s.id AS subject_id,
+         s.name AS subject_name,
+         sfc.amount,
+         sfc.updated_at
+       FROM subjects s
+       LEFT JOIN subject_fee_config sfc
+         ON sfc.subject_id = s.id
        WHERE s.id = $1`,
       [req.params.subjectId],
     );
@@ -693,15 +755,15 @@ router.post(
 
     const numericAmount = Number(amount);
 
-    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+    if (!isMultipleOfTen(numericAmount)) {
       return res.status(400).json({
-        error: "Amount must be greater than zero",
+        error: "Amount must be a positive multiple of 10",
       });
     }
 
     const subject = await query(
-      `SELECT id, name 
-       FROM subjects 
+      `SELECT id, name
+       FROM subjects
        WHERE id = $1`,
       [subject_id],
     );
@@ -713,22 +775,22 @@ router.post(
     }
 
     const result = await query(
-      `INSERT INTO subject_fee_config 
-       ( 
-         subject_id, 
-         amount, 
-         updated_at 
-       ) 
-       VALUES 
-       ( 
-         $1, 
-         $2, 
-         NOW() 
-       ) 
-       ON CONFLICT (subject_id) 
-       DO UPDATE SET 
-         amount = EXCLUDED.amount, 
-         updated_at = NOW() 
+      `INSERT INTO subject_fee_config
+       (
+         subject_id,
+         amount,
+         updated_at
+       )
+       VALUES
+       (
+         $1,
+         $2,
+         NOW()
+       )
+       ON CONFLICT (subject_id)
+       DO UPDATE SET
+         amount = EXCLUDED.amount,
+         updated_at = NOW()
        RETURNING *`,
       [subject_id, numericAmount],
     );
@@ -755,18 +817,18 @@ router.put(
 
     const numericAmount = Number(amount);
 
-    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+    if (!isMultipleOfTen(numericAmount)) {
       return res.status(400).json({
-        error: "Amount must be greater than zero",
+        error: "Amount must be a positive multiple of 10",
       });
     }
 
     const result = await query(
-      `UPDATE subject_fee_config 
-       SET 
-         amount = $1, 
-         updated_at = NOW() 
-       WHERE subject_id = $2 
+      `UPDATE subject_fee_config
+       SET
+         amount = $1,
+         updated_at = NOW()
+       WHERE subject_id = $2
        RETURNING *`,
       [numericAmount, req.params.subjectId],
     );
@@ -787,8 +849,8 @@ router.delete(
   requireRoles("admin"),
   asyncH(async (req, res) => {
     const result = await query(
-      `DELETE FROM subject_fee_config 
-       WHERE subject_id = $1 
+      `DELETE FROM subject_fee_config
+       WHERE subject_id = $1
        RETURNING subject_id`,
       [req.params.subjectId],
     );
@@ -806,11 +868,9 @@ router.delete(
   }),
 );
 
-/*
-  ============================================================
-  ACTIVE STUDENT ENROLLMENTS
-  ============================================================
-*/
+/* ============================================================
+   ACTIVE STUDENT ENROLLMENTS
+============================================================ */
 
 router.get(
   "/enrollments",
@@ -818,50 +878,50 @@ router.get(
   requireRoles("admin", "staff"),
   asyncH(async (req, res) => {
     const result = await query(
-      `SELECT 
-         e.id AS enrollment_id, 
-         e.student_id, 
- 
-         s.full_name AS student_name, 
-         s.roll_number, 
-         s.guardian_name AS father_name, 
- 
-         e.class_slot_id, 
- 
-         cs.subject_id, 
-         sub.name AS subject_name, 
- 
-         cs.teacher_id, 
-         t.full_name AS teacher_name, 
- 
-         cs.start_time, 
-         cs.end_time, 
- 
-         e.enrolled_on, 
-         e.is_active AS enrollment_active, 
-         cs.is_active AS class_active 
- 
-       FROM student_enrollments e 
- 
-       JOIN students s 
-         ON s.id = e.student_id 
- 
-       JOIN class_slots cs 
-         ON cs.id = e.class_slot_id 
- 
-       JOIN subjects sub 
-         ON sub.id = cs.subject_id 
- 
-       JOIN teachers t 
-         ON t.id = cs.teacher_id 
- 
-       WHERE e.is_active = TRUE 
-         AND cs.is_active = TRUE 
- 
-       ORDER BY 
-         s.full_name ASC, 
-         sub.name ASC, 
-         cs.start_time ASC, 
+      `SELECT
+         e.id AS enrollment_id,
+         e.student_id,
+
+         s.full_name AS student_name,
+         s.roll_number,
+         s.guardian_name AS father_name,
+
+         e.class_slot_id,
+
+         cs.subject_id,
+         sub.name AS subject_name,
+
+         cs.teacher_id,
+         t.full_name AS teacher_name,
+
+         cs.start_time,
+         cs.end_time,
+
+         e.enrolled_on,
+         e.is_active AS enrollment_active,
+         cs.is_active AS class_active
+
+       FROM student_enrollments e
+
+       JOIN students s
+         ON s.id = e.student_id
+
+       JOIN class_slots cs
+         ON cs.id = e.class_slot_id
+
+       JOIN subjects sub
+         ON sub.id = cs.subject_id
+
+       JOIN teachers t
+         ON t.id = cs.teacher_id
+
+       WHERE e.is_active = TRUE
+         AND cs.is_active = TRUE
+
+       ORDER BY
+         s.full_name ASC,
+         sub.name ASC,
+         cs.start_time ASC,
          e.id ASC`,
     );
 
@@ -869,11 +929,9 @@ router.get(
   }),
 );
 
-/*
-  ============================================================
-  FEE RECORDS
-  ============================================================
-*/
+/* ============================================================
+   FEE RECORDS
+============================================================ */
 
 router.get(
   "/",
@@ -903,49 +961,49 @@ router.get(
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
     const result = await query(
-      `SELECT 
-         f.id, 
-         f.student_id, 
- 
-         s.full_name AS student_name, 
-         s.roll_number, 
-         s.guardian_name, 
-         s.guardian_phone, 
- 
-         f.subject_id, 
-         sub.name AS subject_name, 
- 
-         f.total_amount, 
-         f.paid_amount, 
-         f.due_amount, 
-         f.status, 
-         f.payment_date, 
-         f.receipt_number, 
-         f.academic_year, 
-         f.description, 
-         f.created_at, 
- 
-         fp.id AS fee_period_id, 
-         fp.enrollment_id, 
-         fp.from_date, 
-         fp.to_date, 
-         fp.covered_days 
- 
-       FROM fees f 
- 
-       JOIN students s 
-         ON s.id = f.student_id 
- 
-       LEFT JOIN subjects sub 
-         ON sub.id = f.subject_id 
- 
-       LEFT JOIN fee_periods fp 
-         ON fp.fee_id = f.id 
- 
-       ${where} 
- 
-       ORDER BY 
-         f.created_at DESC, 
+      `SELECT
+         f.id,
+         f.student_id,
+
+         s.full_name AS student_name,
+         s.roll_number,
+         s.guardian_name,
+         s.guardian_phone,
+
+         f.subject_id,
+         sub.name AS subject_name,
+
+         f.total_amount,
+         f.paid_amount,
+         f.due_amount,
+         f.status,
+         f.payment_date,
+         f.receipt_number,
+         f.academic_year,
+         f.description,
+         f.created_at,
+
+         fp.id AS fee_period_id,
+         fp.enrollment_id,
+         fp.from_date,
+         fp.to_date,
+         fp.covered_days
+
+       FROM fees f
+
+       JOIN students s
+         ON s.id = f.student_id
+
+       LEFT JOIN subjects sub
+         ON sub.id = f.subject_id
+
+       LEFT JOIN fee_periods fp
+         ON fp.fee_id = f.id
+
+       ${where}
+
+       ORDER BY
+         f.created_at DESC,
          f.id DESC`,
       params,
     );
@@ -979,11 +1037,9 @@ router.get(
   }),
 );
 
-/*
-  ============================================================
-  ENROLLMENT PAYMENT HISTORY
-  ============================================================
-*/
+/* ============================================================
+   ENROLLMENT PAYMENT HISTORY
+============================================================ */
 
 router.get(
   "/enrollments/:enrollmentId/history",
@@ -1000,43 +1056,43 @@ router.get(
 
     const enrollmentResult = await query(
       `
-      SELECT 
-        e.id AS enrollment_id, 
-        e.student_id, 
- 
-        s.full_name AS student_name, 
-        s.roll_number, 
-        s.guardian_name AS father_name, 
-        s.guardian_phone, 
- 
-        e.enrolled_on, 
- 
-        cs.id AS class_slot_id, 
-        cs.start_time, 
-        cs.end_time, 
- 
-        sub.id AS subject_id, 
-        sub.name AS subject_name, 
- 
-        t.id AS teacher_id, 
-        t.full_name AS teacher_name 
- 
-      FROM student_enrollments e 
- 
-      JOIN students s 
-        ON s.id = e.student_id 
- 
-      JOIN class_slots cs 
-        ON cs.id = e.class_slot_id 
- 
-      JOIN subjects sub 
-        ON sub.id = cs.subject_id 
- 
-      JOIN teachers t 
-        ON t.id = cs.teacher_id 
- 
-      WHERE e.id = $1 
-      LIMIT 1 
+      SELECT
+        e.id AS enrollment_id,
+        e.student_id,
+
+        s.full_name AS student_name,
+        s.roll_number,
+        s.guardian_name AS father_name,
+        s.guardian_phone,
+
+        e.enrolled_on,
+
+        cs.id AS class_slot_id,
+        cs.start_time,
+        cs.end_time,
+
+        sub.id AS subject_id,
+        sub.name AS subject_name,
+
+        t.id AS teacher_id,
+        t.full_name AS teacher_name
+
+      FROM student_enrollments e
+
+      JOIN students s
+        ON s.id = e.student_id
+
+      JOIN class_slots cs
+        ON cs.id = e.class_slot_id
+
+      JOIN subjects sub
+        ON sub.id = cs.subject_id
+
+      JOIN teachers t
+        ON t.id = cs.teacher_id
+
+      WHERE e.id = $1
+      LIMIT 1
       `,
       [enrollmentId],
     );
@@ -1051,180 +1107,200 @@ router.get(
 
     const periodsResult = await query(
       `
-      SELECT 
-        fp.id AS fee_period_id, 
-        fp.fee_id, 
-        fp.enrollment_id, 
- 
-        fp.from_date, 
-        fp.to_date, 
-        fp.covered_days, 
-        fp.total_amount, 
-        fp.monthly_amount, 
- 
-        f.status AS fee_status, 
-        f.total_amount AS fee_total_amount, 
-        f.paid_amount AS fee_paid_amount, 
-        f.due_amount AS fee_due_amount, 
- 
-        COALESCE( 
-          ( 
-            SELECT SUM(fpa.allocated_amount) 
-            FROM fee_payment_allocations fpa 
-            JOIN fee_period_months fpm 
-              ON fpm.id = fpa.fee_period_month_id 
-            WHERE fpm.fee_period_id = fp.id 
-          ), 
-          0 
-        ) AS allocated_paid_amount, 
- 
-        COALESCE( 
-          ( 
-            SELECT SUM(fpa.covered_days) 
-            FROM fee_payment_allocations fpa 
-            JOIN fee_period_months fpm 
-              ON fpm.id = fpa.fee_period_month_id 
-            WHERE fpm.fee_period_id = fp.id 
-          ), 
-          0 
-        ) AS paid_days 
- 
-      FROM fee_periods fp 
- 
-      JOIN fees f 
-        ON f.id = fp.fee_id 
- 
-      WHERE fp.enrollment_id = $1 
- 
-      ORDER BY 
-        fp.from_date DESC, 
-        fp.id DESC 
+      SELECT
+        fp.id AS fee_period_id,
+        fp.fee_id,
+        fp.enrollment_id,
+
+        fp.from_date,
+        fp.to_date,
+        fp.covered_days,
+        fp.total_amount,
+        fp.monthly_amount,
+
+        f.status AS fee_status,
+        f.total_amount AS fee_total_amount,
+        f.paid_amount AS fee_paid_amount,
+        f.due_amount AS fee_due_amount,
+
+        COALESCE(
+          (
+            SELECT SUM(fpa.allocated_amount)
+            FROM fee_payment_allocations fpa
+            JOIN fee_period_months fpm
+              ON fpm.id = fpa.fee_period_month_id
+            WHERE fpm.fee_period_id = fp.id
+          ),
+          0
+        ) AS allocated_paid_amount,
+
+        COALESCE(
+          (
+            SELECT SUM(fpa.covered_days)
+            FROM fee_payment_allocations fpa
+            JOIN fee_period_months fpm
+              ON fpm.id = fpa.fee_period_month_id
+            WHERE fpm.fee_period_id = fp.id
+          ),
+          0
+        ) AS paid_days
+
+      FROM fee_periods fp
+
+      JOIN fees f
+        ON f.id = fp.fee_id
+
+      WHERE fp.enrollment_id = $1
+
+      ORDER BY
+        fp.from_date DESC,
+        fp.id DESC
       `,
       [enrollmentId],
     );
 
     const monthsResult = await query(
       `
-      SELECT 
-        fpm.id AS fee_period_month_id, 
-        fpm.fee_period_id, 
- 
-        fp.fee_id, 
-        fp.from_date AS period_from_date, 
-        fp.to_date AS period_to_date, 
- 
-        fpm.solar_year, 
-        fpm.solar_month, 
- 
-        fpm.month_days, 
-        fpm.covered_days, 
- 
-        fpm.monthly_amount, 
-        fpm.calculated_amount, 
- 
-        f.status AS fee_status, 
-        f.total_amount AS fee_total_amount, 
-        f.paid_amount AS fee_paid_amount, 
-        f.due_amount AS fee_due_amount, 
- 
-        COALESCE( 
-          SUM(fpa.covered_days), 
-          0 
-        ) AS paid_days, 
- 
-        COALESCE( 
-          SUM(fpa.allocated_amount), 
-          0 
-        ) AS paid_amount 
- 
-      FROM fee_period_months fpm 
- 
-      JOIN fee_periods fp 
-        ON fp.id = fpm.fee_period_id 
- 
-      JOIN fees f 
-        ON f.id = fp.fee_id 
- 
-      LEFT JOIN fee_payment_allocations fpa 
-        ON fpa.fee_period_month_id = fpm.id 
- 
-      WHERE fp.enrollment_id = $1 
- 
-      GROUP BY 
-        fpm.id, 
-        fpm.fee_period_id, 
-        fp.fee_id, 
-        fp.from_date, 
-        fp.to_date, 
- 
-        fpm.solar_year, 
-        fpm.solar_month, 
- 
-        fpm.month_days, 
-        fpm.covered_days, 
- 
-        fpm.monthly_amount, 
-        fpm.calculated_amount, 
- 
-        f.status, 
-        f.total_amount, 
-        f.paid_amount, 
-        f.due_amount 
- 
-      ORDER BY 
-        fpm.solar_year DESC, 
-        fpm.solar_month DESC 
+      SELECT
+        fpm.id AS fee_period_month_id,
+        fpm.fee_period_id,
+
+        fp.fee_id,
+        fp.from_date AS period_from_date,
+        fp.to_date AS period_to_date,
+
+        fpm.solar_year,
+        fpm.solar_month,
+
+        fpm.month_days,
+        fpm.covered_days,
+
+        fpm.monthly_amount,
+        fpm.calculated_amount,
+
+        f.status AS fee_status,
+        f.total_amount AS fee_total_amount,
+        f.paid_amount AS fee_paid_amount,
+        f.due_amount AS fee_due_amount,
+
+        COALESCE(
+          SUM(fpa.covered_days),
+          0
+        ) AS paid_days,
+
+        COALESCE(
+          SUM(fpa.allocated_amount),
+          0
+        ) AS paid_amount
+
+      FROM fee_period_months fpm
+
+      JOIN fee_periods fp
+        ON fp.id = fpm.fee_period_id
+
+      JOIN fees f
+        ON f.id = fp.fee_id
+
+      LEFT JOIN fee_payment_allocations fpa
+        ON fpa.fee_period_month_id = fpm.id
+
+      WHERE fp.enrollment_id = $1
+
+      GROUP BY
+        fpm.id,
+        fpm.fee_period_id,
+        fp.fee_id,
+        fp.from_date,
+        fp.to_date,
+
+        fpm.solar_year,
+        fpm.solar_month,
+
+        fpm.month_days,
+        fpm.covered_days,
+
+        fpm.monthly_amount,
+        fpm.calculated_amount,
+
+        f.status,
+        f.total_amount,
+        f.paid_amount,
+        f.due_amount
+
+      ORDER BY
+        fpm.solar_year DESC,
+        fpm.solar_month DESC
       `,
       [enrollmentId],
     );
 
     const paymentsResult = await query(
       `
-      SELECT 
-        fp.id AS payment_id, 
-        fp.amount, 
-        fp.payment_date, 
-        fp.receipt_number, 
-        fp.comment, 
-        fp.created_at, 
- 
-        COALESCE( 
-          SUM(fpa.allocated_amount), 
-          0 
-        ) AS allocated_amount, 
- 
-        COALESCE( 
-          SUM(fpa.covered_days), 
-          0 
-        ) AS covered_days, 
- 
-        MIN(fpa.from_date) AS coverage_from_date, 
-        MAX(fpa.to_date) AS coverage_to_date 
- 
-      FROM fee_payments fp 
- 
-      LEFT JOIN fee_payment_allocations fpa 
-        ON fpa.fee_payment_id = fp.id 
- 
-      LEFT JOIN fee_period_months fpm 
-        ON fpm.id = fpa.fee_period_month_id 
- 
-      LEFT JOIN fee_periods fper 
-        ON fper.id = fpm.fee_period_id 
- 
-      WHERE fper.enrollment_id = $1 
- 
-      GROUP BY 
-        fp.id, 
-        fp.amount, 
-        fp.payment_date, 
-        fp.receipt_number, 
-        fp.comment, 
-        fp.created_at 
- 
-      ORDER BY 
-        fp.payment_date DESC, 
-        fp.id DESC 
+      SELECT
+        fp.id AS payment_id,
+        fp.amount,
+        fp.payment_date,
+        fp.receipt_number,
+        fp.comment,
+        fp.created_at,
+        fp.recorded_by,
+
+        recorded_user.full_name AS recorded_by_name,
+        recorded_user.role AS recorded_by_role,
+
+        COALESCE(
+          SUM(fpa.allocated_amount),
+          0
+        ) AS allocated_amount,
+
+        COALESCE(
+          SUM(fpa.covered_days),
+          0
+        ) AS covered_days,
+
+        MIN(fpa.from_date) AS coverage_from_date,
+        MAX(fpa.to_date) AS coverage_to_date,
+
+        ARRAY(
+          SELECT DISTINCT
+            fpm2.solar_year::text || '/' || fpm2.solar_month::text
+          FROM fee_payment_allocations fpa2
+          JOIN fee_period_months fpm2
+            ON fpm2.id = fpa2.fee_period_month_id
+          WHERE fpa2.fee_payment_id = fp.id
+          ORDER BY 1
+        ) AS payment_for_months
+
+      FROM fee_payments fp
+
+      LEFT JOIN users recorded_user
+        ON recorded_user.id = fp.recorded_by
+
+      LEFT JOIN fee_payment_allocations fpa
+        ON fpa.fee_payment_id = fp.id
+
+      LEFT JOIN fee_period_months fpm
+        ON fpm.id = fpa.fee_period_month_id
+
+      LEFT JOIN fee_periods fper
+        ON fper.id = fpm.fee_period_id
+
+      WHERE fper.enrollment_id = $1
+
+      GROUP BY
+        fp.id,
+        fp.amount,
+        fp.payment_date,
+        fp.receipt_number,
+        fp.comment,
+        fp.created_at,
+        fp.recorded_by,
+        recorded_user.full_name,
+        recorded_user.role
+
+      ORDER BY
+        fp.payment_date DESC,
+        fp.id DESC
       `,
       [enrollmentId],
     );
@@ -1260,11 +1336,9 @@ router.get(
   }),
 );
 
-/*
-  ============================================================
-  PAYMENT HISTORY FOR ONE FEE
-  ============================================================
-*/
+/* ============================================================
+   PAYMENT HISTORY FOR ONE FEE
+============================================================ */
 
 router.get(
   "/:id([0-9]+)/payments",
@@ -1272,8 +1346,8 @@ router.get(
   requireRoles("admin", "staff"),
   asyncH(async (req, res) => {
     const fee = await query(
-      `SELECT id 
-       FROM fees 
+      `SELECT id
+       FROM fees
        WHERE id = $1`,
       [req.params.id],
     );
@@ -1285,22 +1359,29 @@ router.get(
     }
 
     const result = await query(
-      `SELECT 
-         fp.id, 
-         fp.fee_id, 
-         fp.amount, 
-         fp.payment_date, 
-         fp.receipt_number, 
-         fp.comment, 
-         fp.fee_period_id, 
-         fp.created_at 
- 
-       FROM fee_payments fp 
- 
-       WHERE fp.fee_id = $1 
- 
-       ORDER BY 
-         fp.payment_date ASC, 
+      `SELECT
+         fp.id,
+         fp.fee_id,
+         fp.amount,
+         fp.payment_date,
+         fp.receipt_number,
+         fp.comment,
+         fp.fee_period_id,
+         fp.created_at,
+         fp.recorded_by,
+
+         recorded_user.full_name AS recorded_by_name,
+         recorded_user.role AS recorded_by_role
+
+       FROM fee_payments fp
+
+       LEFT JOIN users recorded_user
+         ON recorded_user.id = fp.recorded_by
+
+       WHERE fp.fee_id = $1
+
+       ORDER BY
+         fp.payment_date ASC,
          fp.id ASC`,
       [req.params.id],
     );
@@ -1309,31 +1390,31 @@ router.get(
 
     for (const payment of result.rows) {
       const allocations = await query(
-        `SELECT 
-           fpa.id, 
-           fpa.fee_payment_id, 
-           fpa.fee_period_month_id, 
-           fpa.covered_days, 
-           fpa.allocated_amount, 
-           fpa.from_date, 
-           fpa.to_date, 
- 
-           fpm.solar_year, 
-           fpm.solar_month, 
-           fpm.month_days, 
-           fpm.monthly_amount, 
-           fpm.calculated_amount 
- 
-         FROM fee_payment_allocations fpa 
- 
-         JOIN fee_period_months fpm 
-           ON fpm.id = fpa.fee_period_month_id 
- 
-         WHERE fpa.fee_payment_id = $1 
- 
-         ORDER BY 
-           fpm.solar_year ASC, 
-           fpm.solar_month ASC, 
+        `SELECT
+           fpa.id,
+           fpa.fee_payment_id,
+           fpa.fee_period_month_id,
+           fpa.covered_days,
+           fpa.allocated_amount,
+           fpa.from_date,
+           fpa.to_date,
+
+           fpm.solar_year,
+           fpm.solar_month,
+           fpm.month_days,
+           fpm.monthly_amount,
+           fpm.calculated_amount
+
+         FROM fee_payment_allocations fpa
+
+         JOIN fee_period_months fpm
+           ON fpm.id = fpa.fee_period_month_id
+
+         WHERE fpa.fee_payment_id = $1
+
+         ORDER BY
+           fpm.solar_year ASC,
+           fpm.solar_month ASC,
            fpa.id ASC`,
         [payment.id],
       );
@@ -1342,6 +1423,15 @@ router.get(
         ...payment,
 
         payment_solar_date: toSolarDateValue(payment.payment_date),
+
+        payment_for_months: [
+          ...new Set(
+            allocations.rows.map(
+              (allocation) =>
+                `${allocation.solar_year}/${allocation.solar_month}`,
+            ),
+          ),
+        ],
 
         allocations: allocations.rows.map((allocation) => ({
           ...allocation,
@@ -1357,11 +1447,9 @@ router.get(
   }),
 );
 
-/*
-  ============================================================
-  CREATE FEE
-  ============================================================
-*/
+/* ============================================================
+   CREATE FEE
+============================================================ */
 
 router.post(
   "/",
@@ -1381,9 +1469,11 @@ router.post(
       description,
     } = req.body;
 
-    if (!student_id) {
+    const numericStudentId = Number(student_id);
+
+    if (!Number.isInteger(numericStudentId) || numericStudentId < 0) {
       return res.status(400).json({
-        error: "Student is required",
+        error: "Valid student ID is required",
       });
     }
 
@@ -1426,7 +1516,7 @@ router.post(
 
     if (initialPaid > 0 && !isMultipleOfTen(initialPaid)) {
       return res.status(400).json({
-        error: "Initial paid amount must be a multiple of 10",
+        error: "Initial payment must be a positive multiple of 10",
       });
     }
 
@@ -1436,15 +1526,15 @@ router.post(
       await client.query("BEGIN");
 
       const studentResult = await client.query(
-        `SELECT 
-           id, 
-           full_name, 
-           roll_number, 
-           guardian_name, 
-           guardian_phone 
-         FROM students 
+        `SELECT
+           id,
+           full_name,
+           roll_number,
+           guardian_name,
+           guardian_phone
+         FROM students
          WHERE id = $1`,
-        [student_id],
+        [numericStudentId],
       );
 
       if (!studentResult.rows.length) {
@@ -1456,39 +1546,39 @@ router.post(
       }
 
       const enrollmentResult = await client.query(
-        `SELECT 
-           e.id, 
-           e.student_id, 
-           e.class_slot_id, 
-           e.enrolled_on, 
- 
-           cs.subject_id, 
-           cs.teacher_id, 
-           cs.start_time, 
-           cs.end_time, 
- 
-           sub.name AS subject_name, 
- 
-           t.full_name AS teacher_name 
- 
-         FROM student_enrollments e 
- 
-         JOIN class_slots cs 
-           ON cs.id = e.class_slot_id 
- 
-         JOIN subjects sub 
-           ON sub.id = cs.subject_id 
- 
-         JOIN teachers t 
-           ON t.id = cs.teacher_id 
- 
-         WHERE e.id = $1 
-           AND e.student_id = $2 
-           AND e.is_active = TRUE 
-           AND cs.is_active = TRUE 
- 
+        `SELECT
+           e.id,
+           e.student_id,
+           e.class_slot_id,
+           e.enrolled_on,
+
+           cs.subject_id,
+           cs.teacher_id,
+           cs.start_time,
+           cs.end_time,
+
+           sub.name AS subject_name,
+
+           t.full_name AS teacher_name
+
+         FROM student_enrollments e
+
+         JOIN class_slots cs
+           ON cs.id = e.class_slot_id
+
+         JOIN subjects sub
+           ON sub.id = cs.subject_id
+
+         JOIN teachers t
+           ON t.id = cs.teacher_id
+
+         WHERE e.id = $1
+           AND e.student_id = $2
+           AND e.is_active = TRUE
+           AND cs.is_active = TRUE
+
          FOR UPDATE OF e`,
-        [enrollment_id, student_id],
+        [enrollment_id, numericStudentId],
       );
 
       if (!enrollmentResult.rows.length) {
@@ -1534,18 +1624,18 @@ router.post(
       }
 
       const overlapResult = await client.query(
-        `SELECT 
-           fp.id, 
-           fp.from_date, 
-           fp.to_date 
- 
-         FROM fee_periods fp 
- 
-         WHERE fp.enrollment_id = $1 
- 
-           AND fp.from_date <= $3::date 
-           AND fp.to_date >= $2::date 
- 
+        `SELECT
+           fp.id,
+           fp.from_date,
+           fp.to_date
+
+         FROM fee_periods fp
+
+         WHERE fp.enrollment_id = $1
+
+           AND fp.from_date <= $3::date
+           AND fp.to_date >= $2::date
+
          FOR UPDATE`,
         [enrollment_id, period.from_date, period.to_date],
       );
@@ -1561,7 +1651,7 @@ router.post(
         });
       }
 
-      const totalAmount = period.total_amount;
+      const totalAmount = roundMoney(period.total_amount);
 
       if (initialPaid > totalAmount) {
         await client.query("ROLLBACK");
@@ -1571,7 +1661,7 @@ router.post(
         });
       }
 
-      const initialDue = roundMoney(totalAmount - initialPaid);
+      const initialDue = Math.max(roundMoney(totalAmount - initialPaid), 0);
 
       const initialStatus =
         initialDue === 0 ? "paid" : initialPaid > 0 ? "partial" : "pending";
@@ -1592,8 +1682,8 @@ router.post(
         await client.query("SELECT pg_advisory_xact_lock(874321)");
 
         const receiptResult = await client.query(
-          `SELECT 
-             COUNT(*)::int + 1 AS next_number 
+          `SELECT
+             COUNT(*)::int + 1 AS next_number
            FROM fee_payments`,
         );
 
@@ -1611,35 +1701,35 @@ router.post(
       }
 
       const feeResult = await client.query(
-        `INSERT INTO fees 
-         ( 
-           student_id, 
-           subject_id, 
-           total_amount, 
-           paid_amount, 
-           due_amount, 
-           status, 
-           payment_date, 
-           receipt_number, 
-           academic_year, 
-           description 
-         ) 
-         VALUES 
-         ( 
-           $1, 
-           $2, 
-           $3, 
-           $4, 
-           $5, 
-           $6, 
-           $7, 
-           $8, 
-           $9, 
-           $10 
-         ) 
+        `INSERT INTO fees
+         (
+           student_id,
+           subject_id,
+           total_amount,
+           paid_amount,
+           due_amount,
+           status,
+           payment_date,
+           receipt_number,
+           academic_year,
+           description
+         )
+         VALUES
+         (
+           $1,
+           $2,
+           $3,
+           $4,
+           $5,
+           $6,
+           $7,
+           $8,
+           $9,
+           $10
+         )
          RETURNING *`,
         [
-          student_id,
+          numericStudentId,
           enrollment.subject_id,
           totalAmount,
           initialPaid,
@@ -1655,26 +1745,26 @@ router.post(
       const fee = feeResult.rows[0];
 
       const periodResult = await client.query(
-        `INSERT INTO fee_periods 
-         ( 
-           fee_id, 
-           enrollment_id, 
-           from_date, 
-           to_date, 
-           covered_days, 
-           total_amount, 
-           monthly_amount 
-         ) 
-         VALUES 
-         ( 
-           $1, 
-           $2, 
-           $3, 
-           $4, 
-           $5, 
-           $6, 
-           NULL 
-         ) 
+        `INSERT INTO fee_periods
+         (
+           fee_id,
+           enrollment_id,
+           from_date,
+           to_date,
+           covered_days,
+           total_amount,
+           monthly_amount
+         )
+         VALUES
+         (
+           $1,
+           $2,
+           $3,
+           $4,
+           $5,
+           $6,
+           NULL
+         )
          RETURNING *`,
         [
           fee.id,
@@ -1682,7 +1772,7 @@ router.post(
           period.from_date,
           period.to_date,
           period.covered_days,
-          period.total_amount,
+          totalAmount,
         ],
       );
 
@@ -1691,27 +1781,29 @@ router.post(
       const monthRows = [];
 
       for (const month of period.months) {
+        const calculatedAmount = roundMoney(month.calculated_amount);
+
         const monthResult = await client.query(
-          `INSERT INTO fee_period_months 
-           ( 
-             fee_period_id, 
-             solar_year, 
-             solar_month, 
-             month_days, 
-             covered_days, 
-             monthly_amount, 
-             calculated_amount 
-           ) 
-           VALUES 
-           ( 
-             $1, 
-             $2, 
-             $3, 
-             $4, 
-             $5, 
-             $6, 
-             $7 
-           ) 
+          `INSERT INTO fee_period_months
+           (
+             fee_period_id,
+             solar_year,
+             solar_month,
+             month_days,
+             covered_days,
+             monthly_amount,
+             calculated_amount
+           )
+           VALUES
+           (
+             $1,
+             $2,
+             $3,
+             $4,
+             $5,
+             $6,
+             $7
+           )
            RETURNING *`,
           [
             feePeriod.id,
@@ -1720,7 +1812,7 @@ router.post(
             month.month_days,
             month.covered_days,
             month.monthly_amount,
-            month.calculated_amount,
+            calculatedAmount,
           ],
         );
 
@@ -1732,24 +1824,26 @@ router.post(
 
       if (initialPaid > 0) {
         const paymentResult = await client.query(
-          `INSERT INTO fee_payments 
-           ( 
-             fee_id, 
-             amount, 
-             payment_date, 
-             receipt_number, 
-             fee_period_id, 
-             comment 
-           ) 
-           VALUES 
-           ( 
-             $1, 
-             $2, 
-             $3, 
-             $4, 
-             $5, 
-             $6 
-           ) 
+          `INSERT INTO fee_payments
+           (
+             fee_id,
+             amount,
+             payment_date,
+             receipt_number,
+             fee_period_id,
+             comment,
+             recorded_by
+           )
+           VALUES
+           (
+             $1,
+             $2,
+             $3,
+             $4,
+             $5,
+             $6,
+             $7
+           )
            RETURNING *`,
           [
             fee.id,
@@ -1758,6 +1852,7 @@ router.post(
             receiptNumber,
             feePeriod.id,
             initial_payment_comment || null,
+            req.user.id,
           ],
         );
 
@@ -1788,24 +1883,24 @@ router.post(
           );
 
           const allocationResult = await client.query(
-            `INSERT INTO fee_payment_allocations 
-             ( 
-               fee_payment_id, 
-               fee_period_month_id, 
-               covered_days, 
-               allocated_amount, 
-               from_date, 
-               to_date 
-             ) 
-             VALUES 
-             ( 
-               $1, 
-               $2, 
-               $3, 
-               $4, 
-               $5, 
-               $6 
-             ) 
+            `INSERT INTO fee_payment_allocations
+             (
+               fee_payment_id,
+               fee_period_month_id,
+               covered_days,
+               allocated_amount,
+               from_date,
+               to_date
+             )
+             VALUES
+             (
+               $1,
+               $2,
+               $3,
+               $4,
+               $5,
+               $6
+             )
              RETURNING *`,
             [
               payment.id,
@@ -1824,6 +1919,33 @@ router.post(
             alreadyPaidDays + allocation.covered_days,
           );
         }
+
+        const paymentForMonths = [
+          ...new Set(
+            allocations
+              .map((allocation) => {
+                const month = monthRows.find(
+                  (item) => item.id === allocation.fee_period_month_id,
+                );
+
+                return month
+                  ? `${month.solar_year}/${month.solar_month}`
+                  : null;
+              })
+              .filter(Boolean),
+          ),
+        ];
+
+        await recordPaymentAudit(client, {
+          paymentId: payment.id,
+          receiptNumber: payment.receipt_number,
+          action: "create",
+          req,
+          newData: {
+            ...payment,
+            payment_for_months: paymentForMonths,
+          },
+        });
       }
 
       await client.query("COMMIT");
@@ -1871,11 +1993,9 @@ router.post(
   }),
 );
 
-/*
-  ============================================================
-  EDIT FEE
-  ============================================================
-*/
+/* ============================================================
+   EDIT FEE
+============================================================ */
 
 router.put(
   "/:id([0-9]+)",
@@ -1885,17 +2005,17 @@ router.put(
     const { total_amount, subject_id, academic_year, description } = req.body;
 
     const existing = await query(
-      `SELECT 
-         f.*, 
- 
-         EXISTS ( 
-           SELECT 1 
-           FROM fee_periods fp 
-           WHERE fp.fee_id = f.id 
-         ) AS is_period_based 
- 
-       FROM fees f 
- 
+      `SELECT
+         f.*,
+
+         EXISTS (
+           SELECT 1
+           FROM fee_periods fp
+           WHERE fp.fee_id = f.id
+         ) AS is_period_based
+
+       FROM fees f
+
        WHERE f.id = $1`,
       [req.params.id],
     );
@@ -1910,24 +2030,24 @@ router.put(
 
     if (fee.is_period_based) {
       const result = await query(
-        `UPDATE fees 
-         SET 
-           academic_year = 
-             CASE 
-               WHEN $1::text IS NULL 
-               THEN academic_year 
-               ELSE $1 
-             END, 
- 
-           description = 
-             CASE 
-               WHEN $2::text IS NULL 
-               THEN description 
-               ELSE $2 
-             END 
- 
-         WHERE id = $3 
- 
+        `UPDATE fees
+         SET
+           academic_year =
+             CASE
+               WHEN $1::text IS NULL
+               THEN academic_year
+               ELSE $1
+             END,
+
+           description =
+             CASE
+               WHEN $2::text IS NULL
+               THEN description
+               ELSE $2
+             END
+
+         WHERE id = $3
+
          RETURNING *`,
         [
           academic_year !== undefined ? academic_year : null,
@@ -1949,9 +2069,9 @@ router.put(
     if (total_amount !== undefined && total_amount !== null) {
       newTotal = Number(total_amount);
 
-      if (!Number.isFinite(newTotal) || newTotal <= 0) {
+      if (!isMultipleOfTen(newTotal)) {
         return res.status(400).json({
-          error: "Total amount must be greater than zero",
+          error: "Total amount must be a positive multiple of 10",
         });
       }
     }
@@ -1968,8 +2088,8 @@ router.put(
 
     if (subject_id !== undefined && subject_id !== null) {
       const subject = await query(
-        `SELECT id 
-         FROM subjects 
+        `SELECT id
+         FROM subjects
          WHERE id = $1`,
         [subject_id],
       );
@@ -1983,7 +2103,9 @@ router.put(
       newSubjectId = subject_id;
     }
 
-    const dueAmount = roundMoney(newTotal - paidAmount);
+    newTotal = roundMoney(newTotal);
+
+    const dueAmount = Math.max(roundMoney(newTotal - paidAmount), 0);
 
     let status = "pending";
 
@@ -1998,29 +2120,29 @@ router.put(
     }
 
     const result = await query(
-      `UPDATE fees 
-       SET 
-         subject_id = $1, 
-         total_amount = $2, 
-         due_amount = $3, 
-         status = $4, 
- 
-         academic_year = 
-           CASE 
-             WHEN $5::text IS NULL 
-             THEN academic_year 
-             ELSE $5 
-           END, 
- 
-         description = 
-           CASE 
-             WHEN $6::text IS NULL 
-             THEN description 
-             ELSE $6 
-           END 
- 
-       WHERE id = $7 
- 
+      `UPDATE fees
+       SET
+         subject_id = $1,
+         total_amount = $2,
+         due_amount = $3,
+         status = $4,
+
+         academic_year =
+           CASE
+             WHEN $5::text IS NULL
+             THEN academic_year
+             ELSE $5
+           END,
+
+         description =
+           CASE
+             WHEN $6::text IS NULL
+             THEN description
+             ELSE $6
+           END
+
+       WHERE id = $7
+
        RETURNING *`,
       [
         newSubjectId,
@@ -2040,11 +2162,9 @@ router.put(
   }),
 );
 
-/*
-  ============================================================
-  RECORD PAYMENT
-  ============================================================
-*/
+/* ============================================================
+   RECORD PAYMENT
+============================================================ */
 
 router.post(
   "/:id([0-9]+)/payment",
@@ -2079,25 +2199,25 @@ router.post(
       await client.query("BEGIN");
 
       const existing = await client.query(
-        `SELECT 
-           f.*, 
- 
-           s.full_name AS student_name, 
-           s.roll_number, 
-           s.guardian_name, 
- 
-           sub.name AS subject_name 
- 
-         FROM fees f 
- 
-         JOIN students s 
-           ON s.id = f.student_id 
- 
-         LEFT JOIN subjects sub 
-           ON sub.id = f.subject_id 
- 
-         WHERE f.id = $1 
- 
+        `SELECT
+           f.*,
+
+           s.full_name AS student_name,
+           s.roll_number,
+           s.guardian_name,
+
+           sub.name AS subject_name
+
+         FROM fees f
+
+         JOIN students s
+           ON s.id = f.student_id
+
+         LEFT JOIN subjects sub
+           ON sub.id = f.subject_id
+
+         WHERE f.id = $1
+
          FOR UPDATE OF f`,
         [req.params.id],
       );
@@ -2112,8 +2232,10 @@ router.post(
 
       const fee = existing.rows[0];
 
-      const currentPaid = Number(fee.paid_amount);
-      const total = Number(fee.total_amount);
+      const currentPaid = roundMoney(Number(fee.paid_amount));
+
+      const total = roundMoney(Number(fee.total_amount));
+
       const currentDue = Math.max(roundMoney(total - currentPaid), 0);
 
       if (paymentAmount > currentDue) {
@@ -2125,19 +2247,20 @@ router.post(
       }
 
       const periodResult = await client.query(
-        `SELECT 
-           fp.*, 
-           e.class_slot_id 
- 
-         FROM fee_periods fp 
- 
-         JOIN student_enrollments e 
-           ON e.id = fp.enrollment_id 
- 
-         WHERE fp.fee_id = $1 
- 
-         ORDER BY fp.id ASC 
- 
+        `SELECT
+           fp.*,
+
+           e.class_slot_id
+
+         FROM fee_periods fp
+
+         JOIN student_enrollments e
+           ON e.id = fp.enrollment_id
+
+         WHERE fp.fee_id = $1
+
+         ORDER BY fp.id ASC
+
          LIMIT 1`,
         [req.params.id],
       );
@@ -2186,8 +2309,8 @@ router.post(
       await client.query("SELECT pg_advisory_xact_lock(874321)");
 
       const receiptResult = await client.query(
-        `SELECT 
-           COUNT(*)::int + 1 AS next_number 
+        `SELECT
+           COUNT(*)::int + 1 AS next_number
          FROM fee_payments`,
       );
 
@@ -2204,24 +2327,26 @@ router.post(
       )}`;
 
       const paymentResult = await client.query(
-        `INSERT INTO fee_payments 
-         ( 
-           fee_id, 
-           amount, 
-           payment_date, 
-           receipt_number, 
-           fee_period_id, 
-           comment 
-         ) 
-         VALUES 
-         ( 
-           $1, 
-           $2, 
-           $3, 
-           $4, 
-           $5, 
-           $6 
-         ) 
+        `INSERT INTO fee_payments
+         (
+           fee_id,
+           amount,
+           payment_date,
+           receipt_number,
+           fee_period_id,
+           comment,
+           recorded_by
+         )
+         VALUES
+         (
+           $1,
+           $2,
+           $3,
+           $4,
+           $5,
+           $6,
+           $7
+         )
          RETURNING *`,
         [
           req.params.id,
@@ -2230,6 +2355,7 @@ router.post(
           receiptNumber,
           feePeriodId,
           comment || null,
+          req.user.id,
         ],
       );
 
@@ -2243,16 +2369,16 @@ router.post(
         newDue === 0 ? "paid" : newPaid > 0 ? "partial" : "pending";
 
       const feeResult = await client.query(
-        `UPDATE fees 
-         SET 
-           paid_amount = $1, 
-           due_amount = $2, 
-           status = $3, 
-           payment_date = $4, 
-           receipt_number = $5 
- 
-         WHERE id = $6 
- 
+        `UPDATE fees
+         SET
+           paid_amount = $1,
+           due_amount = $2,
+           status = $3,
+           payment_date = $4,
+           receipt_number = $5
+
+         WHERE id = $6
+
          RETURNING *`,
         [
           newPaid,
@@ -2270,41 +2396,41 @@ router.post(
         const period = periodResult.rows[0];
 
         const monthResult = await client.query(
-          `SELECT 
-             fpm.id, 
-             fpm.fee_period_id, 
-             fpm.solar_year, 
-             fpm.solar_month, 
-             fpm.month_days, 
-             fpm.covered_days, 
-             fpm.monthly_amount, 
-             fpm.calculated_amount, 
- 
-             COALESCE( 
-               SUM(fpa.covered_days), 
-               0 
-             ) AS already_paid_days 
- 
-           FROM fee_period_months fpm 
- 
-           LEFT JOIN fee_payment_allocations fpa 
-             ON fpa.fee_period_month_id = fpm.id 
- 
-           WHERE fpm.fee_period_id = $1 
- 
-           GROUP BY 
-             fpm.id, 
-             fpm.fee_period_id, 
-             fpm.solar_year, 
-             fpm.solar_month, 
-             fpm.month_days, 
-             fpm.covered_days, 
-             fpm.monthly_amount, 
-             fpm.calculated_amount 
- 
-           ORDER BY 
-             fpm.solar_year ASC, 
-             fpm.solar_month ASC, 
+          `SELECT
+             fpm.id,
+             fpm.fee_period_id,
+             fpm.solar_year,
+             fpm.solar_month,
+             fpm.month_days,
+             fpm.covered_days,
+             fpm.monthly_amount,
+             fpm.calculated_amount,
+
+             COALESCE(
+               SUM(fpa.covered_days),
+               0
+             ) AS already_paid_days
+
+           FROM fee_period_months fpm
+
+           LEFT JOIN fee_payment_allocations fpa
+             ON fpa.fee_period_month_id = fpm.id
+
+           WHERE fpm.fee_period_id = $1
+
+           GROUP BY
+             fpm.id,
+             fpm.fee_period_id,
+             fpm.solar_year,
+             fpm.solar_month,
+             fpm.month_days,
+             fpm.covered_days,
+             fpm.monthly_amount,
+             fpm.calculated_amount
+
+           ORDER BY
+             fpm.solar_year ASC,
+             fpm.solar_month ASC,
              fpm.id ASC`,
           [feePeriodId],
         );
@@ -2347,25 +2473,25 @@ router.post(
           );
 
           const allocationResult = await client.query(
-            `INSERT INTO fee_payment_allocations 
-             ( 
-               fee_payment_id, 
-               fee_period_month_id, 
-               covered_days, 
-               allocated_amount, 
-               from_date, 
-               to_date 
-             ) 
-             VALUES 
-             ( 
-               $1, 
-               $2, 
-               $3, 
-               $4, 
-               $5, 
-               $6 
-             ) 
-             RETURNING *`,
+            `INSERT INTO fee_payment_allocations
+               (
+                 fee_payment_id,
+                 fee_period_month_id,
+                 covered_days,
+                 allocated_amount,
+                 from_date,
+                 to_date
+               )
+               VALUES
+               (
+                 $1,
+                 $2,
+                 $3,
+                 $4,
+                 $5,
+                 $6
+               )
+               RETURNING *`,
             [
               payment.id,
               month.id,
@@ -2379,6 +2505,42 @@ router.post(
           allocations.push(allocationResult.rows[0]);
         }
       }
+
+      const paymentForMonths = isPeriodBased
+        ? [
+            ...new Set(
+              allocations
+                .map((allocation) => {
+                  const allocationMonthResult = allocations.find(
+                    (item) => item.id === allocation.id,
+                  );
+
+                  return allocationMonthResult ? null : null;
+                })
+                .filter(Boolean),
+            ),
+          ]
+        : [];
+
+      let resolvedPaymentForMonths = paymentForMonths;
+
+      if (isPeriodBased) {
+        resolvedPaymentForMonths = await getPaymentForMonths(
+          client,
+          payment.id,
+        );
+      }
+
+      await recordPaymentAudit(client, {
+        paymentId: payment.id,
+        receiptNumber: payment.receipt_number,
+        action: "create",
+        req,
+        newData: {
+          ...payment,
+          payment_for_months: resolvedPaymentForMonths,
+        },
+      });
 
       await client.query("COMMIT");
 
@@ -2401,6 +2563,8 @@ router.post(
           ...payment,
 
           payment_solar_date: paymentSolarDate,
+
+          payment_for_months: resolvedPaymentForMonths,
         },
 
         allocations: formattedAllocations,
@@ -2417,11 +2581,9 @@ router.post(
   }),
 );
 
-/*
-  ============================================================
-  EDIT INDIVIDUAL PAYMENT
-  ============================================================
-*/
+/* ============================================================
+   EDIT INDIVIDUAL PAYMENT
+============================================================ */
 
 router.put(
   "/payments/:paymentId([0-9]+)",
@@ -2438,15 +2600,15 @@ router.put(
       await client.query("BEGIN");
 
       const paymentResult = await client.query(
-        `SELECT 
-           fp.*, 
-           f.total_amount, 
-           f.student_id, 
-           f.subject_id 
-         FROM fee_payments fp 
-         JOIN fees f 
-           ON f.id = fp.fee_id 
-         WHERE fp.id = $1 
+        `SELECT
+           fp.*,
+           f.total_amount,
+           f.student_id,
+           f.subject_id
+         FROM fee_payments fp
+         JOIN fees f
+           ON f.id = fp.fee_id
+         WHERE fp.id = $1
          FOR UPDATE OF fp, f`,
         [paymentId],
       );
@@ -2484,18 +2646,19 @@ router.put(
       }
 
       const otherPaymentsResult = await client.query(
-        `SELECT 
-           COALESCE(SUM(amount), 0) AS other_paid 
-         FROM fee_payments 
-         WHERE fee_id = $1 
-           AND id <> $2`,
+        `SELECT
+             COALESCE(SUM(amount), 0) AS other_paid
+           FROM fee_payments
+           WHERE fee_id = $1
+             AND id <> $2`,
         [existingPayment.fee_id, paymentId],
       );
 
       const otherPaid = Number(otherPaymentsResult.rows[0].other_paid);
-      const totalAmount = Number(existingPayment.total_amount);
 
-      if (roundMoney(otherPaid + newAmount) > roundMoney(totalAmount)) {
+      const totalAmount = roundMoney(Number(existingPayment.total_amount));
+
+      if (roundMoney(otherPaid + newAmount) > totalAmount) {
         await client.query("ROLLBACK");
 
         return res.status(400).json({
@@ -2543,22 +2706,18 @@ router.put(
             : String(comment).trim();
 
       const updatedPaymentResult = await client.query(
-        `UPDATE fee_payments 
-         SET 
-           amount = $1, 
-           payment_date = $2, 
-           comment = $3 
-         WHERE id = $4 
-         RETURNING *`,
+        `UPDATE fee_payments
+           SET
+             amount = $1,
+             payment_date = $2,
+             comment = $3
+           WHERE id = $4
+           RETURNING *`,
         [newAmount, finalPaymentDate, finalComment, paymentId],
       );
 
       const updatedPayment = updatedPaymentResult.rows[0];
 
-      /*
-        Rebuild coverage from the beginning so changing a payment
-        amount/date never leaves stale attendance coverage behind.
-      */
       if (isPeriodBased) {
         await rebuildFeePeriodAllocations(
           client,
@@ -2571,6 +2730,22 @@ router.put(
         existingPayment.fee_id,
       );
 
+      const paymentForMonths = isPeriodBased
+        ? await getPaymentForMonths(client, paymentId)
+        : [];
+
+      await recordPaymentAudit(client, {
+        paymentId,
+        receiptNumber: existingPayment.receipt_number,
+        action: "update",
+        req,
+        oldData: existingPayment,
+        newData: {
+          ...updatedPayment,
+          payment_for_months: paymentForMonths,
+        },
+      });
+
       await client.query("COMMIT");
 
       res.json({
@@ -2582,6 +2757,8 @@ router.put(
           ...updatedPayment,
 
           payment_solar_date: toSolarDateValue(updatedPayment.payment_date),
+
+          payment_for_months: paymentForMonths,
         },
       });
     } catch (error) {
@@ -2596,11 +2773,9 @@ router.put(
   }),
 );
 
-/*
-  ============================================================
-  DELETE INDIVIDUAL PAYMENT
-  ============================================================
-*/
+/* ============================================================
+   DELETE INDIVIDUAL PAYMENT
+============================================================ */
 
 router.delete(
   "/payments/:paymentId([0-9]+)",
@@ -2615,13 +2790,13 @@ router.delete(
       await client.query("BEGIN");
 
       const paymentResult = await client.query(
-        `SELECT 
-           fp.*, 
-           f.total_amount 
-         FROM fee_payments fp 
-         JOIN fees f 
-           ON f.id = fp.fee_id 
-         WHERE fp.id = $1 
+        `SELECT
+           fp.*,
+           f.total_amount
+         FROM fee_payments fp
+         JOIN fees f
+           ON f.id = fp.fee_id
+         WHERE fp.id = $1
          FOR UPDATE OF fp, f`,
         [paymentId],
       );
@@ -2636,33 +2811,34 @@ router.delete(
 
       const payment = paymentResult.rows[0];
 
-      /*
-        Delete allocations first so this works regardless
-        of the FK's ON DELETE behavior.
-      */
+      const paymentForMonths = payment.fee_period_id
+        ? await getPaymentForMonths(client, paymentId)
+        : [];
+
+      const auditOldData = {
+        ...payment,
+        payment_for_months: paymentForMonths,
+      };
+
       await client.query(
-        `DELETE FROM fee_payment_allocations 
+        `DELETE FROM fee_payment_allocations
          WHERE fee_payment_id = $1`,
         [paymentId],
       );
 
       await client.query(
-        `DELETE FROM fee_payments 
+        `DELETE FROM fee_payments
          WHERE id = $1`,
         [paymentId],
       );
 
-      const updatedFee = await recalculateFeeTotals(client, payment.fee_id);
+      await recalculateFeeTotals(client, payment.fee_id);
 
-      /*
-        If this is a period-based fee, rebuild all remaining
-        payments so coverage starts again from the correct day.
-      */
       const periodResult = await client.query(
-        `SELECT id 
-         FROM fee_periods 
-         WHERE fee_id = $1 
-         ORDER BY id ASC`,
+        `SELECT id
+           FROM fee_periods
+           WHERE fee_id = $1
+           ORDER BY id ASC`,
         [payment.fee_id],
       );
 
@@ -2671,6 +2847,15 @@ router.delete(
       }
 
       const finalFee = await recalculateFeeTotals(client, payment.fee_id);
+
+      await recordPaymentAudit(client, {
+        paymentId,
+        receiptNumber: payment.receipt_number,
+        action: "delete",
+        req,
+        oldData: auditOldData,
+        newData: null,
+      });
 
       await client.query("COMMIT");
 
@@ -2691,11 +2876,9 @@ router.delete(
   }),
 );
 
-/*
-  ============================================================
-  RECEIPT
-  ============================================================
-*/
+/* ============================================================
+   RECEIPT
+============================================================ */
 
 router.get(
   "/:id([0-9]+)/receipt",
@@ -2703,34 +2886,34 @@ router.get(
   requireRoles("admin", "staff"),
   asyncH(async (req, res) => {
     const result = await query(
-      `SELECT 
-         f.id, 
-         f.receipt_number, 
-         f.payment_date, 
-         f.total_amount, 
-         f.paid_amount, 
-         f.due_amount, 
-         f.status, 
-         f.academic_year, 
-         f.description, 
- 
-         f.subject_id, 
-         sub.name AS subject_name, 
- 
-         s.id AS student_id, 
-         s.full_name AS student_name, 
-         s.roll_number, 
-         s.guardian_name, 
-         s.guardian_phone 
- 
-       FROM fees f 
- 
-       JOIN students s 
-         ON s.id = f.student_id 
- 
-       LEFT JOIN subjects sub 
-         ON sub.id = f.subject_id 
- 
+      `SELECT
+         f.id,
+         f.receipt_number,
+         f.payment_date,
+         f.total_amount,
+         f.paid_amount,
+         f.due_amount,
+         f.status,
+         f.academic_year,
+         f.description,
+
+         f.subject_id,
+         sub.name AS subject_name,
+
+         s.id AS student_id,
+         s.full_name AS student_name,
+         s.roll_number,
+         s.guardian_name,
+         s.guardian_phone
+
+       FROM fees f
+
+       JOIN students s
+         ON s.id = f.student_id
+
+       LEFT JOIN subjects sub
+         ON sub.id = f.subject_id
+
        WHERE f.id = $1`,
       [req.params.id],
     );
@@ -2757,11 +2940,9 @@ router.get(
   }),
 );
 
-/*
-  ============================================================
-  DELETE FEE
-  ============================================================
-*/
+/* ============================================================
+   DELETE FEE
+============================================================ */
 
 router.delete(
   "/:id([0-9]+)",
@@ -2769,8 +2950,8 @@ router.delete(
   requireRoles("admin"),
   asyncH(async (req, res) => {
     const result = await query(
-      `DELETE FROM fees 
-       WHERE id = $1 
+      `DELETE FROM fees
+       WHERE id = $1
        RETURNING id`,
       [req.params.id],
     );

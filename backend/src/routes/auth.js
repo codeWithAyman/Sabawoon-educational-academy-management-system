@@ -23,6 +23,21 @@ function makeToken(user) {
   );
 }
 
+function makePasswordVerificationToken(user) {
+  return jwt.sign(
+    {
+      type: "password_verification",
+      id: user.id,
+      name: user.full_name,
+      role: user.role,
+    },
+    process.env.JWT_SECRET,
+    {
+      expiresIn: "5m",
+    },
+  );
+}
+
 function getValidationErrors(req) {
   const errors = validationResult(req);
 
@@ -298,7 +313,7 @@ router.post(
   }),
 );
 
-// VERIFY CURRENT PASSWORD
+// VERIFY PASSWORD
 router.post(
   "/verify-password",
   authRequired,
@@ -321,7 +336,12 @@ router.post(
 
     // Check active Admin account passwords.
     const adminResult = await query(
-      `SELECT password_hash
+      `SELECT
+         id,
+         email,
+         full_name,
+         role,
+         password_hash
        FROM users
        WHERE role = 'admin'
          AND is_active = TRUE`,
@@ -334,16 +354,27 @@ router.post(
       );
 
       if (passwordCorrect) {
+        const verificationToken = makePasswordVerificationToken(account);
+
         return res.json({
           ok: true,
           message: "Password verified successfully",
+          verification_token: verificationToken,
+          verified_user: {
+            id: account.id,
+            name: account.full_name,
+            role: account.role,
+          },
         });
       }
     }
 
     // Check active Staff verification passwords/PINs.
     const staffResult = await query(
-      `SELECT id, full_name, password_hash
+      `SELECT
+         id,
+         full_name,
+         password_hash
        FROM staff
        WHERE is_active = TRUE`,
     );
@@ -369,9 +400,21 @@ router.post(
       );
 
       if (passwordCorrect) {
+        const verificationToken = makePasswordVerificationToken({
+          id: account.id,
+          full_name: account.full_name,
+          role: "staff",
+        });
+
         return res.json({
           ok: true,
           message: "Password verified successfully",
+          verification_token: verificationToken,
+          verified_user: {
+            id: account.id,
+            name: account.full_name,
+            role: "staff",
+          },
         });
       }
     }
