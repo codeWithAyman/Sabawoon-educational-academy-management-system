@@ -80,7 +80,6 @@ function normalizeDay(day) {
       weekday: day.weekday ?? day.weekday_name ?? null,
       weekday_index:
         day.weekday_index === undefined ? null : Number(day.weekday_index),
-      is_friday: Boolean(day.is_friday),
     };
   }
 
@@ -91,17 +90,12 @@ function normalizeDay(day) {
     is_today: false,
     weekday: null,
     weekday_index: null,
-    is_friday: false,
   };
 }
 
 function getWeekdayLabel(day) {
   const value = String(day?.weekday || "").trim();
-
-  if (!value) {
-    return "";
-  }
-
+  if (!value) return "";
   return value.slice(0, 3).toUpperCase();
 }
 
@@ -109,13 +103,7 @@ function isFridayDay(day) {
   const weekday = String(day?.weekday || "")
     .trim()
     .toLowerCase();
-
-  return (
-    Boolean(day?.is_friday) ||
-    weekday === "friday" ||
-    weekday === "fri" ||
-    weekday === "جمعه"
-  );
+  return weekday === "friday" || weekday === "fri" || weekday === "جمعه";
 }
 
 function buildDisplayDays(days) {
@@ -126,9 +114,7 @@ function buildDisplayDays(days) {
         .sort((a, b) => a.day - b.day)
     : [];
 
-  if (normalized.length === 0) {
-    return [];
-  }
+  if (normalized.length === 0) return [];
 
   const byDay = new Map(normalized.map((day) => [day.day, day]));
   const result = [];
@@ -146,7 +132,6 @@ function buildDisplayDays(days) {
       )
     ) {
       const dayNumber = current.day - 1;
-
       if (!byDay.has(dayNumber)) {
         result.push({
           day: dayNumber,
@@ -188,7 +173,6 @@ function buildDisplayDays(days) {
       String(current.weekday || "").toLowerCase() === "thursday"
     ) {
       const dayNumber = current.day + 1;
-
       if (!byDay.has(dayNumber)) {
         result.push({
           day: dayNumber,
@@ -204,7 +188,6 @@ function buildDisplayDays(days) {
 
     if (!next && String(current.weekday || "").toLowerCase() === "thursday") {
       const dayNumber = current.day + 1;
-
       if (!byDay.has(dayNumber)) {
         result.push({
           day: dayNumber,
@@ -227,52 +210,88 @@ function buildDisplayDays(days) {
     .sort((a, b) => a.day - b.day);
 }
 
-function getPaymentLabel(paymentStatus) {
-  if (!paymentStatus) {
-    return "Unknown";
-  }
+function getPaymentData(student) {
+  const rawStatus =
+    student?.payment_status ?? student?.status ?? student?.fee_status ?? "";
 
-  const value = String(paymentStatus).toLowerCase();
+  const value = String(
+    typeof rawStatus === "object" && rawStatus !== null
+      ? (rawStatus.status ??
+          rawStatus.payment_status ??
+          rawStatus.fee_status ??
+          "")
+      : rawStatus || "",
+  ).toLowerCase();
+
+  const dueAmount = Number(
+    student?.payment_due_amount ??
+      (typeof rawStatus === "object" && rawStatus !== null
+        ? (rawStatus.payment_due_amount ??
+          rawStatus.due_amount ??
+          rawStatus.due)
+        : 0),
+  );
+
+  const paidAmount = Number(
+    student?.payment_paid_amount ??
+      (typeof rawStatus === "object" && rawStatus !== null
+        ? (rawStatus.payment_paid_amount ??
+          rawStatus.paid_amount ??
+          rawStatus.paid)
+        : 0),
+  );
 
   if (
     value.includes("paid") &&
     !value.includes("unpaid") &&
     !value.includes("partial")
   ) {
-    return "Paid";
+    return {
+      label: "Paid",
+      amount: null,
+      className: "border-emerald-400/20 bg-emerald-400/10 text-emerald-300",
+    };
   }
 
   if (value.includes("partial")) {
-    return "Partial";
+    return {
+      label:
+        Number.isFinite(dueAmount) && dueAmount > 0
+          ? `AFN ${formatNumber(dueAmount)} due`
+          : "Due",
+      amount: null,
+      className: "border-amber-400/20 bg-amber-400/10 text-amber-300",
+    };
   }
-
-  if (value.includes("unpaid") || value.includes("due")) {
-    return "Unpaid";
-  }
-
-  return String(paymentStatus);
-}
-
-function getPaymentClass(paymentStatus) {
-  const value = String(paymentStatus || "").toLowerCase();
 
   if (
-    value.includes("paid") &&
-    !value.includes("unpaid") &&
-    !value.includes("partial")
+    value.includes("unpaid") ||
+    value.includes("pending") ||
+    value.includes("due")
   ) {
-    return "border-emerald-400/20 bg-emerald-400/10 text-emerald-300";
+    return {
+      label:
+        Number.isFinite(dueAmount) && dueAmount > 0
+          ? `AFN ${formatNumber(dueAmount)} due`
+          : "Unpaid",
+      amount: null,
+      className: "border-red-400/20 bg-red-400/10 text-red-300",
+    };
   }
 
-  if (value.includes("partial")) {
-    return "border-amber-400/20 bg-amber-400/10 text-amber-300";
+  if (value.includes("no_fee") || value.includes("no fee")) {
+    return {
+      label: "No Fee",
+      amount: null,
+      className: "border-white/10 bg-white/[0.04] text-slate-400",
+    };
   }
 
-  if (value.includes("unpaid") || value.includes("due")) {
-    return "border-red-400/20 bg-red-400/10 text-red-300";
-  }
-
-  return "border-white/10 bg-white/[0.04] text-slate-400";
+  return {
+    label: rawStatus ? String(rawStatus) : "No Fee",
+    amount: null,
+    className: "border-white/10 bg-white/[0.04] text-slate-400",
+  };
 }
 
 function AttendanceStatusButton({ status, onClick, disabled }) {
@@ -284,7 +303,7 @@ function AttendanceStatusButton({ status, onClick, disabled }) {
         disabled={disabled}
         title="Present — click to change"
         className="
-          flex h-9 w-9 items-center justify-center rounded-lg
+          flex h-6 w-6 items-center justify-center rounded-md
           border border-emerald-400/30
           bg-emerald-400/10
           text-emerald-300
@@ -295,7 +314,7 @@ function AttendanceStatusButton({ status, onClick, disabled }) {
           disabled:opacity-50
         "
       >
-        <Check size={17} strokeWidth={2.5} />
+        <Check size={12} strokeWidth={2.5} />
       </button>
     );
   }
@@ -308,7 +327,7 @@ function AttendanceStatusButton({ status, onClick, disabled }) {
         disabled={disabled}
         title="Absent — click to clear"
         className="
-          flex h-9 w-9 items-center justify-center rounded-lg
+          flex h-6 w-6 items-center justify-center rounded-md
           border border-red-400/30
           bg-red-400/10
           text-red-300
@@ -319,7 +338,7 @@ function AttendanceStatusButton({ status, onClick, disabled }) {
           disabled:opacity-50
         "
       >
-        <X size={17} strokeWidth={2.5} />
+        <X size={12} strokeWidth={2.5} />
       </button>
     );
   }
@@ -331,7 +350,7 @@ function AttendanceStatusButton({ status, onClick, disabled }) {
       disabled={disabled}
       title="Not marked — click to mark present"
       className="
-        flex h-9 w-9 items-center justify-center rounded-lg
+        flex h-6 w-6 items-center justify-center rounded-md
         border border-white/10
         bg-white/[0.025]
         text-slate-600
@@ -343,7 +362,7 @@ function AttendanceStatusButton({ status, onClick, disabled }) {
         disabled:opacity-50
       "
     >
-      <span className="text-sm">•</span>
+      <span className="text-[11px]">•</span>
     </button>
   );
 }
@@ -360,22 +379,6 @@ export default function Attendance() {
   const [sheet, setSheet] = useState(null);
   const [marks, setMarks] = useState({});
   const [changedCells, setChangedCells] = useState({});
-
-  /*
-   * These refs are the authoritative attendance state.
-   *
-   * React state is used for rendering.
-   * Refs are used for mutations/saving so the newest click
-   * is always available immediately.
-   */
-  const marksRef = useRef({});
-  const changedCellsRef = useRef({});
-
-  /*
-   * Prevents two save operations from ever running at the
-   * same time, even before React has rendered saving=true.
-   */
-  const savingRef = useRef(false);
 
   const [loadingClasses, setLoadingClasses] = useState(true);
   const [loadingToday, setLoadingToday] = useState(true);
@@ -448,6 +451,8 @@ export default function Attendance() {
    * ------------------------------------------------------------
    * LOAD KABUL TODAY
    * ------------------------------------------------------------
+   *
+   * This MUST finish before a monthly register request can happen.
    */
 
   const loadToday = useCallback(async () => {
@@ -459,7 +464,9 @@ export default function Attendance() {
       const data = response.data || {};
 
       const year = Number(data.solar_year ?? data.year);
+
       const month = Number(data.solar_month ?? data.month);
+
       const day = Number(data.solar_day ?? data.day);
 
       const normalized = {
@@ -512,7 +519,7 @@ export default function Attendance() {
 
   /*
    * ------------------------------------------------------------
-   * VALID MONTH
+   * VALID MONTH CHECK
    * ------------------------------------------------------------
    */
 
@@ -531,7 +538,7 @@ export default function Attendance() {
 
   /*
    * ------------------------------------------------------------
-   * INITIALIZE MARKS
+   * INITIALIZE MARKS FROM BACKEND
    * ------------------------------------------------------------
    */
 
@@ -541,10 +548,6 @@ export default function Attendance() {
     for (const student of students || []) {
       const studentId = Number(student.student_id);
 
-      /*
-       * Keep the existing project behavior:
-       * student IDs are positive database IDs here.
-       */
       if (!Number.isInteger(studentId) || studentId <= 0) {
         continue;
       }
@@ -588,6 +591,18 @@ export default function Attendance() {
       const numericYear = Number(solarYear);
       const numericMonth = Number(solarMonth);
 
+      /*
+       * HARD GUARD:
+       *
+       * Nothing can call /attendance/month until all three
+       * values are valid.
+       *
+       * This prevents requests such as:
+       * /month/19/1/1
+       * /month/19/1/2
+       * etc.
+       */
+
       if (
         !Number.isInteger(numericClassId) ||
         numericClassId <= 0 ||
@@ -598,13 +613,7 @@ export default function Attendance() {
         numericMonth > 12
       ) {
         setSheet(null);
-
         setMarks({});
-        marksRef.current = {};
-
-        setChangedCells({});
-        changedCellsRef.current = {};
-
         setDirty(false);
 
         return false;
@@ -625,7 +634,8 @@ export default function Attendance() {
         );
 
         /*
-         * An older request must never overwrite a newer selection.
+         * If another request started after this one,
+         * do not let an older response overwrite the screen.
          */
         if (currentRequestId !== requestIdRef.current) {
           return false;
@@ -645,16 +655,13 @@ export default function Attendance() {
           students: normalizedStudents,
         };
 
-        const nextMarks = initializeMarks(normalizedStudents);
-
         setSheet(normalizedSheet);
-
-        marksRef.current = nextMarks;
-        setMarks(nextMarks);
-
-        changedCellsRef.current = {};
+        setMarks(initializeMarks(normalizedStudents));
         setChangedCells({});
 
+        /*
+         * The backend is authoritative after loading.
+         */
         setDirty(false);
 
         return true;
@@ -664,15 +671,9 @@ export default function Attendance() {
         }
 
         setSheet(null);
-
-        marksRef.current = {};
         setMarks({});
-
-        changedCellsRef.current = {};
         setChangedCells({});
-
         setDirty(false);
-
         setError(getErrorMessage(err));
 
         return false;
@@ -687,7 +688,7 @@ export default function Attendance() {
 
   /*
    * ------------------------------------------------------------
-   * LOAD REGISTER WHEN SELECTION IS READY
+   * LOAD REGISTER WHEN VALID SELECTION EXISTS
    * ------------------------------------------------------------
    */
 
@@ -720,7 +721,7 @@ export default function Attendance() {
 
   /*
    * ------------------------------------------------------------
-   * CYCLE ATTENDANCE
+   * CYCLE:
    *
    * null -> present -> absent -> null
    * ------------------------------------------------------------
@@ -728,74 +729,43 @@ export default function Attendance() {
 
   const cycleAttendance = useCallback(
     (studentId, dayNumber) => {
-      if (locked || savingRef.current) {
+      if (locked || saving) {
         return;
       }
 
-      const numericStudentId = Number(studentId);
-      const numericDay = Number(dayNumber);
-
-      if (
-        !Number.isInteger(numericStudentId) ||
-        numericStudentId <= 0 ||
-        !Number.isInteger(numericDay) ||
-        numericDay <= 0
-      ) {
-        return;
-      }
-
-      setError("");
       setSuccess("");
+      setError("");
 
-      const current = marksRef.current[numericStudentId]?.[numericDay] ?? null;
+      setMarks((previous) => {
+        const current = previous[studentId]?.[dayNumber] ?? null;
 
-      let next;
+        let next;
 
-      if (current === null) {
-        next = STATUS.PRESENT;
-      } else if (current === STATUS.PRESENT) {
-        next = STATUS.ABSENT;
-      } else {
-        next = null;
-      }
+        if (current === null) {
+          next = STATUS.PRESENT;
+        } else if (current === STATUS.PRESENT) {
+          next = STATUS.ABSENT;
+        } else {
+          next = null;
+        }
 
-      /*
-       * Create completely new objects.
-       * This prevents accidental mutation of the previous state.
-       */
-      const nextMarks = {
-        ...marksRef.current,
-        [numericStudentId]: {
-          ...(marksRef.current[numericStudentId] || {}),
-          [numericDay]: next,
-        },
-      };
+        return {
+          ...previous,
+          [studentId]: {
+            ...(previous[studentId] || {}),
+            [dayNumber]: next,
+          },
+        };
+      });
 
-      const cellKey = `${numericStudentId}:${numericDay}`;
+      setChangedCells((previous) => ({
+        ...previous,
+        [`${studentId}:${dayNumber}`]: true,
+      }));
 
-      const nextChangedCells = {
-        ...changedCellsRef.current,
-        [cellKey]: true,
-      };
-
-      /*
-       * REFS FIRST.
-       *
-       * This is the important part:
-       * if Save is clicked immediately after this click,
-       * saveAttendance() sees this exact new value.
-       */
-      marksRef.current = nextMarks;
-      changedCellsRef.current = nextChangedCells;
-
-      /*
-       * React state is only for rendering.
-       */
-      setMarks(nextMarks);
-      setChangedCells(nextChangedCells);
       setDirty(true);
     },
-    [locked],
+    [locked, saving],
   );
 
   /*
@@ -805,17 +775,6 @@ export default function Attendance() {
    */
 
   const saveAttendance = useCallback(async () => {
-    /*
-     * This synchronous ref guard is intentional.
-     *
-     * setSaving(true) is asynchronous, so relying only on
-     * React state could technically allow two clicks before
-     * the next render.
-     */
-    if (savingRef.current) {
-      return;
-    }
-
     if (locked) {
       setError("Attendance is locked. Verify your password before saving.");
       return;
@@ -847,6 +806,7 @@ export default function Attendance() {
     }
 
     const days = Array.isArray(sheet.days) ? sheet.days : [];
+
     const students = Array.isArray(sheet.students) ? sheet.students : [];
 
     if (days.length === 0) {
@@ -859,69 +819,49 @@ export default function Attendance() {
       return;
     }
 
-    /*
-     * Snapshot EVERYTHING before the network request.
-     *
-     * This snapshot will never change while this save is running.
-     */
-    const changedSnapshot = {
-      ...changedCellsRef.current,
-    };
-
-    const marksSnapshot = marksRef.current;
-
-    const records = [];
-
-    for (const key of Object.keys(changedSnapshot)) {
-      const separatorIndex = key.indexOf(":");
-
-      if (separatorIndex <= 0) {
-        continue;
-      }
-
-      const studentId = Number(key.slice(0, separatorIndex));
-      const dayNumber = Number(key.slice(separatorIndex + 1));
-
-      if (!Number.isInteger(studentId) || studentId <= 0) {
-        continue;
-      }
-
-      if (!Number.isInteger(dayNumber) || dayNumber <= 0) {
-        continue;
-      }
-
-      /*
-       * IMPORTANT:
-       *
-       * We read from marksSnapshot, not React state.
-       */
-      records.push({
-        student_id: studentId,
-        day: dayNumber,
-        status: marksSnapshot[studentId]?.[dayNumber] ?? null,
-      });
-    }
-
-    if (records.length === 0) {
-      setDirty(false);
-      setChangedCells({});
-      changedCellsRef.current = {};
-
-      setError("");
-      setSuccess("There are no new attendance changes to save.");
-
-      return;
-    }
-
-    savingRef.current = true;
     setSaving(true);
     setError("");
     setSuccess("");
 
     try {
+      const records = [];
+
       /*
-       * One POST containing the exact snapshot of all changed cells.
+       * Only send cells the user actually changed.
+       *
+       * The backend treats status === null as an explicit DELETE.
+       * Sending every untouched cell as null would erase existing
+       * attendance that the user never touched.
        */
+      for (const key of Object.keys(changedCells)) {
+        const separatorIndex = key.indexOf(":");
+
+        if (separatorIndex <= 0) {
+          continue;
+        }
+
+        const studentId = Number(key.slice(0, separatorIndex));
+        const dayNumber = Number(key.slice(separatorIndex + 1));
+
+        if (!Number.isInteger(studentId) || studentId <= 0) {
+          continue;
+        }
+
+        if (!Number.isInteger(dayNumber) || dayNumber <= 0) {
+          continue;
+        }
+
+        records.push({
+          student_id: studentId,
+          day: dayNumber,
+          status: marks[studentId]?.[dayNumber] ?? null,
+        });
+      }
+
+      if (records.length === 0) {
+        throw new Error("There are no attendance records to save.");
+      }
+
       await api.post("/attendance/month", {
         class_slot_id: numericClassId,
         year: numericYear,
@@ -930,72 +870,38 @@ export default function Attendance() {
       });
 
       /*
-       * The backend has committed the transaction successfully.
-       *
-       * Now remove ONLY the cells that belonged to this save.
-       *
-       * If a newer change somehow happened after the snapshot,
-       * that newer change remains dirty and will NOT be lost.
+       * Always verify against the database after saving.
        */
-      const currentChangedCells = {
-        ...changedCellsRef.current,
-      };
+      const refreshed = await loadSheet({
+        preserveMessages: true,
+      });
 
-      for (const key of Object.keys(changedSnapshot)) {
-        const snapshotStudentId = Number(key.split(":")[0]);
-        const snapshotDayNumber = Number(key.split(":")[1]);
+      setDirty(false);
 
-        const snapshotValue =
-          marksSnapshot[snapshotStudentId]?.[snapshotDayNumber] ?? null;
-
-        const currentValue =
-          marksRef.current[snapshotStudentId]?.[snapshotDayNumber] ?? null;
-
-        /*
-         * Only clear it if the current value is still the same
-         * value that we saved.
-         */
-        if (currentValue === snapshotValue) {
-          delete currentChangedCells[key];
-        }
+      if (refreshed) {
+        setSuccess("Attendance register saved successfully.");
+      } else {
+        setSuccess(
+          "Attendance was saved successfully, but the register could not be refreshed.",
+        );
       }
-
-      changedCellsRef.current = currentChangedCells;
-      setChangedCells(currentChangedCells);
-
-      const remainingChanges = Object.keys(currentChangedCells).length > 0;
-
-      setDirty(remainingChanges);
-
-      /*
-       * DO NOT call loadSheet() here.
-       *
-       * The POST has already completed successfully.
-       *
-       * Reloading immediately after saving was unnecessary and
-       * could race with another register request and make the UI
-       * appear to lose the last saved day.
-       */
-      setSuccess(
-        remainingChanges
-          ? "Attendance saved. New changes made during saving are still unsaved."
-          : "Attendance register saved successfully.",
-      );
     } catch (err) {
       console.error("Attendance save failed:", err);
 
-      /*
-       * Keep all changes dirty when saving fails.
-       * Nothing is discarded.
-       */
-      setDirty(true);
-
       setError(getErrorMessage(err));
     } finally {
-      savingRef.current = false;
       setSaving(false);
     }
-  }, [locked, classId, solarYear, solarMonth, sheet]);
+  }, [
+    locked,
+    classId,
+    solarYear,
+    solarMonth,
+    sheet,
+    marks,
+    changedCells,
+    loadSheet,
+  ]);
 
   /*
    * ------------------------------------------------------------
@@ -1066,7 +972,6 @@ export default function Attendance() {
 
     setSuccess("");
     setError("");
-
     setSolarYear(year);
     setSolarMonth(month);
   };
@@ -1092,7 +997,6 @@ export default function Attendance() {
 
     setSuccess("");
     setError("");
-
     setSolarYear(year);
     setSolarMonth(month);
   };
@@ -1128,13 +1032,9 @@ export default function Attendance() {
       const studentId = Number(student.student_id);
 
       for (const rawDay of sheet?.days || []) {
-        const day = normalizeDay(rawDay);
-
-        if (isFridayDay(day)) {
-          continue;
-        }
-
-        const dayNumber = Number(day.day);
+        const dayNumber = Number(
+          typeof rawDay === "object" ? rawDay.day : rawDay,
+        );
 
         const status = marks[studentId]?.[dayNumber] ?? null;
 
@@ -1161,11 +1061,9 @@ export default function Attendance() {
     "Solar Hijri Month";
 
   const calendarDays = sheet?.days || [];
-
-  const totalDays = calendarDays.filter((day) => {
-    const normalized = normalizeDay(day);
-    return !isFridayDay(normalized);
-  }).length;
+  const totalDays = calendarDays.filter(
+    (day) => !isFridayDay(normalizeDay(day)) && !normalizeDay(day).is_friday,
+  ).length;
 
   const totalStudents = sheet?.students?.length || 0;
 
@@ -1290,11 +1188,11 @@ export default function Attendance() {
     <div className="min-h-screen bg-[#080a0d] text-slate-100">
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
         <div className="absolute -left-32 -top-32 h-96 w-96 rounded-full bg-[#f2bd19]/[0.045] blur-3xl" />
-
         <div className="absolute right-[-10rem] top-1/3 h-[32rem] w-[32rem] rounded-full bg-cyan-400/[0.025] blur-3xl" />
       </div>
-
       <div className="relative mx-auto max-w-[1800px] p-4 md:p-6 lg:p-8">
+        {/* HEADER */}
+
         <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <div className="mb-2 flex items-center gap-3">
@@ -1406,7 +1304,7 @@ export default function Attendance() {
                 shadow-[#f2bd19]/15
                 transition
                 hover:-translate-y-0.5
-                hover:shadow-[#f2bd19]/20
+                 hover:shadow-[#f2bd19]/20
                 disabled:cursor-not-allowed
                 disabled:bg-[#f2bd19]/30
                 disabled:text-black/50
@@ -1433,6 +1331,8 @@ export default function Attendance() {
           </div>
         </div>
 
+        {/* MESSAGES */}
+
         {error && (
           <div className="mb-5 flex items-start gap-3 rounded-xl border border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-300">
             <X size={18} className="mt-0.5 shrink-0" />
@@ -1456,6 +1356,8 @@ export default function Attendance() {
             </div>
           </div>
         )}
+
+        {/* CONTROLS */}
 
         <div className="mb-5 rounded-2xl border border-white/[0.08] bg-white/[0.025] p-4 shadow-2xl shadow-black/20 backdrop-blur-xl">
           <div className="grid gap-4 lg:grid-cols-[minmax(260px,1fr)_auto_auto] lg:items-end">
@@ -1481,17 +1383,9 @@ export default function Attendance() {
 
                   setSuccess("");
                   setError("");
-
                   setSheet(null);
-
                   setMarks({});
-                  marksRef.current = {};
-
-                  setChangedCells({});
-                  changedCellsRef.current = {};
-
                   setDirty(false);
-
                   setClassId(event.target.value);
                 }}
                 disabled={
@@ -1552,19 +1446,7 @@ export default function Attendance() {
 
             <button
               type="button"
-              onClick={() => {
-                if (dirty) {
-                  const confirmed = window.confirm(
-                    "You have unsaved attendance changes. Refresh the register without saving?",
-                  );
-
-                  if (!confirmed) {
-                    return;
-                  }
-                }
-
-                loadSheet();
-              }}
+              onClick={() => loadSheet()}
               disabled={sheetLoading || saving || !classId || !validSolarMonth}
               className="
                 flex h-11 items-center justify-center gap-2
@@ -1587,6 +1469,8 @@ export default function Attendance() {
             </button>
           </div>
         </div>
+
+        {/* CLASS INFORMATION */}
 
         {sheet && (
           <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -1670,6 +1554,8 @@ export default function Attendance() {
           </div>
         )}
 
+        {/* SUMMARY */}
+
         {sheet && (
           <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
             <div className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-4 shadow-lg shadow-black/10 backdrop-blur-xl">
@@ -1728,6 +1614,8 @@ export default function Attendance() {
           </div>
         )}
 
+        {/* LEGEND */}
+
         {sheet && (
           <div className="mb-4 flex flex-wrap items-center gap-3 rounded-2xl border border-white/[0.08] bg-white/[0.025] px-4 py-3 shadow-lg shadow-black/10 backdrop-blur-xl">
             <span className="text-xs font-medium text-slate-500">
@@ -1769,6 +1657,8 @@ export default function Attendance() {
           </div>
         )}
 
+        {/* LOADING */}
+
         {(loadingToday || loadingClasses || sheetLoading) && (
           <div className="flex min-h-[300px] items-center justify-center rounded-2xl border border-white/10 bg-[#121519]">
             <div className="flex flex-col items-center gap-3 text-slate-400">
@@ -1784,6 +1674,8 @@ export default function Attendance() {
             </div>
           </div>
         )}
+
+        {/* EMPTY REGISTER */}
 
         {!loadingToday && !loadingClasses && !sheetLoading && !sheet && (
           <div className="flex min-h-[300px] items-center justify-center rounded-2xl border border-white/10 bg-[#121519]">
@@ -1804,6 +1696,8 @@ export default function Attendance() {
           </div>
         )}
 
+        {/* REGISTER */}
+
         {!loadingToday &&
           !loadingClasses &&
           !sheetLoading &&
@@ -1813,98 +1707,53 @@ export default function Attendance() {
           Array.isArray(sheet.days) &&
           sheet.days.length > 0 && (
             <div className="overflow-hidden rounded-[22px] border border-white/[0.075] bg-[#101318] shadow-[0_24px_80px_rgba(0,0,0,0.38)]">
-              <div className="border-b border-white/[0.07] bg-white/[0.012] px-5 py-4">
+              <div className="border-b border-white/[0.07] bg-white/[0.012] px-4 py-3">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
+                  <div className="min-w-0">
                     <h2 className="text-sm font-semibold text-slate-200">
                       Attendance Register
                     </h2>
-
-                    <p className="mt-1 text-xs text-slate-500">
+                    <p className="mt-0.5 truncate text-[11px] text-slate-500">
                       {selectedClassLabel}
                     </p>
                   </div>
-
-                  <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <div className="flex shrink-0 items-center gap-2 text-[11px] text-slate-500">
                     <span>{formatNumber(totalStudents)} students</span>
-
                     <span className="text-slate-700">•</span>
-
-                    <span>{formatNumber(totalDays)} attendance days</span>
+                    <span>{formatNumber(totalDays)} days</span>
                   </div>
                 </div>
               </div>
 
-              <div className="max-h-[calc(100vh-360px)] overflow-auto [scrollbar-width:thin]">
-                <table className="min-w-max border-collapse text-sm">
+              <div className="w-full overflow-hidden">
+                <table className="w-full table-fixed border-collapse text-[10px]">
+                  <colgroup>
+                    <col style={{ width: "10%" }} />
+                    <col style={{ width: "10%" }} />
+                    <col style={{ width: "10%" }} />
+                    {calendarDays.map((rawDay) => (
+                      <col
+                        key={`col-${normalizeDay(rawDay).day}`}
+                        style={{
+                          width: `${62 / Math.max(calendarDays.length, 1)}%`,
+                        }}
+                      />
+                    ))}
+                  </colgroup>
                   <thead>
                     <tr>
-                      <th
-                        className="
-                          sticky left-0 top-0 z-40
-                          min-w-[76px]
-                          border-b border-r border-white/10
-                          bg-[#0d1014]/95 backdrop-blur-xl
-                          px-3 py-3
-                          text-left text-[11px]
-                          font-semibold uppercase
-                          tracking-wider text-slate-500
-                        "
-                      >
-                        Roll
+                      <th className="border-b border-r border-white/[0.08] bg-[#0d1014] px-1 py-2 text-center text-[8px] font-semibold uppercase tracking-wider text-slate-600">
+                        ID
                       </th>
-
-                      <th
-                        className="
-                          sticky left-[76px] top-0 z-40
-                          min-w-[220px]
-                          border-b border-r border-white/10
-                          bg-[#0d1014]/95 backdrop-blur-xl
-                          px-3 py-3
-                          text-left text-[11px]
-                          font-semibold uppercase
-                          tracking-wider text-slate-500
-                        "
-                      >
-                        Student
+                      <th className="border-b border-r border-white/[0.08] bg-[#0d1014] px-2 py-2 text-left text-[8px] font-semibold uppercase tracking-wider text-slate-600">
+                        Student & Guardian
                       </th>
-
-                      <th
-                        className="
-                          sticky left-[296px] top-0 z-40
-                          min-w-[190px]
-                          border-b border-r border-white/10
-                          bg-[#0d1014]/95 backdrop-blur-xl
-                          px-3 py-3
-                          text-left text-[11px]
-                          font-semibold uppercase
-                          tracking-wider text-slate-500
-                        "
-                      >
-                        Father
+                      <th className="border-b border-r border-white/[0.08] bg-[#0d1014] px-1 py-2 text-center text-[8px] font-semibold uppercase tracking-wider text-slate-600">
+                        Pay
                       </th>
-
-                      <th
-                        className="
-                          sticky left-[486px] top-0 z-40
-                          min-w-[110px]
-                          border-b border-r border-white/10
-                          bg-[#0d1014]/95 backdrop-blur-xl
-                          px-3 py-3
-                          text-left text-[11px]
-                          font-semibold uppercase
-                          tracking-wider text-slate-500
-                        "
-                      >
-                        Payment
-                      </th>
-
-                      {sheet.days.map((rawDay) => {
-                        const day = normalizeDay(rawDay);
-
-                        const isFriday =
-                          Boolean(day.is_friday) || isFridayDay(day);
-
+                      {calendarDays.map((rawDay) => {
+                        const day = normalizeDay(rawDay),
+                          isFriday = Boolean(day.is_friday) || isFridayDay(day);
                         const isToday =
                           !isFriday &&
                           (Boolean(day.is_today) ||
@@ -1912,178 +1761,88 @@ export default function Attendance() {
                               Number(today.year) === Number(solarYear) &&
                               Number(today.month) === Number(solarMonth) &&
                               Number(today.day) === Number(day.day)));
-
                         return (
                           <th
                             key={`day-${day.day}`}
-                            className={`
-                              sticky top-0 z-30
-                              w-[66px] min-w-[66px]
-                              border-b border-r px-1.5 py-2 text-center
-                              ${
-                                isFriday
-                                  ? "border-white/[0.06] bg-[#0a0c0f]"
-                                  : isToday
-                                    ? "border-[#f2bd19]/20 bg-[#f2bd19]/[0.07]"
-                                    : "border-white/[0.07] bg-[#0b0e12]/95 backdrop-blur-xl"
-                              }
-                            `}
+                            className={`border-b border-r px-0 py-1 text-center ${isFriday ? "border-white/[0.045] bg-[#090b0e]" : isToday ? "border-[#f2bd19]/25 bg-[#f2bd19]/[0.08]" : "border-white/[0.06] bg-[#0b0e12]"}`}
                           >
                             <div
-                              className={`
-                                text-[9px] font-semibold uppercase tracking-[0.14em]
-                                ${
-                                  isFriday
-                                    ? "text-slate-600"
-                                    : isToday
-                                      ? "text-[#f2bd19]"
-                                      : "text-slate-600"
-                                }
-                              `}
+                              className={`truncate text-[6px] font-semibold uppercase leading-none ${isFriday ? "text-slate-700" : isToday ? "text-[#f2bd19]" : "text-slate-600"}`}
                             >
                               {isFriday ? "FRI" : getWeekdayLabel(day) || "DAY"}
                             </div>
-
                             <div
-                              className={`
-                                mx-auto mt-1 flex h-8 w-8 items-center justify-center rounded-lg text-xs font-semibold
-                                ${
-                                  isFriday
-                                    ? "border border-white/[0.05] bg-white/[0.02] text-slate-700"
-                                    : isToday
-                                      ? "border border-[#f2bd19]/35 bg-[#f2bd19]/10 text-[#f2bd19]"
-                                      : "text-slate-300"
-                                }
-                              `}
+                              className={`mx-auto mt-1 flex h-5 w-5 items-center justify-center rounded-md text-[8px] font-bold leading-none ${isFriday ? "border border-white/[0.05] bg-white/[0.018] text-slate-700" : isToday ? "border border-[#f2bd19]/40 bg-[#f2bd19]/10 text-[#f2bd19]" : "text-slate-300"}`}
                             >
                               {formatNumber(day.day)}
                             </div>
-
-                            <div
-                              className={`
-                                mt-1 text-[8px] font-medium uppercase tracking-wider
-                                ${
-                                  isFriday
-                                    ? "text-slate-700"
-                                    : isToday
-                                      ? "text-[#f2bd19]/80"
-                                      : "text-transparent"
-                                }
-                              `}
-                            >
-                              {isFriday ? "Holiday" : isToday ? "Today" : "—"}
-                            </div>
+                            {isToday && (
+                              <div className="mt-0.5 text-[5px] font-bold uppercase leading-none tracking-wider text-[#f2bd19]/80">
+                                Today
+                              </div>
+                            )}
+                            {isFriday && (
+                              <div className="mt-0.5 text-[5px] font-semibold uppercase leading-none tracking-wider text-slate-700">
+                                Off
+                              </div>
+                            )}
                           </th>
                         );
                       })}
                     </tr>
                   </thead>
-
                   <tbody>
                     {sheet.students.map((student, index) => {
-                      const studentId = Number(student.student_id);
-
+                      const studentId = Number(student.student_id),
+                        payment = getPaymentData(student);
                       return (
                         <tr
                           key={studentId || student.id || index}
-                          className="
-                            group
-                            border-b
-                            border-white/[0.06]
-                            last:border-b-0
-                            hover:bg-white/[0.018]
-                          "
+                          className="group border-b border-white/[0.055] last:border-b-0 hover:bg-white/[0.018]"
                         >
-                          <td
-                            className="
-                              sticky left-0 z-20
-                              border-r
-                              border-white/[0.06]
-                              bg-[#121519]
-                              px-3 py-2
-                              text-xs
-                              font-medium
-                              text-slate-500
-                              group-hover:bg-[#171b20]
-                            "
-                          >
-                            {student.roll_number ?? student.roll ?? "—"}
+                          <td className="border-r border-white/[0.055] bg-[#121519] px-1 py-2 text-center text-[9px] font-semibold text-slate-500 group-hover:bg-[#171b20]">
+                            {studentId || "—"}
                           </td>
-
-                          <td
-                            className="
-                              sticky left-[76px] z-20
-                              border-r
-                              border-white/[0.06]
-                              bg-[#121519]
-                              px-3 py-2
-                              group-hover:bg-[#171b20]
-                            "
-                          >
-                            <div className="max-w-[200px] truncate text-sm font-medium text-slate-200">
-                              {student.full_name || student.student_name || "—"}
+                          <td className="border-r border-white/[0.055] bg-[#121519] px-2 py-1.5 group-hover:bg-[#171b20]">
+                            <div className="min-w-0">
+                              <div className="truncate text-[10px] font-semibold leading-tight text-slate-200">
+                                {student.full_name ||
+                                  student.student_name ||
+                                  "—"}
+                              </div>
+                              <div className="mt-0.5 truncate text-[8px] leading-tight text-slate-500">
+                                {student.father_name ||
+                                  student.guardian_name ||
+                                  student.father ||
+                                  "—"}
+                              </div>
                             </div>
-
-                            {student.student_id && (
-                              <div className="mt-0.5 text-[10px] text-slate-600">
-                                ID {formatNumber(student.student_id)}
+                          </td>
+                          <td className="border-r border-white/[0.055] bg-[#121519] px-1 py-1.5 text-center group-hover:bg-[#171b20]">
+                            <span
+                              title={
+                                payment.amount
+                                  ? `${payment.label} · ${payment.amount}`
+                                  : payment.label
+                              }
+                              className={`inline-flex max-w-full items-center justify-center rounded-md border px-1 py-0.5 text-[6px] font-bold leading-tight ${payment.className}`}
+                            >
+                              <span className="truncate">{payment.label}</span>
+                            </span>
+                            {payment.amount && (
+                              <div
+                                className="mt-0.5 truncate text-[6px] font-medium leading-none text-amber-300/80"
+                                title={payment.amount}
+                              >
+                                {payment.amount}
                               </div>
                             )}
                           </td>
-
-                          <td
-                            className="
-                              sticky left-[296px] z-20
-                              border-r
-                              border-white/[0.06]
-                              bg-[#121519]
-                              px-3 py-2
-                              text-xs
-                              text-slate-400
-                              group-hover:bg-[#171b20]
-                            "
-                          >
-                            <div className="max-w-[170px] truncate">
-                              {student.father_name ||
-                                student.guardian_name ||
-                                student.father ||
-                                "—"}
-                            </div>
-                          </td>
-
-                          <td
-                            className="
-                              sticky left-[486px] z-20
-                              border-r
-                              border-white/[0.06]
-                              bg-[#121519]
-                              px-3 py-2
-                              group-hover:bg-[#171b20]
-                            "
-                          >
-                            <span
-                              className={`
-                                inline-flex
-                                rounded-lg
-                                border
-                                px-2 py-1
-                                text-[10px]
-                                font-semibold
-                                ${getPaymentClass(student.payment_status)}
-                              `}
-                            >
-                              {getPaymentLabel(student.payment_status)}
-                            </span>
-                          </td>
-
-                          {sheet.days.map((rawDay) => {
-                            const day = normalizeDay(rawDay);
-
-                            const isFriday =
-                              Boolean(day.is_friday) || isFridayDay(day);
-
-                            const status = marks[studentId]?.[day.day] ?? null;
-
+                          {calendarDays.map((rawDay) => {
+                            const day = normalizeDay(rawDay),
+                              isFriday =
+                                Boolean(day.is_friday) || isFridayDay(day),
+                              status = marks[studentId]?.[day.day] ?? null;
                             const isToday =
                               !isFriday &&
                               (Boolean(day.is_today) ||
@@ -2091,27 +1850,15 @@ export default function Attendance() {
                                   Number(today.year) === Number(solarYear) &&
                                   Number(today.month) === Number(solarMonth) &&
                                   Number(today.day) === Number(day.day)));
-
                             return (
                               <td
                                 key={`${studentId}-${day.day}`}
-                                className={`
-                                  w-[66px] min-w-[66px]
-                                  border-r px-1.5 py-2 text-center
-                                  ${
-                                    isFriday
-                                      ? "border-white/[0.045] bg-white/[0.008]"
-                                      : isToday
-                                        ? "border-white/[0.06] bg-[#f2bd19]/[0.025]"
-                                        : "border-white/[0.06]"
-                                  }
-                                `}
+                                className={`border-r px-0 py-1 text-center ${isFriday ? "border-white/[0.04] bg-white/[0.006]" : isToday ? "border-white/[0.055] bg-[#f2bd19]/[0.025]" : "border-white/[0.055]"}`}
                               >
                                 {isFriday ? (
                                   <div
-                                    className="mx-auto flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.05] bg-white/[0.018] text-[10px] font-medium text-slate-700"
+                                    className="mx-auto flex h-6 w-6 items-center justify-center rounded-md border border-white/[0.045] bg-white/[0.012] text-[8px] font-medium text-slate-700"
                                     title="Friday — holiday"
-                                    aria-label="Friday — holiday"
                                   >
                                     —
                                   </div>
@@ -2136,21 +1883,18 @@ export default function Attendance() {
                 </table>
               </div>
 
-              <div className="flex flex-col gap-2 border-t border-white/10 bg-[#0d1014]/95 px-4 py-3 text-xs text-slate-500 backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-col gap-1.5 border-t border-white/10 bg-[#0d1014]/95 px-3 py-2 text-[10px] text-slate-500 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   {monthName} {validSolarMonth ? formatNumber(solarYear) : ""}
                 </div>
-
-                <div className="flex flex-wrap items-center gap-3">
+                <div className="flex flex-wrap items-center gap-2">
                   {today?.year && today?.month && today?.day && (
                     <span>
                       Today: {formatNumber(today.year)}/
                       {formatNumber(today.month)}/{formatNumber(today.day)}
                     </span>
                   )}
-
                   <span className="text-slate-700">•</span>
-
                   <span>
                     {dirty ? "Changes not saved" : "All changes saved"}
                   </span>
@@ -2158,6 +1902,8 @@ export default function Attendance() {
               </div>
             </div>
           )}
+
+        {/* EMPTY STUDENTS */}
 
         {!loadingToday &&
           !loadingClasses &&
@@ -2176,6 +1922,8 @@ export default function Attendance() {
               </p>
             </div>
           )}
+
+        {/* EMPTY DAYS */}
 
         {!loadingToday &&
           !loadingClasses &&

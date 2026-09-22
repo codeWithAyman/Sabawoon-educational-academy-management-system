@@ -3,6 +3,7 @@ import api from "../lib/api";
 import PasswordConfirmModal from "../components/PasswordConfirmModal";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../components/Toast";
+import { toJalaali, toGregorian, isValidJalaaliDate } from "jalaali-js";
 import {
   Plus,
   Search,
@@ -21,8 +22,6 @@ import {
   UserPlus,
   Check,
   AlertCircle,
-  CreditCard,
-  Wallet,
 } from "lucide-react";
 
 const EMPTY_STUDENT = {
@@ -75,40 +74,46 @@ function formatDate(value) {
   if (!value) return "—";
 
   const valueString = String(value);
-
   const raw = valueString.slice(0, 10);
 
+  // Handle PostgreSQL DATE values such as:
+  // 2026-09-21
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-    const [year, month, day] = raw.split("-");
+    const [year, month, day] = raw.split("-").map(Number);
 
-    return `${month}/${day}/${String(year).slice(-2)}`;
+    try {
+      const result = toJalaali(year, month, day);
+
+      return `${String(result.jy).padStart(4, "0")}/${String(
+        result.jm,
+      ).padStart(2, "0")}/${String(result.jd).padStart(2, "0")}`;
+    } catch {
+      return raw;
+    }
   }
 
+  // Handle timestamps such as:
+  // 2026-09-21T00:00:00.000Z
   const date = new Date(value);
 
   if (Number.isNaN(date.getTime())) {
     return String(value);
   }
 
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Kabul",
-  }).format(date);
-}
+  try {
+    const result = toJalaali(
+      date.getUTCFullYear(),
+      date.getUTCMonth() + 1,
+      date.getUTCDate(),
+    );
 
-function normalizeArrayResponse(data) {
-  if (Array.isArray(data)) return data;
-
-  if (Array.isArray(data?.students)) return data.students;
-  if (Array.isArray(data?.classes)) return data.classes;
-  if (Array.isArray(data?.subjects)) return data.subjects;
-  if (Array.isArray(data?.books)) return data.books;
-  if (Array.isArray(data?.sections)) return data.sections;
-  if (Array.isArray(data?.rows)) return data.rows;
-  if (Array.isArray(data?.items)) return data.items;
-  if (Array.isArray(data?.class_slots)) return data.class_slots;
-  if (Array.isArray(data?.enrolled_classes)) return data.enrolled_classes;
-
-  return [];
+    return `${String(result.jy).padStart(4, "0")}/${String(result.jm).padStart(
+      2,
+      "0",
+    )}/${String(result.jd).padStart(2, "0")}`;
+  } catch {
+    return String(value);
+  }
 }
 
 function getSubjectId(value) {
@@ -207,19 +212,6 @@ function classLabel(slot, subjects) {
   return subject;
 }
 
-function money(value) {
-  const number = Number(value);
-
-  if (!Number.isFinite(number)) {
-    return "0";
-  }
-
-  return number.toLocaleString("en-US", {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  });
-}
-
 function getStudentEnrollments(student) {
   if (Array.isArray(student?.enrolled_classes)) {
     return student.enrolled_classes;
@@ -261,6 +253,18 @@ function getStudentClassIds(student) {
   ];
 }
 
+function normalizeArrayResponse(data) {
+  if (Array.isArray(data)) return data;
+
+  if (Array.isArray(data?.students)) return data.students;
+  if (Array.isArray(data?.classes)) return data.classes;
+  if (Array.isArray(data?.subjects)) return data.subjects;
+  if (Array.isArray(data?.books)) return data.books;
+  if (Array.isArray(data?.data)) return data.data;
+
+  return [];
+}
+
 /* ============================================================
    MAIN PAGE
 ============================================================ */
@@ -281,6 +285,9 @@ export default function Students() {
 
   const [search, setSearch] = useState("");
   const [classFilter, setClassFilter] = useState("");
+
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize] = useState(10);
 
   const [showStudentModal, setShowStudentModal] = useState(false);
   const [editingStudent, setEditingStudent] = useState(null);
@@ -304,9 +311,7 @@ export default function Students() {
       ]);
 
       setStudents(normalizeArrayResponse(studentsRes.data));
-
       setClasses(normalizeArrayResponse(classesRes.data));
-
       setSubjects(normalizeArrayResponse(subjectsRes.data));
     } catch (error) {
       toast.error(error.response?.data?.error || "Failed to load student data");
@@ -359,6 +364,29 @@ export default function Students() {
       return getStudentClassIds(student).includes(Number(classFilter));
     });
   }, [students, search, classFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredStudents.length / pageSize));
+
+  const paginatedStudents = useMemo(() => {
+    const startIndex = (currentPage - 1) * pageSize;
+
+    return filteredStudents.slice(startIndex, startIndex + pageSize);
+  }, [filteredStudents, currentPage, pageSize]);
+
+  const pageStart =
+    filteredStudents.length === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+
+  const pageEnd = Math.min(currentPage * pageSize, filteredStudents.length);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, classFilter]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
 
   const enrolledCount = students.filter(
     (student) => getStudentClassIds(student).length > 0,
@@ -414,128 +442,242 @@ export default function Students() {
   }
 
   return (
-    <div className="min-h-full bg-[#0b0d10] text-slate-100 p-5 sm:p-6">
-      <div className="max-w-[1600px] mx-auto space-y-5">
-        {/* HEADER */}
+    <div className="min-h-full bg-[#0b0d10] text-slate-100 px-3 py-4 sm:px-5 sm:py-5 lg:px-6">
+      <div className="max-w-[1600px] mx-auto space-y-4 sm:space-y-5">
+        {/* ============================================================
+            PAGE HEADER
+        ============================================================ */}
 
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-[#f2bd19]/10 border border-[#f2bd19]/20 grid place-items-center">
-              <GraduationCap className="w-5 h-5 text-[#f2bd19]" />
-            </div>
+        <div className="rounded-xl border border-white/[0.07] bg-[#121519] overflow-hidden shadow-[0_14px_45px_rgba(0,0,0,0.14)]">
+          <div className="px-4 py-4 sm:px-5 sm:py-5">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-10 h-10 sm:w-11 sm:h-11 shrink-0 rounded-xl bg-[#f2bd19]/10 border border-[#f2bd19]/20 grid place-items-center">
+                  <GraduationCap className="w-5 h-5 sm:w-[21px] sm:h-[21px] text-[#f2bd19]" />
+                </div>
 
-            <div>
-              <h2 className="text-xl font-bold tracking-tight text-white">
-                Students
-              </h2>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-lg sm:text-xl font-bold tracking-tight text-white truncate">
+                      Students
+                    </h2>
 
-              <p className="text-xs text-slate-500 mt-0.5">
-                Manage student records, classes and enrollment
-              </p>
+                    <span className="hidden sm:inline-flex items-center h-5 px-2 rounded-md border border-white/[0.07] bg-white/[0.025] text-[8px] uppercase tracking-[0.12em] text-slate-600">
+                      Records
+                    </span>
+                  </div>
+
+                  <p className="text-[10px] sm:text-xs text-slate-500 mt-0.5 truncate">
+                    Manage student records, classes and enrollment
+                  </p>
+                </div>
+              </div>
+
+              {canEdit && (
+                <div className="grid grid-cols-2 sm:flex gap-2 w-full lg:w-auto">
+                  <button
+                    type="button"
+                    onClick={refresh}
+                    disabled={refreshing}
+                    className="h-10 px-3 sm:px-4 rounded-lg border border-white/[0.08] bg-[#0d1013] text-slate-400 hover:text-white hover:bg-white/[0.04] hover:border-white/[0.14] transition flex items-center justify-center gap-2 text-xs sm:text-sm"
+                  >
+                    <RefreshCw
+                      className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`}
+                    />
+                    Refresh
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={openCreate}
+                    className="h-10 px-4 sm:px-5 rounded-lg bg-[#f2bd19] text-[#0b0d10] text-xs sm:text-sm font-bold flex items-center justify-center gap-2 hover:bg-[#ffd34d] transition shadow-[0_8px_28px_rgba(242,189,25,0.10)]"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add Student
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
-          {canEdit && (
-            <div className="flex flex-col sm:flex-row gap-2">
-              <button
-                type="button"
-                onClick={refresh}
-                disabled={refreshing}
-                className="h-10 px-3 rounded-lg border border-white/10 bg-[#121519] text-slate-400 hover:text-white hover:bg-white/[0.04] transition flex items-center justify-center gap-2 text-sm"
-              >
-                <RefreshCw
-                  className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`}
-                />
-                Refresh
-              </button>
+          <div className="px-4 sm:px-5 py-2.5 border-t border-white/[0.05] bg-[#101317] flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#f2bd19]" />
 
-              <button
-                type="button"
-                onClick={openCreate}
-                className="h-10 px-4 rounded-lg bg-[#f2bd19] text-[#0b0d10] text-sm font-bold flex items-center justify-center gap-2 hover:bg-[#ffd34d] transition"
-              >
-                <Plus className="w-4 h-4" />
-                Add Student
-              </button>
+              <span className="text-[8px] uppercase tracking-[0.14em] text-slate-600">
+                Student management
+              </span>
             </div>
-          )}
 
-          <PasswordConfirmModal
-            open={passwordConfirmOpen}
-            title="Confirm student deletion"
-            description={
-              studentPendingDelete
-                ? `Enter your password to permanently delete ${studentPendingDelete.full_name}.`
-                : "Enter your password to continue."
-            }
-            confirmLabel="Verify & Delete"
-            onVerified={confirmStudentDelete}
-            onCancel={() => {
-              setPasswordConfirmOpen(false);
-              setStudentPendingDelete(null);
-            }}
-          />
+            <span className="text-[9px] text-slate-700">
+              {students.length} total records
+            </span>
+          </div>
         </div>
 
-        {/* SUMMARY */}
+        <PasswordConfirmModal
+          open={passwordConfirmOpen}
+          title="Confirm student deletion"
+          description={
+            studentPendingDelete
+              ? `Enter your password to permanently delete ${studentPendingDelete.full_name}.`
+              : "Enter your password to continue."
+          }
+          confirmLabel="Verify & Delete"
+          onVerified={confirmStudentDelete}
+          onCancel={() => {
+            setPasswordConfirmOpen(false);
+            setStudentPendingDelete(null);
+          }}
+        />
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {/* ============================================================
+            SUMMARY
+        ============================================================ */}
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 sm:gap-3">
           <SummaryCard
             icon={Users}
             label="Total Students"
             value={students.length}
+            detail="All registered students"
           />
 
-          <SummaryCard icon={UserPlus} label="Enrolled" value={enrolledCount} />
+          <SummaryCard
+            icon={UserPlus}
+            label="Enrolled"
+            value={enrolledCount}
+            detail="Currently assigned to classes"
+          />
 
           <SummaryCard
             icon={AlertCircle}
             label="Not Enrolled"
             value={notEnrolledCount}
+            detail="No active class assignment"
           />
         </div>
 
-        {/* FILTERS */}
+        {/* ============================================================
+            FILTER PANEL
+        ============================================================ */}
 
-        <div className="rounded-xl bg-[#121519] border border-white/10 p-3">
-          <div className="grid grid-cols-1 md:grid-cols-[1fr_300px] gap-2">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-600" />
+        <section className="rounded-xl border border-white/[0.07] bg-[#121519] shadow-[0_12px_40px_rgba(0,0,0,0.12)] overflow-hidden">
+          <div className="px-4 sm:px-5 py-3 border-b border-white/[0.05] bg-[#101317]">
+            <div className="flex items-center gap-2">
+              <Search className="w-3.5 h-3.5 text-[#f2bd19]/70" />
 
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by student, ID, father name or phone..."
-                className="w-full h-10 pl-9 pr-3 rounded-lg bg-[#0d1013] border border-white/10 text-sm text-slate-200 outline-none focus:border-[#f2bd19]/50 placeholder:text-slate-700"
-              />
+              <div>
+                <p className="text-[10px] font-semibold text-slate-300">
+                  Find Students
+                </p>
+
+                <p className="text-[8px] text-slate-700 mt-0.5">
+                  Search records or filter by class
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="p-3 sm:p-4">
+            <div className="flex flex-col lg:flex-row gap-2.5">
+              <div className="relative flex-1">
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-600 pointer-events-none" />
+
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search by student, ID, father name or phone..."
+                  className="w-full h-10 sm:h-11 pl-10 pr-3 rounded-lg bg-[#0d1013] border border-white/[0.08] text-xs sm:text-sm text-slate-200 outline-none focus:border-[#f2bd19]/45 focus:bg-[#0c0f12] placeholder:text-slate-700 transition"
+                />
+              </div>
+
+              <div className="relative w-full lg:w-[310px]">
+                <select
+                  value={classFilter}
+                  onChange={(e) => setClassFilter(e.target.value)}
+                  className="w-full h-10 sm:h-11 px-3 pr-9 rounded-lg bg-[#0d1013] border border-white/[0.08] text-xs sm:text-sm text-slate-300 outline-none focus:border-[#f2bd19]/45 transition appearance-none"
+                >
+                  <option value="">All classes</option>
+
+                  {classes.map((slot) => (
+                    <option key={slot.id} value={slot.id}>
+                      {classLabel(slot, subjects)}
+                      {" — "}
+                      {formatTime(slot.start_time)}-{formatTime(slot.end_time)}
+                    </option>
+                  ))}
+                </select>
+
+                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-700 pointer-events-none" />
+              </div>
             </div>
 
-            <select
-              value={classFilter}
-              onChange={(e) => setClassFilter(e.target.value)}
-              className="w-full h-10 px-3 rounded-lg bg-[#0d1013] border border-white/10 text-sm text-slate-300 outline-none focus:border-[#f2bd19]/50"
-            >
-              <option value="">All classes</option>
+            {(search || classFilter) && (
+              <div className="flex items-center justify-between gap-3 px-1 pt-2.5">
+                <p className="text-[9px] text-slate-600">
+                  {filteredStudents.length} matching{" "}
+                  {filteredStudents.length === 1 ? "student" : "students"}
+                </p>
 
-              {classes.map((slot) => (
-                <option key={slot.id} value={slot.id}>
-                  {classLabel(slot, subjects)}
-                  {" — "}
-                  {formatTime(slot.start_time)}-{formatTime(slot.end_time)}
-                </option>
-              ))}
-            </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearch("");
+                    setClassFilter("");
+                  }}
+                  className="text-[9px] text-slate-600 hover:text-[#f2bd19] transition"
+                >
+                  Clear filters
+                </button>
+              </div>
+            )}
           </div>
-        </div>
+        </section>
 
-        {/* TABLE */}
+        {/* ============================================================
+            STUDENT RECORDS PANEL
+        ============================================================ */}
 
-        <div className="rounded-xl bg-[#121519] border border-white/10 overflow-hidden">
-          <div className="overflow-x-auto">
+        <section className="rounded-xl border border-white/[0.07] bg-[#121519] overflow-hidden shadow-[0_16px_55px_rgba(0,0,0,0.16)]">
+          <div className="px-4 sm:px-5 py-3 border-b border-white/[0.05] bg-[#101317] flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-7 h-7 rounded-lg bg-[#f2bd19]/10 border border-[#f2bd19]/15 grid place-items-center">
+                <Users className="w-3.5 h-3.5 text-[#f2bd19]" />
+              </div>
+
+              <div>
+                <p className="text-[10px] sm:text-[11px] font-semibold text-slate-300">
+                  Student Records
+                </p>
+
+                <p className="text-[8px] sm:text-[9px] text-slate-700 mt-0.5">
+                  {filteredStudents.length}{" "}
+                  {filteredStudents.length === 1 ? "record" : "records"}
+                </p>
+              </div>
+            </div>
+
+            {filteredStudents.length > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+
+                <span className="hidden sm:inline text-[8px] uppercase tracking-[0.12em] text-slate-700">
+                  Current records
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* ============================================================
+              DESKTOP / TABLET TABLE
+          ============================================================ */}
+
+          <div className="hidden md:block overflow-x-auto">
             <table className="w-full min-w-[900px]">
               <thead>
-                <tr className="border-b border-white/[0.06]">
-                  <th className="px-4 py-2.5 text-left text-[8px] font-semibold uppercase tracking-[0.14em] text-slate-700">
+                <tr className="border-b border-white/[0.05] bg-[#0f1215]">
+                  <th className="px-4 sm:px-5 py-2.5 text-left text-[8px] font-semibold uppercase tracking-[0.14em] text-slate-700">
                     Student
                   </th>
 
@@ -544,7 +686,7 @@ export default function Students() {
                   </th>
 
                   <th className="px-4 py-2.5 text-left text-[8px] font-semibold uppercase tracking-[0.14em] text-slate-700">
-                    Subjects / Classes
+                    Classes
                   </th>
 
                   <th className="px-4 py-2.5 text-left text-[8px] font-semibold uppercase tracking-[0.14em] text-slate-700">
@@ -561,186 +703,144 @@ export default function Students() {
                 </tr>
               </thead>
 
-              <tbody className="divide-y divide-white/[0.04]">
+              <tbody className="divide-y divide-white/[0.035]">
                 {loading ? (
                   <tr>
                     <td colSpan={6}>
-                      <div className="py-16 flex flex-col items-center gap-3">
-                        <Loader2 className="w-6 h-6 text-[#f2bd19] animate-spin" />
-
-                        <span className="text-xs text-slate-600">
-                          Loading students...
-                        </span>
-                      </div>
+                      <LoadingState />
                     </td>
                   </tr>
                 ) : filteredStudents.length === 0 ? (
                   <tr>
                     <td colSpan={6}>
-                      <div className="py-16 text-center">
-                        <Users className="w-7 h-7 mx-auto text-slate-700 mb-3" />
-
-                        <h3 className="text-sm font-semibold text-slate-300">
-                          No students found
-                        </h3>
-
-                        <p className="text-xs text-slate-600 mt-1">
-                          Add a student or change your search.
-                        </p>
-                      </div>
+                      <EmptyState search={search} classFilter={classFilter} />
                     </td>
                   </tr>
                 ) : (
-                  filteredStudents.map((student) => {
+                  paginatedStudents.map((student) => {
                     const studentEnrollments = getStudentEnrollments(student);
 
                     return (
-                      <tr
+                      <StudentTableRow
                         key={student.id}
-                        className="group hover:bg-white/[0.016] transition-colors"
-                      >
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2.5">
-                            <div className="w-8 h-8 shrink-0 rounded-lg border border-white/[0.07] bg-[#0d1013] grid place-items-center text-[9px] font-bold text-[#f2bd19]">
-                              {student.full_name
-                                ?.split(" ")
-                                .map((x) => x[0])
-                                .slice(0, 2)
-                                .join("")
-                                .toUpperCase() || "?"}
-                            </div>
-
-                            <div className="min-w-0">
-                              <p className="text-[11px] font-semibold text-slate-300 truncate">
-                                {student.full_name || "—"}
-                              </p>
-
-                              <p className="mt-1 inline-flex items-center rounded-md border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.1em] text-amber-400 shadow-sm">
-                                Student ID #{student.id}
-                              </p>
-                            </div>
-                          </div>
-                        </td>
-
-                        <td className="px-4 py-3">
-                          <span className="text-[10px] text-slate-500">
-                            {student.father_name ||
-                              student.guardian_name ||
-                              "—"}
-                          </span>
-                        </td>
-
-                        <td className="px-4 py-3">
-                          {studentEnrollments.length === 0 ? (
-                            <button
-                              type="button"
-                              onClick={() => openEnrollment(student)}
-                              className="text-[10px] text-slate-600 hover:text-[#f2bd19] transition"
-                            >
-                              Not enrolled
-                            </button>
-                          ) : (
-                            <div className="space-y-1.5 max-w-[430px]">
-                              {studentEnrollments
-                                .slice(0, 3)
-                                .map((slot, index) => (
-                                  <button
-                                    type="button"
-                                    key={
-                                      slot.enrollment_id ||
-                                      slot.class_slot_id ||
-                                      slot.id ||
-                                      index
-                                    }
-                                    onClick={() => openEnrollment(student)}
-                                    className="block w-full text-left"
-                                  >
-                                    <div className="flex items-center gap-2">
-                                      <BookOpen className="w-3 h-3 shrink-0 text-[#f2bd19]/60" />
-
-                                      <span className="text-[10px] font-medium text-slate-400 truncate">
-                                        {classLabel(slot, subjects)}
-                                      </span>
-
-                                      <span className="text-[9px] text-slate-700 shrink-0">
-                                        {formatTime(slot.start_time)}-
-                                        {formatTime(slot.end_time)}
-                                      </span>
-                                    </div>
-                                  </button>
-                                ))}
-
-                              {studentEnrollments.length > 3 && (
-                                <button
-                                  type="button"
-                                  onClick={() => openEnrollment(student)}
-                                  className="text-[9px] text-[#f2bd19]/70 hover:text-[#f2bd19]"
-                                >
-                                  +{studentEnrollments.length - 3} more
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </td>
-
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <Phone className="w-3 h-3 text-slate-700" />
-
-                            <span className="text-[10px] text-slate-500">
-                              {student.phone || "—"}
-                            </span>
-                          </div>
-                        </td>
-
-                        <td className="px-4 py-3">
-                          <span className="text-[10px] text-slate-500">
-                            {formatDate(student.dob)}
-                          </span>
-                        </td>
-
-                        <td className="px-4 py-3">
-                          <div className="flex items-center justify-end gap-1">
-                            <button
-                              type="button"
-                              onClick={() => openEnrollment(student)}
-                              className="w-8 h-8 rounded-lg grid place-items-center text-slate-600 hover:text-[#f2bd19] hover:bg-[#f2bd19]/10 transition"
-                              title="Manage classes"
-                            >
-                              <BookOpen className="w-3.5 h-3.5" />
-                            </button>
-
-                            {canEdit && (
-                              <button
-                                type="button"
-                                onClick={() => openEdit(student)}
-                                className="w-8 h-8 rounded-lg grid place-items-center text-slate-600 hover:text-white hover:bg-white/[0.05] transition"
-                                title="Edit student"
-                              >
-                                <Pencil className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-
-                            {canDelete && (
-                              <button
-                                type="button"
-                                onClick={() => deleteStudent(student)}
-                                className="w-8 h-8 rounded-lg grid place-items-center text-slate-600 hover:text-red-400 hover:bg-red-500/10 transition"
-                                title="Delete student"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
+                        student={student}
+                        studentEnrollments={studentEnrollments}
+                        subjects={subjects}
+                        canEdit={canEdit}
+                        canDelete={canDelete}
+                        openEnrollment={openEnrollment}
+                        openEdit={openEdit}
+                        deleteStudent={deleteStudent}
+                      />
                     );
                   })
                 )}
               </tbody>
             </table>
           </div>
-        </div>
+
+          {/* ============================================================
+              MOBILE RECORDS
+          ============================================================ */}
+
+          <div className="md:hidden">
+            {loading ? (
+              <LoadingState />
+            ) : filteredStudents.length === 0 ? (
+              <EmptyState search={search} classFilter={classFilter} />
+            ) : (
+              <div className="divide-y divide-white/[0.045]">
+                {paginatedStudents.map((student) => {
+                  const studentEnrollments = getStudentEnrollments(student);
+
+                  return (
+                    <MobileStudentRow
+                      key={student.id}
+                      student={student}
+                      studentEnrollments={studentEnrollments}
+                      subjects={subjects}
+                      canEdit={canEdit}
+                      canDelete={canDelete}
+                      openEnrollment={openEnrollment}
+                      openEdit={openEdit}
+                      deleteStudent={deleteStudent}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* ============================================================
+              PAGINATION
+          ============================================================ */}
+
+          {!loading && filteredStudents.length > 0 && (
+            <div className="border-t border-white/[0.06] bg-[#101317] px-4 sm:px-5 py-3">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div className="flex items-center gap-2 text-[10px] text-slate-600">
+                  <span>
+                    Showing{" "}
+                    <span className="text-slate-400 font-semibold">
+                      {pageStart}-{pageEnd}
+                    </span>{" "}
+                    of{" "}
+                    <span className="text-slate-400 font-semibold">
+                      {filteredStudents.length}
+                    </span>{" "}
+                    students
+                  </span>
+
+                  {totalPages > 1 && (
+                    <span className="hidden sm:inline text-slate-800">•</span>
+                  )}
+
+                  {totalPages > 1 && (
+                    <span className="hidden sm:inline text-slate-600">
+                      Page {currentPage} of {totalPages}
+                    </span>
+                  )}
+                </div>
+
+                {totalPages > 1 && (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={currentPage === 1}
+                      onClick={() =>
+                        setCurrentPage((page) => Math.max(1, page - 1))
+                      }
+                      className="h-8 px-3 rounded-lg border border-white/[0.08] bg-[#0d1013] text-[10px] font-medium text-slate-500 hover:text-white hover:bg-white/[0.04] hover:border-white/[0.14] transition disabled:opacity-25 disabled:pointer-events-none"
+                    >
+                      Previous
+                    </button>
+
+                    <div className="h-8 min-w-8 px-2 rounded-lg border border-[#f2bd19]/20 bg-[#f2bd19]/[0.07] flex items-center justify-center text-[10px] font-semibold text-[#f2bd19]">
+                      {currentPage}
+                    </div>
+
+                    <span className="text-[10px] text-slate-800 px-0.5">/</span>
+
+                    <div className="text-[10px] text-slate-500 min-w-4 text-center">
+                      {totalPages}
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={currentPage === totalPages}
+                      onClick={() =>
+                        setCurrentPage((page) => Math.min(totalPages, page + 1))
+                      }
+                      className="h-8 px-3 rounded-lg border border-white/[0.08] bg-[#0d1013] text-[10px] font-medium text-slate-500 hover:text-white hover:bg-white/[0.04] hover:border-white/[0.14] transition disabled:opacity-25 disabled:pointer-events-none"
+                    >
+                      Next
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
       </div>
 
       {showStudentModal && (
@@ -783,23 +883,217 @@ export default function Students() {
 }
 
 /* ============================================================
-   SUMMARY CARD
+   DESKTOP STUDENT ROW
 ============================================================ */
 
-function SummaryCard({ icon: Icon, label, value }) {
+function StudentTableRow({
+  student,
+  studentEnrollments,
+  subjects,
+  canEdit,
+  canDelete,
+  openEnrollment,
+  openEdit,
+  deleteStudent,
+}) {
   return (
-    <div className="rounded-xl bg-[#121519] border border-white/10 p-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-[9px] uppercase tracking-[0.14em] text-slate-700">
-            {label}
-          </p>
+    <tr className="group hover:bg-white/[0.018] transition-colors">
+      {/* STUDENT */}
 
-          <p className="mt-1 text-xl font-bold text-white">{value}</p>
+      <td className="px-4 sm:px-5 py-3.5">
+        <div className="flex items-center gap-3">
+          <StudentAvatar
+            student={student}
+            enrolled={studentEnrollments.length > 0}
+          />
+
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold text-slate-300 truncate max-w-[180px]">
+              {student.full_name || "—"}
+            </p>
+
+            <div className="flex items-center gap-2 mt-1.5">
+              <span className="text-[9px] font-semibold text-[#f2bd19]/70">
+                #{student.id}
+              </span>
+
+              <span className="w-0.5 h-0.5 rounded-full bg-slate-800" />
+
+              <span className="text-[8px] uppercase tracking-[0.1em] text-slate-700">
+                Student
+              </span>
+            </div>
+          </div>
         </div>
+      </td>
 
-        <div className="w-9 h-9 rounded-lg bg-[#f2bd19]/10 border border-[#f2bd19]/15 grid place-items-center">
-          <Icon className="w-4 h-4 text-[#f2bd19]" />
+      {/* FATHER */}
+
+      <td className="px-4 py-3.5">
+        <div className="flex items-center gap-2">
+          <UserRound className="w-3 h-3 text-slate-700 shrink-0" />
+
+          <span className="text-[10px] text-slate-500 truncate max-w-[130px]">
+            {student.father_name || student.guardian_name || "—"}
+          </span>
+        </div>
+      </td>
+
+      {/* CLASSES */}
+
+      <td className="px-4 py-3.5">
+        <StudentClasses
+          student={student}
+          studentEnrollments={studentEnrollments}
+          subjects={subjects}
+          openEnrollment={openEnrollment}
+        />
+      </td>
+
+      {/* PHONE */}
+
+      <td className="px-4 py-3.5">
+        <div className="flex items-center gap-2">
+          <Phone className="w-3 h-3 text-slate-700 shrink-0" />
+
+          <span className="text-[10px] text-slate-500">
+            {student.phone || "—"}
+          </span>
+        </div>
+      </td>
+
+      {/* DOB */}
+
+      <td className="px-4 py-3.5">
+        <span className="text-[10px] text-slate-500">
+          {formatDate(student.dob)}
+        </span>
+      </td>
+
+      {/* ACTIONS */}
+
+      <td className="px-4 py-3.5">
+        <StudentActions
+          student={student}
+          canEdit={canEdit}
+          canDelete={canDelete}
+          openEnrollment={openEnrollment}
+          openEdit={openEdit}
+          deleteStudent={deleteStudent}
+        />
+      </td>
+    </tr>
+  );
+}
+
+/* ============================================================
+   MOBILE STUDENT ROW
+============================================================ */
+
+function MobileStudentRow({
+  student,
+  studentEnrollments,
+  subjects,
+  canEdit,
+  canDelete,
+  openEnrollment,
+  openEdit,
+  deleteStudent,
+}) {
+  return (
+    <div className="p-3.5">
+      <div className="flex items-start gap-3">
+        <StudentAvatar
+          student={student}
+          enrolled={studentEnrollments.length > 0}
+        />
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[11px] font-semibold text-slate-300 truncate">
+                {student.full_name || "—"}
+              </p>
+
+              <div className="flex items-center gap-2 mt-1">
+                <span className="text-[9px] font-semibold text-[#f2bd19]/70">
+                  #{student.id}
+                </span>
+
+                <span className="w-0.5 h-0.5 rounded-full bg-slate-800" />
+
+                <span className="text-[8px] uppercase tracking-[0.1em] text-slate-700">
+                  Student
+                </span>
+              </div>
+            </div>
+
+            <StudentActions
+              student={student}
+              canEdit={canEdit}
+              canDelete={canDelete}
+              openEnrollment={openEnrollment}
+              openEdit={openEdit}
+              deleteStudent={deleteStudent}
+            />
+          </div>
+
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <div className="rounded-lg border border-white/[0.05] bg-[#0d1013] px-2.5 py-2">
+              <div className="flex items-center gap-1.5 mb-1">
+                <UserRound className="w-3 h-3 text-slate-700" />
+
+                <span className="text-[8px] uppercase tracking-[0.1em] text-slate-700">
+                  Father
+                </span>
+              </div>
+
+              <p className="text-[9px] text-slate-500 truncate">
+                {student.father_name || student.guardian_name || "—"}
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-white/[0.05] bg-[#0d1013] px-2.5 py-2">
+              <div className="flex items-center gap-1.5 mb-1">
+                <Phone className="w-3 h-3 text-slate-700" />
+
+                <span className="text-[8px] uppercase tracking-[0.1em] text-slate-700">
+                  Phone
+                </span>
+              </div>
+
+              <p className="text-[9px] text-slate-500 truncate">
+                {student.phone || "—"}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-2 rounded-lg border border-white/[0.05] bg-[#0d1013] px-2.5 py-2.5">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <div className="flex items-center gap-1.5">
+                <BookOpen className="w-3 h-3 text-[#f2bd19]/60" />
+
+                <span className="text-[8px] uppercase tracking-[0.1em] text-slate-700">
+                  Classes
+                </span>
+              </div>
+
+              <span className="text-[8px] text-slate-700">
+                DOB:{" "}
+                <span className="text-slate-500">
+                  {formatDate(student.dob)}
+                </span>
+              </span>
+            </div>
+
+            <StudentClasses
+              student={student}
+              studentEnrollments={studentEnrollments}
+              subjects={subjects}
+              openEnrollment={openEnrollment}
+              mobile
+            />
+          </div>
         </div>
       </div>
     </div>
@@ -807,8 +1101,378 @@ function SummaryCard({ icon: Icon, label, value }) {
 }
 
 /* ============================================================
+   STUDENT AVATAR
+============================================================ */
+
+function StudentAvatar({ student, enrolled }) {
+  return (
+    <div className="relative w-9 h-9 shrink-0 rounded-lg border border-white/[0.07] bg-[#0d1013] grid place-items-center text-[10px] font-bold text-[#f2bd19]">
+      {student.full_name
+        ?.split(" ")
+        .map((x) => x[0])
+        .slice(0, 2)
+        .join("")
+        .toUpperCase() || "?"}
+
+      <span
+        className={`absolute -right-0.5 -bottom-0.5 w-2 h-2 rounded-full border-2 border-[#121519] ${
+          enrolled ? "bg-emerald-400" : "bg-slate-700"
+        }`}
+      />
+    </div>
+  );
+}
+
+/* ============================================================
+   STUDENT CLASSES
+============================================================ */
+
+function StudentClasses({
+  student,
+  studentEnrollments,
+  subjects,
+  openEnrollment,
+  mobile = false,
+}) {
+  if (studentEnrollments.length === 0) {
+    return (
+      <button
+        type="button"
+        onClick={() => openEnrollment(student)}
+        className="group/not flex items-center gap-2 text-[10px] text-slate-600 hover:text-[#f2bd19] transition"
+      >
+        <span className="w-5 h-5 rounded-md border border-dashed border-white/[0.08] grid place-items-center group-hover/not:border-[#f2bd19]/25">
+          <Plus className="w-3 h-3" />
+        </span>
+        Not enrolled
+      </button>
+    );
+  }
+
+  return (
+    <div className={`space-y-1.5 ${mobile ? "" : "max-w-[430px]"}`}>
+      {studentEnrollments.slice(0, 3).map((slot, index) => (
+        <button
+          type="button"
+          key={slot.enrollment_id || slot.class_slot_id || slot.id || index}
+          onClick={() => openEnrollment(student)}
+          className="block w-full text-left"
+        >
+          <div className="flex items-center gap-2.5 group/class">
+            <div className="w-5 h-5 shrink-0 rounded-md bg-[#f2bd19]/[0.06] border border-[#f2bd19]/10 grid place-items-center">
+              <BookOpen className="w-2.5 h-2.5 text-[#f2bd19]/60 group-hover/class:text-[#f2bd19]" />
+            </div>
+
+            <span className="text-[10px] font-medium text-slate-400 truncate group-hover/class:text-slate-300">
+              {classLabel(slot, subjects)}
+            </span>
+
+            <span className="text-[9px] text-slate-700 shrink-0">
+              {formatTime(slot.start_time)}-{formatTime(slot.end_time)}
+            </span>
+          </div>
+        </button>
+      ))}
+
+      {studentEnrollments.length > 3 && (
+        <button
+          type="button"
+          onClick={() => openEnrollment(student)}
+          className="ml-7 text-[9px] text-[#f2bd19]/65 hover:text-[#f2bd19]"
+        >
+          +{studentEnrollments.length - 3} more classes
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   STUDENT ACTIONS
+============================================================ */
+
+function StudentActions({
+  student,
+  canEdit,
+  canDelete,
+  openEnrollment,
+  openEdit,
+  deleteStudent,
+}) {
+  return (
+    <div className="flex items-center justify-end gap-1">
+      <button
+        type="button"
+        onClick={() => openEnrollment(student)}
+        className="w-8 h-8 rounded-lg grid place-items-center text-slate-600 hover:text-[#f2bd19] hover:bg-[#f2bd19]/10 transition"
+        title="Manage classes"
+      >
+        <BookOpen className="w-3.5 h-3.5" />
+      </button>
+
+      {canEdit && (
+        <button
+          type="button"
+          onClick={() => openEdit(student)}
+          className="w-8 h-8 rounded-lg grid place-items-center text-slate-600 hover:text-white hover:bg-white/[0.05] transition"
+          title="Edit student"
+        >
+          <Pencil className="w-3.5 h-3.5" />
+        </button>
+      )}
+
+      {canDelete && (
+        <button
+          type="button"
+          onClick={() => deleteStudent(student)}
+          className="w-8 h-8 rounded-lg grid place-items-center text-slate-600 hover:text-red-400 hover:bg-red-500/10 transition"
+          title="Delete student"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   LOADING STATE
+============================================================ */
+
+function LoadingState() {
+  return (
+    <div className="py-20 flex flex-col items-center gap-3">
+      <div className="w-10 h-10 rounded-xl border border-[#f2bd19]/15 bg-[#f2bd19]/[0.04] grid place-items-center">
+        <Loader2 className="w-5 h-5 text-[#f2bd19] animate-spin" />
+      </div>
+
+      <div className="text-center">
+        <p className="text-xs font-medium text-slate-500">Loading students</p>
+
+        <p className="text-[9px] text-slate-700 mt-1">
+          Retrieving current student records...
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   EMPTY STATE
+============================================================ */
+
+function EmptyState({ search, classFilter }) {
+  return (
+    <div className="py-20 px-5 text-center">
+      <div className="w-11 h-11 mx-auto rounded-xl border border-white/[0.06] bg-[#0d1013] grid place-items-center mb-3">
+        <Users className="w-5 h-5 text-slate-700" />
+      </div>
+
+      <h3 className="text-sm font-semibold text-slate-300">
+        No students found
+      </h3>
+
+      <p className="text-[10px] text-slate-600 mt-1.5">
+        {search || classFilter
+          ? "Try changing your search or class filter."
+          : "Add a student to begin building your records."}
+      </p>
+    </div>
+  );
+}
+
+/* ============================================================
+   SUMMARY CARD
+============================================================ */
+
+function SummaryCard({ icon: Icon, label, value, detail }) {
+  return (
+    <div className="group rounded-xl border border-white/[0.07] bg-[#121519] overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.10)] hover:border-white/[0.12] transition-colors">
+      <div className="p-3.5 sm:p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[8px] sm:text-[9px] uppercase tracking-[0.15em] text-slate-700">
+              {label}
+            </p>
+
+            <p className="mt-1 text-xl sm:text-2xl font-bold tracking-tight text-white">
+              {value}
+            </p>
+
+            <p className="text-[8px] text-slate-700 mt-1 truncate">{detail}</p>
+          </div>
+
+          <div className="w-9 h-9 sm:w-10 sm:h-10 shrink-0 rounded-lg bg-[#f2bd19]/10 border border-[#f2bd19]/15 grid place-items-center group-hover:bg-[#f2bd19]/[0.13] transition-colors">
+            <Icon className="w-4 h-4 text-[#f2bd19]" />
+          </div>
+        </div>
+      </div>
+
+      <div className="h-px bg-gradient-to-r from-transparent via-[#f2bd19]/10 to-transparent" />
+    </div>
+  );
+}
+
+/* ============================================================
    STUDENT MODAL
 ============================================================ */
+
+function gregorianToSolarInput(value) {
+  if (!value) return "";
+
+  const raw = String(value).slice(0, 10);
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return "";
+  }
+
+  const [gy, gm, gd] = raw.split("-").map(Number);
+
+  try {
+    const result = toJalaali(gy, gm, gd);
+
+    return `${String(result.jy).padStart(4, "0")}/${String(result.jm).padStart(
+      2,
+      "0",
+    )}/${String(result.jd).padStart(2, "0")}`;
+  } catch {
+    return "";
+  }
+}
+
+function solarInputToGregorian(value) {
+  const cleaned = String(value || "")
+    .trim()
+    .replace(/-/g, "/");
+
+  const match = cleaned.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const jy = Number(match[1]);
+  const jm = Number(match[2]);
+  const jd = Number(match[3]);
+
+  if (!isValidJalaaliDate(jy, jm, jd)) {
+    return null;
+  }
+
+  try {
+    const result = toGregorian(jy, jm, jd);
+
+    return `${String(result.gy).padStart(4, "0")}-${String(result.gm).padStart(
+      2,
+      "0",
+    )}-${String(result.gd).padStart(2, "0")}`;
+  } catch {
+    return null;
+  }
+}
+
+function SolarDateField({ label, value, onChange, required = false }) {
+  const [displayValue, setDisplayValue] = useState(
+    gregorianToSolarInput(value),
+  );
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setDisplayValue(gregorianToSolarInput(value));
+  }, [value]);
+
+  function handleChange(event) {
+    const nextValue = event.target.value;
+
+    setDisplayValue(nextValue);
+    setError("");
+
+    if (!nextValue.trim()) {
+      onChange("");
+      return;
+    }
+
+    const normalized = nextValue.replace(/-/g, "/");
+
+    // While the user is typing, don't show an error prematurely.
+    if (!/^\d{4}\/\d{1,2}\/\d{1,2}$/.test(normalized)) {
+      return;
+    }
+
+    const gregorianValue = solarInputToGregorian(normalized);
+
+    if (!gregorianValue) {
+      setError("Invalid Solar Hijri date.");
+      return;
+    }
+
+    onChange(gregorianValue);
+  }
+
+  function handleBlur() {
+    if (!displayValue.trim()) {
+      setError("");
+      onChange("");
+      return;
+    }
+
+    const normalized = displayValue.replace(/-/g, "/");
+    const gregorianValue = solarInputToGregorian(normalized);
+
+    if (!gregorianValue) {
+      setError("Use a valid date such as 1405/06/30.");
+      return;
+    }
+
+    setError("");
+
+    const [jy, jm, jd] = normalized.split("/").map(Number);
+
+    setDisplayValue(
+      `${String(jy).padStart(4, "0")}/${String(jm).padStart(
+        2,
+        "0",
+      )}/${String(jd).padStart(2, "0")}`,
+    );
+
+    onChange(gregorianValue);
+  }
+
+  return (
+    <div>
+      <label className="block text-[10px] font-medium text-slate-500 mb-1.5">
+        {label}
+
+        {required && <span className="text-[#f2bd19] ml-1">*</span>}
+      </label>
+
+      <div className="relative">
+        <input
+          type="text"
+          inputMode="numeric"
+          value={displayValue}
+          onChange={handleChange}
+          onBlur={handleBlur}
+          placeholder="YYYY/MM/DD"
+          maxLength={10}
+          className={`w-full h-10 px-3 rounded-lg bg-[#0b0d10] border text-sm text-slate-300 outline-none focus:bg-[#0c0f12] placeholder:text-slate-700 transition ${
+            error
+              ? "border-red-500/40 focus:border-red-500/60"
+              : "border-white/10 focus:border-[#f2bd19]/50"
+          }`}
+        />
+      </div>
+
+      {error ? (
+        <p className="mt-1.5 text-[9px] text-red-400">{error}</p>
+      ) : (
+        <p className="mt-1.5 text-[8px] text-slate-700">
+          Solar Hijri date • YYYY/MM/DD
+        </p>
+      )}
+    </div>
+  );
+}
 
 function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
   const editing = Boolean(student);
@@ -833,31 +1497,9 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
   const [selectedClassIds, setSelectedClassIds] = useState(new Set());
 
   const [selectedSubject, setSelectedSubject] = useState("");
-
   const [selectedSection, setSelectedSection] = useState("");
-
   const [sectionOptions, setSectionOptions] = useState([]);
-
   const [loadingSections, setLoadingSections] = useState(false);
-
-  /*
-   * Payment is now keyed by CLASS SLOT.
-   *
-   * This is important:
-   *
-   * English / Book 1 / Ahmad / 2-3
-   *
-   * and
-   *
-   * English / Book 2 / Ahmad / 2-3
-   *
-   * are separate fees.
-   */
-  const [payments, setPayments] = useState({});
-
-  /* ============================================================
-     LOAD EXISTING ENROLLMENTS WHEN EDITING
-  ============================================================ */
 
   useEffect(() => {
     if (!student) {
@@ -867,10 +1509,6 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
 
     setSelectedClassIds(new Set(getStudentClassIds(student)));
   }, [student]);
-
-  /* ============================================================
-     LOAD SECTIONS
-  ============================================================ */
 
   useEffect(() => {
     let cancelled = false;
@@ -912,10 +1550,6 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
     };
   }, [selectedSubject]);
 
-  /* ============================================================
-     AVAILABLE CLASSES
-  ============================================================ */
-
   const availableClasses = useMemo(() => {
     if (!selectedSubject) return [];
 
@@ -932,43 +1566,9 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
     });
   }, [classes, selectedSubject, selectedSection]);
 
-  /* ============================================================
-     SELECTED CLASSES
-  ============================================================ */
-
   const selectedClasses = useMemo(() => {
     return classes.filter((slot) => selectedClassIds.has(Number(slot.id)));
   }, [classes, selectedClassIds]);
-
-  /* ============================================================
-     PAYMENT STATE
-  ============================================================ */
-
-  useEffect(() => {
-    if (editing) return;
-
-    setPayments((current) => {
-      const next = {};
-
-      for (const slot of selectedClasses) {
-        const classId = Number(slot.id);
-        const existing = current[classId];
-
-        next[classId] = {
-          total_amount: existing?.total_amount ?? "",
-          paid_amount: existing?.paid_amount ?? "",
-          payment_date: existing?.payment_date || today(),
-          comment: existing?.comment || "",
-        };
-      }
-
-      return next;
-    });
-  }, [selectedClasses, editing]);
-
-  /* ============================================================
-     UPDATE FORM
-  ============================================================ */
 
   function updateField(field, value) {
     setForm((current) => ({
@@ -976,10 +1576,6 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
       [field]: value,
     }));
   }
-
-  /* ============================================================
-     TOGGLE CLASS
-  ============================================================ */
 
   function toggleClass(id) {
     setSelectedClassIds((current) => {
@@ -996,25 +1592,6 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
     });
   }
 
-  /* ============================================================
-     UPDATE PAYMENT
-  ============================================================ */
-
-  function updatePayment(classSlotId, field, value) {
-    setPayments((current) => ({
-      ...current,
-
-      [classSlotId]: {
-        ...(current[classSlotId] || {}),
-        [field]: value,
-      },
-    }));
-  }
-
-  /* ============================================================
-     SAVE STUDENT
-  ============================================================ */
-
   function handleSave(event) {
     event.preventDefault();
 
@@ -1030,57 +1607,9 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
       return;
     }
 
-    if (!editing && selectedClassIds.size === 0) {
+    if (!editing && selectedClasses.length === 0) {
       toast.error("Please select at least one class.");
       return;
-    }
-
-    if (!editing) {
-      for (const slot of selectedClasses) {
-        const payment = payments[Number(slot.id)] || {};
-
-        const totalRaw = String(payment.total_amount ?? "").trim();
-
-        const paidRaw = String(payment.paid_amount ?? "").trim();
-
-        const label = classLabel(slot, subjects);
-
-        if (!totalRaw) {
-          toast.error(`Please enter the total fee for ${label}.`);
-          return;
-        }
-
-        const total = Number(totalRaw);
-
-        const paid = paidRaw === "" ? 0 : Number(paidRaw);
-
-        if (!Number.isFinite(total) || total <= 0) {
-          toast.error(`Invalid total fee for ${label}.`);
-          return;
-        }
-
-        if (!Number.isFinite(paid) || paid < 0) {
-          toast.error(`Invalid amount paid for ${label}.`);
-          return;
-        }
-
-        if (paid > total) {
-          toast.error(
-            `Amount paid cannot be greater than the total fee for ${label}.`,
-          );
-          return;
-        }
-
-        if (paid > 0 && !payment.payment_date) {
-          toast.error(`Please select a payment date for ${label}.`);
-          return;
-        }
-
-        if (total % 10 !== 0 || (paid > 0 && paid % 10 !== 0)) {
-          toast.error(`Fee amounts must be multiples of 10 for ${label}.`);
-          return;
-        }
-      }
     }
 
     setPasswordConfirmOpen(true);
@@ -1094,25 +1623,14 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
     try {
       const studentPayload = {
         full_name: form.full_name.trim(),
-
         guardian_name: form.father_name.trim(),
-
         phone: form.phone?.trim() || null,
-
         dob: form.dob || null,
-
         gender: form.gender || null,
-
         admission_date: form.admission_date || today(),
-
         guardian_phone: form.guardian_phone?.trim() || null,
-
         address: form.address?.trim() || null,
       };
-
-      /* ========================================================
-         EDIT
-      ======================================================== */
 
       if (editing) {
         await api.put(`/students/${student.id}`, studentPayload);
@@ -1125,10 +1643,6 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
 
         return;
       }
-
-      /* ========================================================
-         CREATE STUDENT
-      ======================================================== */
 
       const studentResponse = await api.post("/students", studentPayload);
 
@@ -1143,134 +1657,10 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
         );
       }
 
-      /* ========================================================
-         CREATE ENROLLMENTS + REMEMBER ENROLLMENT IDS
-      ======================================================== */
-
-      const enrollmentByClassId = new Map();
-
       for (const classId of selectedClassIds) {
-        const enrollmentResponse = await api.post(
-          `/students/${studentId}/classes`,
-          {
-            class_slot_id: Number(classId),
-          },
-        );
-
-        const enrollment =
-          enrollmentResponse.data?.enrollment || enrollmentResponse.data;
-
-        const enrollmentId = Number(
-          enrollment?.id || enrollment?.enrollment_id,
-        );
-
-        if (!enrollmentId) {
-          throw new Error(
-            `Enrollment for class ${classId} was created but no enrollment ID was returned.`,
-          );
-        }
-
-        enrollmentByClassId.set(Number(classId), enrollmentId);
-      }
-
-      /* ========================================================
-         CREATE PERIOD-BASED FEES
-      ======================================================== */
-
-      for (const slot of selectedClasses) {
-        const classSlotId = Number(slot.id);
-
-        const enrollmentId = enrollmentByClassId.get(classSlotId);
-
-        if (!enrollmentId) {
-          throw new Error(
-            `Enrollment ID was not found for ${classLabel(slot, subjects)}.`,
-          );
-        }
-
-        const payment = payments[classSlotId] || {};
-
-        const monthlyAmount = Number(payment.total_amount);
-
-        const paidAmount =
-          payment.paid_amount === "" ||
-          payment.paid_amount === undefined ||
-          payment.paid_amount === null
-            ? 0
-            : Number(payment.paid_amount);
-
-        /*
-         * The visible payment date is Gregorian because
-         * this is an HTML date input.
-         *
-         * The current fees API requires Solar Hijri,
-         * so the backend conversion is handled by
-         * /students/create-complete-compatible logic
-         * through this request.
-         *
-         * We send the Gregorian date in the additional
-         * field and the backend fees route receives the
-         * Solar value generated below.
-         */
-
-        const paymentDate = payment.payment_date || today();
-
-        const solarResponse = await api.post("/fees/solar-date", {
-          gregorian_date: paymentDate,
+        await api.post(`/students/${studentId}/classes`, {
+          class_slot_id: Number(classId),
         });
-
-        const solarDate = solarResponse.data?.solar_date;
-
-        if (!solarDate) {
-          throw new Error(
-            `Could not convert payment date for ${classLabel(slot, subjects)}.`,
-          );
-        }
-
-        const [solarYear, solarMonth, solarDay] = String(solarDate)
-          .split("/")
-          .map(Number);
-
-        const monthDays =
-          solarMonth >= 1 && solarMonth <= 6
-            ? 31
-            : solarMonth >= 7 && solarMonth <= 11
-              ? 30
-              : solarDay;
-
-        const feePayload = {
-          student_id: studentId,
-
-          enrollment_id: enrollmentId,
-
-          from_solar_date: `${solarYear}/${String(solarMonth).padStart(
-            2,
-            "0",
-          )}/01`,
-
-          to_solar_date: `${solarYear}/${String(solarMonth).padStart(
-            2,
-            "0",
-          )}/${String(monthDays).padStart(2, "0")}`,
-
-          monthly_amounts: [
-            {
-              solar_year: solarYear,
-              solar_month: solarMonth,
-              monthly_amount: monthlyAmount,
-            },
-          ],
-
-          initial_paid_amount: paidAmount,
-
-          initial_payment_solar_date: solarDate,
-
-          initial_payment_comment: payment.comment?.trim() || null,
-
-          description: "Student enrollment",
-        };
-
-        await api.post("/fees", feePayload);
       }
 
       toast.success("Student saved successfully.");
@@ -1297,18 +1687,18 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
       title={editing ? "Edit Student" : "Add New Student"}
       subtitle={
         editing
-          ? "Update student information"
-          : "Enter student information and enrollment details"
+          ? "Update the student's record information"
+          : "Create a student record and assign class time slots"
       }
       onClose={saving ? undefined : onClose}
       wide
     >
       <form onSubmit={handleSave} className="flex flex-col min-h-0 flex-1">
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-5">
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1 space-y-4 sm:space-y-5">
           <Section
             icon={UserRound}
             title="Student Information"
-            subtitle="Basic student information"
+            subtitle="Personal and contact information"
           >
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Field
@@ -1352,9 +1742,12 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
                 ]}
               />
 
-              <Field
+              {/* ======================================================
+                  ADMISSION DATE — SOLAR HIJRI
+              ====================================================== */}
+
+              <SolarDateField
                 label="Admission Date"
-                type="date"
                 value={form.admission_date}
                 onChange={(value) => updateField("admission_date", value)}
               />
@@ -1384,19 +1777,19 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
             </div>
           </Section>
 
-          {/* ====================================================
-              CLASS ENROLLMENT
-          ==================================================== */}
-
           {!editing && (
             <Section
               icon={BookOpen}
               title="Class Enrollment"
-              subtitle="Select the student's subjects and class time slots"
+              subtitle="Select subjects and available class time slots"
               right={
-                <span className="text-[9px] text-[#f2bd19]">
-                  {selectedClassIds.size} selected
-                </span>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#f2bd19]" />
+
+                  <span className="text-[9px] font-medium text-[#f2bd19]">
+                    {selectedClassIds.size} selected
+                  </span>
+                </div>
               }
             >
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1437,16 +1830,20 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
 
               <div className="mt-4 space-y-2">
                 {!selectedSubject ? (
-                  <div className="py-8 text-center rounded-lg border border-white/[0.06] bg-[#0b0d10]">
-                    <BookOpen className="w-5 h-5 mx-auto text-slate-700 mb-2" />
+                  <div className="py-10 text-center rounded-lg border border-dashed border-white/[0.07] bg-[#0b0d10]">
+                    <div className="w-9 h-9 mx-auto rounded-lg bg-white/[0.025] border border-white/[0.05] grid place-items-center mb-2">
+                      <BookOpen className="w-4 h-4 text-slate-700" />
+                    </div>
 
                     <p className="text-xs text-slate-600">
                       Select a subject first.
                     </p>
                   </div>
                 ) : availableClasses.length === 0 ? (
-                  <div className="py-8 text-center rounded-lg border border-white/[0.06] bg-[#0b0d10]">
-                    <Clock3 className="w-5 h-5 mx-auto text-slate-700 mb-2" />
+                  <div className="py-10 text-center rounded-lg border border-dashed border-white/[0.07] bg-[#0b0d10]">
+                    <div className="w-9 h-9 mx-auto rounded-lg bg-white/[0.025] border border-white/[0.05] grid place-items-center mb-2">
+                      <Clock3 className="w-4 h-4 text-slate-700" />
+                    </div>
 
                     <p className="text-xs text-slate-600">
                       No class time slots available.
@@ -1463,16 +1860,16 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
                         onClick={() => toggleClass(slot.id)}
                         className={`w-full text-left p-3 rounded-lg border transition ${
                           selected
-                            ? "border-[#f2bd19]/40 bg-[#f2bd19]/[0.06]"
-                            : "border-white/[0.06] bg-[#0b0d10] hover:border-[#f2bd19]/20"
+                            ? "border-[#f2bd19]/40 bg-[#f2bd19]/[0.06] shadow-[0_0_24px_rgba(242,189,25,0.035)]"
+                            : "border-white/[0.06] bg-[#0b0d10] hover:border-[#f2bd19]/20 hover:bg-[#f2bd19]/[0.025]"
                         }`}
                       >
                         <div className="flex items-center gap-3">
                           <div
-                            className={`w-8 h-8 rounded-lg grid place-items-center border ${
+                            className={`w-8 h-8 rounded-lg grid place-items-center border shrink-0 ${
                               selected
                                 ? "border-[#f2bd19]/30 bg-[#f2bd19]/10"
-                                : "border-white/[0.06]"
+                                : "border-white/[0.06] bg-white/[0.015]"
                             }`}
                           >
                             {selected ? (
@@ -1483,7 +1880,7 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
                           </div>
 
                           <div className="flex-1 min-w-0">
-                            <p className="text-[11px] font-semibold text-slate-300">
+                            <p className="text-[11px] font-semibold text-slate-300 truncate">
                               {classLabel(slot, subjects)}
                             </p>
 
@@ -1498,6 +1895,12 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
                               </span>
                             </div>
                           </div>
+
+                          {selected && (
+                            <span className="hidden sm:inline-flex text-[8px] uppercase tracking-[0.12em] text-[#f2bd19]/70">
+                              Selected
+                            </span>
+                          )}
                         </div>
                       </button>
                     );
@@ -1507,9 +1910,15 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
 
               {selectedClasses.length > 0 && (
                 <div className="mt-4 p-3 rounded-lg border border-[#f2bd19]/10 bg-[#f2bd19]/[0.025]">
-                  <p className="text-[9px] uppercase tracking-[0.12em] text-slate-600 mb-2">
-                    Selected Classes
-                  </p>
+                  <div className="flex items-center justify-between gap-3 mb-2">
+                    <p className="text-[9px] uppercase tracking-[0.12em] text-slate-600">
+                      Selected Classes
+                    </p>
+
+                    <span className="text-[9px] text-[#f2bd19]/70">
+                      {selectedClasses.length}
+                    </span>
+                  </div>
 
                   <div className="space-y-1.5">
                     {selectedClasses.map((slot) => (
@@ -1532,7 +1941,7 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
                         <button
                           type="button"
                           onClick={() => toggleClass(slot.id)}
-                          className="w-6 h-6 shrink-0 rounded-md grid place-items-center text-slate-700 hover:text-red-400 hover:bg-red-500/10"
+                          className="w-7 h-7 shrink-0 rounded-md grid place-items-center text-slate-700 hover:text-red-400 hover:bg-red-500/10 transition"
                         >
                           <X className="w-3 h-3" />
                         </button>
@@ -1543,134 +1952,14 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
               )}
             </Section>
           )}
-
-          {/* ====================================================
-              PAYMENTS
-          ==================================================== */}
-
-          {!editing && (
-            <Section
-              icon={CreditCard}
-              title="Subject Payments"
-              subtitle="Enter the fee for each selected class"
-            >
-              {selectedClasses.length === 0 ? (
-                <div className="py-8 text-center rounded-lg border border-white/[0.06] bg-[#0b0d10]">
-                  <Wallet className="w-5 h-5 mx-auto text-slate-700 mb-2" />
-
-                  <p className="text-xs text-slate-600">
-                    Select class time slots first.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {selectedClasses.map((slot) => {
-                    const classSlotId = Number(slot.id);
-
-                    const payment = payments[classSlotId] || {};
-
-                    const total = Number(payment.total_amount || 0);
-
-                    const paid = Number(payment.paid_amount || 0);
-
-                    const remaining = Math.max(0, total - paid);
-
-                    return (
-                      <div
-                        key={classSlotId}
-                        className="p-4 rounded-xl border border-white/[0.06] bg-[#0b0d10]"
-                      >
-                        <div className="flex items-center gap-2 mb-4">
-                          <div className="w-8 h-8 rounded-lg bg-[#f2bd19]/10 border border-[#f2bd19]/15 grid place-items-center">
-                            <BookOpen className="w-4 h-4 text-[#f2bd19]" />
-                          </div>
-
-                          <div>
-                            <p className="text-[11px] font-semibold text-slate-300">
-                              {classLabel(slot, subjects)}
-                            </p>
-
-                            <p className="text-[8px] text-slate-700">
-                              {getTeacherName(slot)} •{" "}
-                              {formatTime(slot.start_time)}-
-                              {formatTime(slot.end_time)}
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                          <Field
-                            label="Total Fee (AFN)"
-                            required
-                            type="number"
-                            min="0"
-                            step="10"
-                            value={payment.total_amount || ""}
-                            onChange={(value) =>
-                              updatePayment(classSlotId, "total_amount", value)
-                            }
-                            placeholder="Monthly fee"
-                          />
-
-                          <Field
-                            label="Amount Paid (AFN)"
-                            type="number"
-                            min="0"
-                            step="10"
-                            value={payment.paid_amount || ""}
-                            onChange={(value) =>
-                              updatePayment(classSlotId, "paid_amount", value)
-                            }
-                            placeholder="0"
-                          />
-
-                          <Field
-                            label="Payment Date"
-                            type="date"
-                            value={payment.payment_date || ""}
-                            onChange={(value) =>
-                              updatePayment(classSlotId, "payment_date", value)
-                            }
-                          />
-                        </div>
-
-                        <div className="mt-3">
-                          <Field
-                            label="Comment"
-                            value={payment.comment || ""}
-                            onChange={(value) =>
-                              updatePayment(classSlotId, "comment", value)
-                            }
-                            placeholder="Optional payment comment"
-                          />
-                        </div>
-
-                        <div className="mt-3 px-3 py-2 rounded-lg bg-[#121519] border border-white/[0.05] flex items-center justify-between">
-                          <span className="text-[9px] uppercase tracking-wider text-slate-700">
-                            Remaining
-                          </span>
-
-                          <span className="text-sm font-semibold text-slate-300">
-                            {money(remaining)} AFN
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </Section>
-          )}
         </div>
-
-        {/* SAVE */}
 
         <div className="shrink-0 mt-4 pt-4 border-t border-white/[0.08] bg-[#121519] flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
             disabled={saving}
-            className="h-11 px-5 rounded-lg border border-white/10 bg-[#0d1013] text-sm font-medium text-slate-400 hover:text-white hover:bg-white/[0.04] transition disabled:opacity-40"
+            className="h-10 sm:h-11 px-5 rounded-lg border border-white/10 bg-[#0d1013] text-sm font-medium text-slate-400 hover:text-white hover:bg-white/[0.04] transition disabled:opacity-40"
           >
             Cancel
           </button>
@@ -1678,7 +1967,7 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
           <button
             type="submit"
             disabled={saving}
-            className="h-11 px-6 rounded-lg bg-[#f2bd19] text-[#0b0d10] text-sm font-bold hover:bg-[#ffd34d] transition disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-[#f2bd19]/10"
+            className="h-10 sm:h-11 px-6 rounded-lg bg-[#f2bd19] text-[#0b0d10] text-sm font-bold hover:bg-[#ffd34d] transition disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-[#f2bd19]/10"
           >
             {saving ? (
               <>
@@ -1730,15 +2019,12 @@ function EnrollmentModal({
   onSaved,
 }) {
   const [loading, setLoading] = useState(true);
-
   const [saving, setSaving] = useState(false);
 
   const [selectedSubject, setSelectedSubject] = useState("");
-
   const [selectedSection, setSelectedSection] = useState("");
 
   const [sections, setSections] = useState([]);
-
   const [selectedIds, setSelectedIds] = useState(new Set());
 
   const [passwordConfirmOpen, setPasswordConfirmOpen] = useState(false);
@@ -1907,164 +2193,183 @@ function EnrollmentModal({
     >
       {loading ? (
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="py-16 flex flex-col items-center justify-center gap-3">
-            <Loader2 className="w-6 h-6 text-[#f2bd19] animate-spin" />
-
-            <span className="text-xs text-slate-600">
-              Loading enrollment...
-            </span>
-          </div>
+          <LoadingState />
         </div>
       ) : (
         <div className="min-h-0 flex flex-col flex-1">
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <SelectField
-                label="Subject"
-                value={selectedSubject}
-                onChange={(value) => {
-                  setSelectedSubject(value);
-                  setSelectedSection("");
-                }}
-                options={[
-                  ["", "Select subject"],
-                  ...subjects.map((subject) => [subject.id, subject.name]),
-                ]}
-              />
+            <Section
+              icon={BookOpen}
+              title="Class Enrollment"
+              subtitle="Choose the student's subjects and class time slots"
+              right={
+                <span className="text-[9px] text-[#f2bd19]">
+                  {selectedClasses.length}{" "}
+                  {selectedClasses.length === 1 ? "class" : "classes"}
+                </span>
+              }
+            >
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <SelectField
+                  label="Subject"
+                  value={selectedSubject}
+                  onChange={(value) => {
+                    setSelectedSubject(value);
+                    setSelectedSection("");
+                  }}
+                  options={[
+                    ["", "Select subject"],
+                    ...subjects.map((subject) => [subject.id, subject.name]),
+                  ]}
+                />
 
-              <SelectField
-                label="Section / Level"
-                value={selectedSection}
-                onChange={setSelectedSection}
-                disabled={!selectedSubject}
-                options={[
-                  ["", "All sections"],
-                  ...sections.map((section) => [section.id, section.name]),
-                ]}
-              />
-            </div>
+                <SelectField
+                  label="Section / Level"
+                  value={selectedSection}
+                  onChange={setSelectedSection}
+                  disabled={!selectedSubject}
+                  options={[
+                    ["", "All sections"],
+                    ...sections.map((section) => [section.id, section.name]),
+                  ]}
+                />
+              </div>
 
-            <div className="mt-4">
-              {!selectedSubject ? (
-                <div className="rounded-lg border border-white/[0.06] bg-[#0d1013] py-10 text-center">
-                  <BookOpen className="w-5 h-5 mx-auto text-slate-700 mb-2" />
+              <div className="mt-4">
+                {!selectedSubject ? (
+                  <div className="rounded-lg border border-dashed border-white/[0.07] bg-[#0d1013] py-12 text-center">
+                    <div className="w-9 h-9 mx-auto rounded-lg bg-white/[0.025] border border-white/[0.05] grid place-items-center mb-2">
+                      <BookOpen className="w-4 h-4 text-slate-700" />
+                    </div>
 
-                  <p className="text-xs text-slate-600">
-                    Select a subject to see its sections and available classes.
-                  </p>
-                </div>
-              ) : availableClasses.length === 0 ? (
-                <div className="rounded-lg border border-white/[0.06] bg-[#0d1013] px-4 py-8 text-center">
-                  <Clock3 className="w-5 h-5 mx-auto text-slate-700 mb-2" />
+                    <p className="text-xs text-slate-600">
+                      Select a subject to see its sections and available
+                      classes.
+                    </p>
+                  </div>
+                ) : availableClasses.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-white/[0.07] bg-[#0d1013] px-4 py-10 text-center">
+                    <div className="w-9 h-9 mx-auto rounded-lg bg-white/[0.025] border border-white/[0.05] grid place-items-center mb-2">
+                      <Clock3 className="w-4 h-4 text-slate-700" />
+                    </div>
 
-                  <p className="text-xs text-slate-600">
-                    No class time slots found.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {availableClasses.map((slot) => {
-                    const selected = selectedIds.has(Number(slot.id));
+                    <p className="text-xs text-slate-600">
+                      No class time slots found.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {availableClasses.map((slot) => {
+                      const selected = selectedIds.has(Number(slot.id));
 
-                    return (
-                      <button
-                        type="button"
-                        key={slot.id}
-                        onClick={() => toggle(slot.id)}
-                        className={`w-full text-left rounded-lg border p-3 transition ${
-                          selected
-                            ? "border-[#f2bd19]/40 bg-[#f2bd19]/[0.06]"
-                            : "border-white/[0.06] bg-[#0d1013] hover:border-[#f2bd19]/20"
-                        }`}
-                      >
-                        <div className="flex items-center gap-3">
-                          <div
-                            className={`w-8 h-8 rounded-lg grid place-items-center border ${
-                              selected
-                                ? "bg-[#f2bd19]/10 border-[#f2bd19]/25"
-                                : "bg-white/[0.02] border-white/[0.06]"
-                            }`}
-                          >
-                            {selected ? (
-                              <Check className="w-4 h-4 text-[#f2bd19]" />
-                            ) : (
-                              <Clock3 className="w-4 h-4 text-slate-700" />
+                      return (
+                        <button
+                          type="button"
+                          key={slot.id}
+                          onClick={() => toggle(slot.id)}
+                          className={`w-full text-left rounded-lg border p-3 transition ${
+                            selected
+                              ? "border-[#f2bd19]/40 bg-[#f2bd19]/[0.06] shadow-[0_0_24px_rgba(242,189,25,0.035)]"
+                              : "border-white/[0.06] bg-[#0d1013] hover:border-[#f2bd19]/20 hover:bg-[#f2bd19]/[0.025]"
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <div
+                              className={`w-8 h-8 rounded-lg grid place-items-center border shrink-0 ${
+                                selected
+                                  ? "bg-[#f2bd19]/10 border-[#f2bd19]/25"
+                                  : "bg-white/[0.02] border-white/[0.06]"
+                              }`}
+                            >
+                              {selected ? (
+                                <Check className="w-4 h-4 text-[#f2bd19]" />
+                              ) : (
+                                <Clock3 className="w-4 h-4 text-slate-700" />
+                              )}
+                            </div>
+
+                            <div className="flex-1 min-w-0">
+                              <p className="text-[11px] font-semibold text-slate-300 truncate">
+                                {classLabel(slot, subjects)}
+                              </p>
+
+                              <div className="flex flex-wrap gap-3 mt-1">
+                                <span className="text-[9px] text-slate-600">
+                                  {formatTime(slot.start_time)}-
+                                  {formatTime(slot.end_time)}
+                                </span>
+
+                                <span className="text-[9px] text-slate-600">
+                                  {getTeacherName(slot)}
+                                </span>
+                              </div>
+                            </div>
+
+                            {selected && (
+                              <span className="hidden sm:inline-flex text-[8px] uppercase tracking-[0.12em] text-[#f2bd19]/70">
+                                Selected
+                              </span>
                             )}
                           </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
 
-                          <div className="flex-1 min-w-0">
-                            <p className="text-[11px] font-semibold text-slate-300">
-                              {classLabel(slot, subjects)}
-                            </p>
+              {selectedClasses.length > 0 && (
+                <div className="mt-4 rounded-lg border border-[#f2bd19]/10 bg-[#f2bd19]/[0.025] p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-[9px] uppercase tracking-[0.12em] text-slate-600">
+                      Current Selection
+                    </p>
 
-                            <div className="flex gap-3 mt-1">
-                              <span className="text-[9px] text-slate-600">
-                                {formatTime(slot.start_time)}-
-                                {formatTime(slot.end_time)}
-                              </span>
+                    <span className="text-[9px] text-[#f2bd19]">
+                      {selectedClasses.length}{" "}
+                      {selectedClasses.length === 1 ? "class" : "classes"}
+                    </span>
+                  </div>
 
-                              <span className="text-[9px] text-slate-600">
-                                {getTeacherName(slot)}
-                              </span>
-                            </div>
-                          </div>
+                  <div className="space-y-1.5">
+                    {selectedClasses.map((slot) => (
+                      <div
+                        key={slot.id}
+                        className="flex justify-between gap-3 rounded-md bg-[#0d1013] border border-white/[0.05] px-3 py-2"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-[10px] text-slate-400 truncate">
+                            {classLabel(slot, subjects)}
+                          </p>
+
+                          <p className="text-[8px] text-slate-700 mt-0.5">
+                            {getTeacherName(slot)} •{" "}
+                            {formatTime(slot.start_time)}-
+                            {formatTime(slot.end_time)}
+                          </p>
                         </div>
-                      </button>
-                    );
-                  })}
+
+                        <button
+                          type="button"
+                          onClick={() => toggle(slot.id)}
+                          className="w-7 h-7 shrink-0 rounded-md grid place-items-center text-slate-700 hover:text-red-400 hover:bg-red-500/10 transition"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
-            </div>
-
-            {selectedClasses.length > 0 && (
-              <div className="mt-4 rounded-lg border border-[#f2bd19]/10 bg-[#f2bd19]/[0.025] p-3">
-                <div className="flex justify-between mb-2">
-                  <p className="text-[9px] uppercase tracking-[0.12em] text-slate-600">
-                    Current Selection
-                  </p>
-
-                  <span className="text-[9px] text-[#f2bd19]">
-                    {selectedClasses.length} classes
-                  </span>
-                </div>
-
-                <div className="space-y-1.5">
-                  {selectedClasses.map((slot) => (
-                    <div
-                      key={slot.id}
-                      className="flex justify-between gap-3 rounded-md bg-[#0d1013] border border-white/[0.05] px-3 py-2"
-                    >
-                      <div>
-                        <p className="text-[10px] text-slate-400">
-                          {classLabel(slot, subjects)}
-                        </p>
-
-                        <p className="text-[8px] text-slate-700 mt-0.5">
-                          {getTeacherName(slot)} • {formatTime(slot.start_time)}
-                          -{formatTime(slot.end_time)}
-                        </p>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => toggle(slot.id)}
-                        className="w-6 h-6 rounded-md grid place-items-center text-slate-700 hover:text-red-400 hover:bg-red-500/10"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            </Section>
           </div>
 
-          <div className="shrink-0 flex justify-end gap-2 mt-4 pt-4 border-t border-white/[0.06] bg-[#121519]">
+          <div className="shrink-0 flex flex-col-reverse sm:flex-row sm:justify-end gap-2 mt-4 pt-4 border-t border-white/[0.06] bg-[#121519]">
             <button
               type="button"
               disabled={saving}
               onClick={onClose}
-              className="h-10 px-4 rounded-lg border border-white/10 bg-white/[0.02] text-sm text-slate-500 hover:text-white transition disabled:opacity-40"
+              className="h-10 px-4 rounded-lg border border-white/10 bg-white/[0.02] text-sm text-slate-500 hover:text-white hover:bg-white/[0.04] transition disabled:opacity-40"
             >
               Cancel
             </button>
@@ -2073,7 +2378,7 @@ function EnrollmentModal({
               type="button"
               disabled={saving}
               onClick={save}
-              className="h-10 px-5 rounded-lg bg-[#f2bd19] text-[#0b0d10] text-sm font-bold hover:bg-[#ffd34d] transition flex items-center gap-2 disabled:opacity-50"
+              className="h-10 px-5 rounded-lg bg-[#f2bd19] text-[#0b0d10] text-sm font-bold hover:bg-[#ffd34d] transition flex items-center justify-center gap-2 disabled:opacity-50"
             >
               {saving ? (
                 <>
@@ -2113,17 +2418,25 @@ function EnrollmentModal({
 
 function ModalShell({ title, subtitle, children, onClose, wide = false }) {
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-2.5 sm:p-4">
       <div
         className={`w-full ${
           wide ? "max-w-5xl" : "max-w-2xl"
-        } h-auto max-h-[95vh] rounded-2xl bg-[#121519] border border-white/10 shadow-[0_20px_80px_rgba(0,0,0,0.55)] overflow-hidden flex flex-col`}
+        } h-auto max-h-[96vh] rounded-xl sm:rounded-2xl bg-[#121519] border border-white/[0.09] shadow-[0_20px_90px_rgba(0,0,0,0.60)] overflow-hidden flex flex-col`}
       >
-        <div className="shrink-0 px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
+        <div className="shrink-0 px-4 sm:px-5 py-3.5 sm:py-4 border-b border-white/[0.06] flex items-center justify-between gap-3 bg-[#101317]">
           <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-white">{title}</h3>
+            <div className="flex items-center gap-2">
+              <div className="w-1.5 h-1.5 rounded-full bg-[#f2bd19] shrink-0" />
 
-            <p className="text-[10px] text-slate-600 mt-1">{subtitle}</p>
+              <h3 className="text-sm font-semibold text-white truncate">
+                {title}
+              </h3>
+            </div>
+
+            <p className="text-[9px] sm:text-[10px] text-slate-600 mt-1 ml-3.5 truncate">
+              {subtitle}
+            </p>
           </div>
 
           <button
@@ -2136,7 +2449,7 @@ function ModalShell({ title, subtitle, children, onClose, wide = false }) {
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 p-5 overflow-hidden flex flex-col">
+        <div className="min-h-0 flex-1 p-3.5 sm:p-5 overflow-hidden flex flex-col">
           {children}
         </div>
       </div>
@@ -2150,26 +2463,28 @@ function ModalShell({ title, subtitle, children, onClose, wide = false }) {
 
 function Section({ icon: Icon, title, subtitle, right, children }) {
   return (
-    <section className="rounded-xl border border-white/[0.06] bg-[#0d1013] p-4">
-      <div className="flex items-center justify-between gap-3 mb-4">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-[#f2bd19]/10 border border-[#f2bd19]/15 grid place-items-center">
+    <section className="rounded-xl border border-white/[0.06] bg-[#0d1013] overflow-hidden">
+      <div className="px-3.5 sm:px-4 py-3 border-b border-white/[0.05] bg-[#101317] flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-8 h-8 shrink-0 rounded-lg bg-[#f2bd19]/10 border border-[#f2bd19]/15 grid place-items-center">
             <Icon className="w-4 h-4 text-[#f2bd19]" />
           </div>
 
-          <div>
+          <div className="min-w-0">
             <h4 className="text-[11px] font-semibold text-slate-300">
               {title}
             </h4>
 
-            <p className="text-[9px] text-slate-700 mt-0.5">{subtitle}</p>
+            <p className="text-[9px] text-slate-700 mt-0.5 truncate">
+              {subtitle}
+            </p>
           </div>
         </div>
 
         {right}
       </div>
 
-      {children}
+      <div className="p-3.5 sm:p-4">{children}</div>
     </section>
   );
 }
@@ -2205,7 +2520,7 @@ function Field({
         value={value ?? ""}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full h-10 px-3 rounded-lg bg-[#0b0d10] border border-white/10 text-sm text-slate-300 outline-none focus:border-[#f2bd19]/50 placeholder:text-slate-700"
+        className="w-full h-10 px-3 rounded-lg bg-[#0b0d10] border border-white/10 text-sm text-slate-300 outline-none focus:border-[#f2bd19]/50 focus:bg-[#0c0f12] placeholder:text-slate-700 transition"
       />
     </div>
   );
@@ -2227,7 +2542,7 @@ function SelectField({ label, value, onChange, options, disabled = false }) {
           value={value ?? ""}
           onChange={(e) => onChange(e.target.value)}
           disabled={disabled}
-          className="w-full h-10 px-3 pr-8 rounded-lg bg-[#0b0d10] border border-white/10 text-sm text-slate-300 outline-none focus:border-[#f2bd19]/50 disabled:opacity-40 appearance-none"
+          className="w-full h-10 px-3 pr-8 rounded-lg bg-[#0b0d10] border border-white/10 text-sm text-slate-300 outline-none focus:border-[#f2bd19]/50 disabled:opacity-40 appearance-none transition"
         >
           {options.map(([optionValue, optionLabel]) => (
             <option key={String(optionValue)} value={optionValue}>

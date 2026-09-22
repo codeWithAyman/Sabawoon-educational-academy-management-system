@@ -73,7 +73,7 @@ export default function PasswordConfirmModal({
     setError("");
 
     try {
-      await api.post("/auth/verify-password", {
+      const response = await api.post("/auth/verify-password", {
         password: trimmedPassword,
       });
 
@@ -81,7 +81,7 @@ export default function PasswordConfirmModal({
       setShowPassword(false);
       setLoading(false);
 
-      onVerified?.();
+      onVerified?.(response.data);
     } catch (error) {
       setLoading(false);
 

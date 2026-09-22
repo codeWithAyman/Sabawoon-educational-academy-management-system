@@ -13,6 +13,7 @@ import Classes from "./pages/Classes";
 import Attendance from "./pages/Attendance";
 import Exams from "./pages/Exams";
 import Fees from "./pages/Fees";
+import Finance from "./pages/Finance";
 import Assignments from "./pages/Assignments";
 import Timetable from "./pages/Timetable";
 import Profile from "./pages/Profile";
@@ -32,9 +33,11 @@ export default function App() {
     <AuthProvider>
       <ToastProvider>
         <Routes>
+          {/* Public routes */}
           <Route path="/" element={<Login />} />
           <Route path="/welcome" element={<WelcomeScreen />} />
 
+          {/* Protected application */}
           <Route
             path="/app"
             element={
@@ -44,17 +47,23 @@ export default function App() {
             }
           >
             <Route index element={<Dashboard />} />
+
             <Route path="students" element={<Students />} />
             <Route path="users" element={<UsersPage />} />
             <Route path="classes" element={<Classes />} />
             <Route path="attendance" element={<Attendance />} />
             <Route path="reports" element={<Exams />} />
             <Route path="fees" element={<Fees />} />
+
+            {/* Admin-only Finance page */}
+            <Route path="finance" element={<Finance />} />
+
             <Route path="assignments" element={<Assignments />} />
             <Route path="timetable" element={<Timetable />} />
             <Route path="profile" element={<Profile />} />
           </Route>
 
+          {/* Unknown routes */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </ToastProvider>

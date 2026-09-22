@@ -10,14 +10,12 @@ import {
   Loader2,
   Users,
   UserRound,
-  UserCheck,
   Phone,
   Mail,
   LockKeyhole,
   ShieldCheck,
   RefreshCw,
   Check,
-  AlertCircle,
 } from "lucide-react";
 
 export default function UsersPage() {
@@ -28,7 +26,6 @@ export default function UsersPage() {
 
   const [teachers, setTeachers] = useState([]);
   const [staff, setStaff] = useState([]);
-  const [attendanceAccount, setAttendanceAccount] = useState(null);
 
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
@@ -39,20 +36,16 @@ export default function UsersPage() {
     try {
       setLoading(true);
 
-      const [teachersResponse, staffResponse, attendanceResponse] =
-        await Promise.all([
-          api.get("/users/teachers"),
-          api.get("/users/staff"),
-          api.get("/users/attendance"),
-        ]);
+      const [teachersResponse, staffResponse] = await Promise.all([
+        api.get("/users/teachers"),
+        api.get("/users/staff"),
+      ]);
 
       setTeachers(
         Array.isArray(teachersResponse.data) ? teachersResponse.data : [],
       );
 
       setStaff(Array.isArray(staffResponse.data) ? staffResponse.data : []);
-
-      setAttendanceAccount(attendanceResponse.data || null);
     } catch (error) {
       console.error("Failed to load teachers and staff:", error);
 
@@ -105,7 +98,24 @@ export default function UsersPage() {
 
     if (!confirmed) return;
 
+    const adminPassword = window.prompt(
+      "Administrator password required.\n\nEnter your current administrator password to delete this staff member:",
+    );
+
+    if (adminPassword === null) {
+      return;
+    }
+
+    if (!adminPassword.trim()) {
+      toast.error("Administrator password is required.");
+      return;
+    }
+
     try {
+      await api.post("/auth/verify-password", {
+        password: adminPassword,
+      });
+
       await api.delete(`/users/staff/${member.id}`);
 
       toast.success("Staff member deleted successfully.");
@@ -138,7 +148,7 @@ export default function UsersPage() {
               </h1>
 
               <p className="text-[10px] text-slate-500 mt-0.5">
-                Manage teachers, staff members, and the attendance account.
+                Manage teachers and staff members.
               </p>
             </div>
           </div>
@@ -171,13 +181,6 @@ export default function UsersPage() {
           onClick={() => setActiveTab("staff")}
           icon={Users}
           label="Staff"
-        />
-
-        <TabButton
-          active={activeTab === "attendance"}
-          onClick={() => setActiveTab("attendance")}
-          icon={UserCheck}
-          label="Attendance Account"
         />
       </div>
 
@@ -241,49 +244,6 @@ export default function UsersPage() {
                 canManage={canManage}
                 onEdit={(member) => setModal({ type: "staff", record: member })}
                 onDelete={deleteStaffMember}
-              />
-            )}
-          </div>
-        </section>
-      )}
-
-      {/* Attendance */}
-      {activeTab === "attendance" && (
-        <section>
-          <Toolbar
-            title="Attendance Account"
-            description="The single account used by the person responsible for attendance."
-            buttonLabel={attendanceAccount ? " Account" : "Create Account"}
-            onAdd={() =>
-              setModal({
-                type: "attendance",
-                record: attendanceAccount,
-              })
-            }
-            disabled={!canManage || Boolean(attendanceAccount)}
-          />
-
-          <div className="mt-4">
-            {loading ? (
-              <div className="rounded-xl border border-white/[0.07] bg-[#121519]">
-                <LoadingState />
-              </div>
-            ) : attendanceAccount ? (
-              <AttendanceCard
-                account={attendanceAccount}
-                canManage={canManage}
-                onEdit={() =>
-                  setModal({
-                    type: "attendance",
-                    record: attendanceAccount,
-                  })
-                }
-              />
-            ) : (
-              <EmptyState
-                icon={UserCheck}
-                title="No attendance account"
-                description="Create the single account used by the attendance officer."
               />
             )}
           </div>
@@ -517,48 +477,6 @@ function StaffTable({ staff, canManage, onEdit, onDelete }) {
 }
 
 /* =========================================================
-   ATTENDANCE CARD
-========================================================= */
-
-function AttendanceCard({ account, canManage, onEdit }) {
-  return (
-    <div className="rounded-xl border border-white/[0.07] bg-[#121519] p-5">
-      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-5">
-        <div className="flex items-start gap-4">
-          <div className="w-11 h-11 rounded-xl bg-[#f2bd19]/[0.08] border border-[#f2bd19]/[0.15] flex items-center justify-center">
-            <UserCheck className="w-[18px] h-[18px] text-[#f2bd19]" />
-          </div>
-
-          <div>
-            <div className="flex items-center gap-2">
-              <h3 className="text-[13px] font-semibold text-slate-200">
-                {account.full_name || "-"}
-              </h3>
-
-              <StatusBadge active={account.is_active} />
-            </div>
-
-            <p className="text-[9px] text-slate-600 mt-1">Attendance Account</p>
-          </div>
-        </div>
-
-        {canManage && (
-          <ActionButton icon={Pencil} label="Edit Account" onClick={onEdit} />
-        )}
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-5">
-        <InfoCard icon={Mail} label="Email" value={account.email || "-"} />
-
-        <InfoCard icon={Phone} label="Phone" value={account.phone || "-"} />
-
-        <InfoCard icon={ShieldCheck} label="Role" value="Attendance" />
-      </div>
-    </div>
-  );
-}
-
-/* =========================================================
    MODAL
 ========================================================= */
 
@@ -568,6 +486,8 @@ function UserModal({ modal, onClose, onSaved }) {
 
   const [saving, setSaving] = useState(false);
   const [adminPassword, setAdminPassword] = useState("");
+  const [verifyingAdminPassword, setVerifyingAdminPassword] = useState(false);
+  const [adminPasswordError, setAdminPasswordError] = useState("");
 
   const [form, setForm] = useState({
     full_name: modal.record?.full_name || "",
@@ -580,10 +500,15 @@ function UserModal({ modal, onClose, onSaved }) {
         : Boolean(modal.record.is_active),
   });
 
+  /*
+    Every Staff creation/edit requires administrator verification.
+
+    Teachers are completely unchanged.
+  */
+  const staffRequiresAdminPassword = type === "staff";
+
   const passwordChanging =
-    isEdit &&
-    (type === "staff" || type === "attendance") &&
-    form.password.trim().length > 0;
+    isEdit && type === "staff" && form.password.trim().length > 0;
 
   function updateField(field, value) {
     setForm((current) => ({
@@ -593,6 +518,7 @@ function UserModal({ modal, onClose, onSaved }) {
 
     if (field === "password" && !value) {
       setAdminPassword("");
+      setAdminPasswordError("");
     }
   }
 
@@ -609,26 +535,44 @@ function UserModal({ modal, onClose, onSaved }) {
       return;
     }
 
-    if (
-      !isEdit &&
-      (type === "staff" || type === "attendance") &&
-      !form.password
-    ) {
-      toastError(
-        type === "staff"
-          ? "Staff verification password/PIN is required."
-          : "Attendance account password is required.",
-      );
+    if (!isEdit && type === "staff" && !form.password) {
+      toastError("Staff verification password/PIN is required.");
       return;
     }
 
-    if (passwordChanging && !adminPassword.trim()) {
-      toastError("Enter the administrator password to change this password.");
+    if (staffRequiresAdminPassword && !adminPassword.trim()) {
+      toastError(
+        "Enter the administrator password before creating or editing staff.",
+      );
       return;
     }
 
     try {
       setSaving(true);
+      setAdminPasswordError("");
+
+      /*
+       * Verify the password belonging to the currently authenticated
+       * administrator before allowing any Staff create/edit operation.
+       */
+      if (staffRequiresAdminPassword) {
+        setVerifyingAdminPassword(true);
+
+        try {
+          await api.post("/auth/verify-password", {
+            password: adminPassword,
+          });
+        } catch (verificationError) {
+          setAdminPasswordError(
+            verificationError.response?.data?.error ||
+              "Administrator password is incorrect.",
+          );
+
+          return;
+        } finally {
+          setVerifyingAdminPassword(false);
+        }
+      }
 
       const payload = {
         full_name: form.full_name.trim(),
@@ -636,7 +580,7 @@ function UserModal({ modal, onClose, onSaved }) {
         phone: form.phone.trim(),
       };
 
-      if (type === "staff" || type === "attendance") {
+      if (type === "staff") {
         payload.is_active = form.is_active;
       }
 
@@ -644,6 +588,10 @@ function UserModal({ modal, onClose, onSaved }) {
         payload.password = form.password.trim();
       }
 
+      /*
+       * Preserve the existing backend behavior when changing a Staff
+       * password: pass the administrator password as admin_password too.
+       */
       if (passwordChanging) {
         payload.admin_password = adminPassword;
       }
@@ -663,19 +611,14 @@ function UserModal({ modal, onClose, onSaved }) {
           ? isEdit
             ? "Teacher updated successfully."
             : "Teacher added successfully."
-          : type === "staff"
-            ? isEdit
-              ? passwordChanging
-                ? "Staff member and password updated successfully."
-                : "Staff member updated successfully."
-              : "Staff member added successfully."
-            : isEdit
-              ? passwordChanging
-                ? "Attendance account and password updated successfully."
-                : "Attendance account updated successfully."
-              : "Attendance account created successfully.",
+          : isEdit
+            ? passwordChanging
+              ? "Staff member and password updated successfully."
+              : "Staff member updated successfully."
+            : "Staff member added successfully.",
       );
 
+      setAdminPassword("");
       onSaved();
     } catch (error) {
       console.error("Failed to save user record:", error);
@@ -687,6 +630,7 @@ function UserModal({ modal, onClose, onSaved }) {
       );
     } finally {
       setSaving(false);
+      setVerifyingAdminPassword(false);
     }
   }
 
@@ -708,13 +652,9 @@ function UserModal({ modal, onClose, onSaved }) {
       ? isEdit
         ? "Edit Teacher"
         : "Add Teacher"
-      : type === "staff"
-        ? isEdit
-          ? "Edit Staff Member"
-          : "Add Staff Member"
-        : isEdit
-          ? "Edit Attendance Account"
-          : "Create Attendance Account";
+      : isEdit
+        ? "Edit Staff Member"
+        : "Add Staff Member";
 
   return (
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
@@ -730,9 +670,7 @@ function UserModal({ modal, onClose, onSaved }) {
               <p className="text-[9px] text-slate-600 mt-1">
                 {type === "teacher"
                   ? "Manage the teacher's basic contact information."
-                  : type === "staff"
-                    ? "Manage staff information and verification credentials."
-                    : "Manage the single attendance login account."}
+                  : "Manage staff information and verification credentials."}
               </p>
             </div>
 
@@ -777,9 +715,9 @@ function UserModal({ modal, onClose, onSaved }) {
               />
 
               {/* Teachers NEVER get a password field */}
-              {(type === "staff" || type === "attendance") && (
+              {type === "staff" && (
                 <Field
-                  label={type === "staff" ? "Password / PIN" : "Password"}
+                  label="Password / PIN"
                   required={!isEdit}
                   icon={LockKeyhole}
                   type="password"
@@ -792,9 +730,9 @@ function UserModal({ modal, onClose, onSaved }) {
               )}
             </div>
 
-            {/* Administrator confirmation is ONLY required when
-                changing an existing Staff/Attendance password. */}
-            {passwordChanging && (
+            {/* Administrator confirmation is required for EVERY
+                Staff create/edit action. */}
+            {staffRequiresAdminPassword && (
               <div className="mt-5 rounded-xl border border-[#f2bd19]/20 bg-[#f2bd19]/[0.04] p-4">
                 <div className="flex items-start gap-3">
                   <div className="w-8 h-8 rounded-lg bg-[#f2bd19]/[0.08] border border-[#f2bd19]/[0.15] flex items-center justify-center shrink-0">
@@ -807,8 +745,9 @@ function UserModal({ modal, onClose, onSaved }) {
                     </p>
 
                     <p className="text-[9px] text-slate-500 mt-1 leading-relaxed">
-                      Changing this password requires the current administrator
-                      password.
+                      {isEdit
+                        ? "Editing this staff member requires the current administrator password."
+                        : "Creating a staff member requires the current administrator password."}
                     </p>
 
                     <div className="mt-3">
@@ -818,16 +757,25 @@ function UserModal({ modal, onClose, onSaved }) {
                         icon={LockKeyhole}
                         type="password"
                         value={adminPassword}
-                        onChange={(e) => setAdminPassword(e.target.value)}
+                        onChange={(e) => {
+                          setAdminPassword(e.target.value);
+                          setAdminPasswordError("");
+                        }}
                         placeholder="Enter administrator password"
                       />
                     </div>
+
+                    {adminPasswordError && (
+                      <div className="mt-3 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-[9px] text-red-300">
+                        {adminPasswordError}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
             )}
 
-            {(type === "staff" || type === "attendance") && (
+            {type === "staff" && (
               <label className="flex items-center gap-3 mt-5 cursor-pointer">
                 <input
                   type="checkbox"
@@ -842,9 +790,7 @@ function UserModal({ modal, onClose, onSaved }) {
                   </p>
 
                   <p className="text-[9px] text-slate-600">
-                    {type === "staff"
-                      ? "Allows this staff member to perform verification."
-                      : "Allows this account to sign in."}
+                    Allows this staff member to perform verification.
                   </p>
                 </div>
               </label>
@@ -864,13 +810,13 @@ function UserModal({ modal, onClose, onSaved }) {
 
             <button
               type="submit"
-              disabled={saving}
+              disabled={saving || verifyingAdminPassword}
               className="h-[40px] px-5 rounded-lg bg-[#f2bd19] hover:bg-[#e6b317] active:bg-[#d9a912] text-[#111] text-[11px] font-bold inline-flex items-center justify-center gap-2 transition-all shadow-[0_7px_22px_rgba(242,189,25,0.12)] disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              {saving ? (
+              {saving || verifyingAdminPassword ? (
                 <>
                   <Loader2 className="w-[14px] h-[14px] animate-spin" />
-                  Saving...
+                  {verifyingAdminPassword ? "Verifying..." : "Saving..."}
                 </>
               ) : isEdit ? (
                 <>

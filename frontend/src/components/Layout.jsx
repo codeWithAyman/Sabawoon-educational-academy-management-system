@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import {
@@ -6,6 +6,7 @@ import {
   BookOpen,
   UserPlus,
   Wallet,
+  Banknote,
   CalendarCheck,
   GraduationCap,
   Award,
@@ -14,6 +15,9 @@ import {
   X,
   PanelLeft,
   CalendarDays,
+  Menu,
+  Sun,
+  Moon,
 } from "lucide-react";
 import logo from "../assets/sabawoon-logo.png";
 
@@ -41,6 +45,12 @@ const NAV = [
     label: "Payments",
     icon: Wallet,
     roles: ["admin", "staff"],
+  },
+  {
+    to: "/app/finance",
+    label: "Finance",
+    icon: Banknote,
+    roles: ["admin"],
   },
   {
     to: "/app/attendance",
@@ -95,9 +105,10 @@ function Sidebar({
   doLogout,
   collapsed,
   setCollapsed,
+  isLight,
+  setIsLight,
 }) {
   const displayName = user?.full_name || user?.name || user?.email || "User";
-
   const initial = displayName.charAt(0).toUpperCase();
 
   return (
@@ -123,7 +134,7 @@ function Sidebar({
         {/* SIDEBAR GLOW */}
         <div className="absolute top-[-180px] left-[-160px] w-[420px] h-[420px] rounded-full bg-[#f2bd19]/[0.035] blur-[110px] pointer-events-none" />
 
-        {/* COLLAPSE BUTTON */}
+        {/* DESKTOP COLLAPSE BUTTON */}
         <button
           onClick={() => setCollapsed(!collapsed)}
           className="
@@ -174,7 +185,6 @@ function Sidebar({
               ${collapsed ? "lg:justify-center" : ""}
             `}
           >
-            {/* LOGO */}
             <div className="relative shrink-0">
               <div className="absolute inset-[-5px] rounded-[15px] border border-[#f2bd19]/20" />
 
@@ -187,7 +197,6 @@ function Sidebar({
               </div>
             </div>
 
-            {/* BRAND TEXT */}
             <div
               className={`
                 min-w-0
@@ -230,27 +239,30 @@ function Sidebar({
           </div>
         </div>
 
-        {/* MOBILE CLOSE */}
+        {/* MOBILE / TABLET CLOSE BUTTON */}
         <button
           onClick={() => setOpen(false)}
           className="
             lg:hidden
             absolute
-            top-5
+            top-4
             right-4
-            w-8 h-8
-            rounded-lg
-            border border-white/[0.07]
-            bg-white/[0.025]
+            w-9
+            h-9
+            rounded-xl
+            border border-white/[0.08]
+            bg-white/[0.035]
             flex items-center justify-center
-            text-slate-500
+            text-slate-400
             hover:text-white
-            hover:bg-white/[0.06]
-            transition-all
+            hover:bg-white/[0.07]
+            hover:border-white/[0.14]
+            active:scale-95
+            transition-all duration-200
           "
-          aria-label="Close menu"
+          aria-label="Close navigation menu"
         >
-          <X className="w-[16px] h-[16px]" />
+          <X className="w-[17px] h-[17px]" />
         </button>
 
         {/* NAVIGATION */}
@@ -361,8 +373,9 @@ function Sidebar({
           </div>
         </nav>
 
-        {/* USER / EXIT */}
-        <div className="relative border-t border-white/[0.07] p-3">
+        {/* BOTTOM CONTROLS */}
+        <div className="relative border-t border-white/[0.07] p-3 space-y-2">
+          {/* USER / EXIT */}
           <div
             className={`
               rounded-xl
@@ -441,7 +454,7 @@ function Sidebar({
         </div>
       </aside>
 
-      {/* MOBILE OVERLAY */}
+      {/* MOBILE / TABLET OVERLAY */}
       {open && (
         <div
           className="
@@ -465,6 +478,24 @@ export default function Layout() {
 
   const [open, setOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+
+  const [isLight, setIsLight] = useState(() => {
+    if (typeof window === "undefined") return false;
+
+    return localStorage.getItem("sabawoon-theme") === "light";
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+
+    if (isLight) {
+      root.classList.add("light");
+      localStorage.setItem("sabawoon-theme", "light");
+    } else {
+      root.classList.remove("light");
+      localStorage.setItem("sabawoon-theme", "dark");
+    }
+  }, [isLight]);
 
   function doLogout() {
     logout();
@@ -491,7 +522,52 @@ export default function Layout() {
         doLogout={doLogout}
         collapsed={collapsed}
         setCollapsed={setCollapsed}
+        isLight={isLight}
+        setIsLight={setIsLight}
       />
+
+      {/* MOBILE / TABLET MENU BUTTON */}
+      {!open && (
+        <button
+          onClick={() => setOpen(true)}
+          className="
+            lg:hidden
+            fixed
+            z-30
+
+            top-[max(14px,env(safe-area-inset-top))]
+            left-[max(14px,env(safe-area-inset-left))]
+
+            w-10
+            h-10
+
+            sm:w-11
+            sm:h-11
+
+            rounded-xl
+
+            bg-[#121519]
+            border border-white/[0.08]
+
+            flex items-center justify-center
+
+            text-slate-400
+            hover:text-[#f2bd19]
+            hover:border-[#f2bd19]/30
+            hover:bg-[#161a1f]
+
+            active:scale-95
+
+            shadow-[0_8px_25px_rgba(0,0,0,0.35)]
+
+            transition-all duration-200
+          "
+          aria-label="Open navigation menu"
+          title="Open navigation menu"
+        >
+          <Menu className="w-[18px] h-[18px] sm:w-[19px] sm:h-[19px]" />
+        </button>
+      )}
 
       {/* MAIN APPLICATION */}
       <div className="flex-1 min-w-0 flex flex-col bg-[#0b0d10]">
@@ -499,7 +575,16 @@ export default function Layout() {
           className="
             relative
             flex-1
-            p-4 lg:p-6
+
+            p-4
+            pt-[70px]
+
+            sm:p-5
+            sm:pt-[74px]
+
+            lg:p-6
+            lg:pt-6
+
             overflow-auto
             scrollbar
           "

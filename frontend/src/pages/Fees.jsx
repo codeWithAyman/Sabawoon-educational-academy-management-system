@@ -5,6 +5,7 @@ import { useToast } from "../components/Toast";
 
 import {
   AlertCircle,
+  ArrowLeft,
   CalendarDays,
   Check,
   CheckCircle2,
@@ -12,8 +13,10 @@ import {
   Clock3,
   CreditCard,
   Loader2,
+  Pencil,
   RefreshCw,
   Search,
+  Trash2,
   UserRound,
   Wallet,
   X,
@@ -111,6 +114,57 @@ function formatSolarDate(year, month, day) {
     2,
     "0",
   )}/${String(day).padStart(2, "0")}`;
+}
+
+function formatPaymentFor(payment) {
+  if (!payment) return "—";
+
+  if (Array.isArray(payment.payment_for_months)) {
+    const months = payment.payment_for_months
+      .map((value) => String(value).trim())
+      .filter(Boolean)
+      .map((value) => {
+        const match = value.match(/^(\d{4})[/-](\d{1,2})$/);
+
+        if (!match) return value;
+
+        return `${match[1]}/${Number(match[2])}`;
+      });
+
+    if (months.length > 0) {
+      return [...new Set(months)].join(", ");
+    }
+  }
+
+  if (payment.payment_for) {
+    const value = String(payment.payment_for).trim();
+
+    if (/^\d{4}[/-]\d{1,2}$/.test(value)) {
+      const [year, month] = value.split(/[/-]/);
+
+      return `${year}/${Number(month)}`;
+    }
+
+    return value;
+  }
+
+  if (payment.payment_for_solar_year && payment.payment_for_solar_month) {
+    return `${Number(payment.payment_for_solar_year)}/${Number(
+      payment.payment_for_solar_month,
+    )}`;
+  }
+
+  if (payment.solar_year && payment.solar_month) {
+    return `${Number(payment.solar_year)}/${Number(payment.solar_month)}`;
+  }
+
+  if (payment.payment_solar_year && payment.payment_solar_month) {
+    return `${Number(payment.payment_solar_year)}/${Number(
+      payment.payment_solar_month,
+    )}`;
+  }
+
+  return "—";
 }
 
 function getTodaySolar() {
@@ -261,10 +315,91 @@ function formatBooks(books) {
   return books
     .map((book) => {
       if (typeof book === "string") return book;
+
       return book?.name || "";
     })
     .filter(Boolean)
     .join(" • ");
+}
+
+/* ============================================================
+   PAYMENT STATUS
+============================================================ */
+
+function PaymentStatusBadge({ status, loading = false }) {
+  const styles = {
+    paid: {
+      dot: "bg-emerald-400",
+      text: "text-emerald-300",
+      bg: "bg-emerald-400/[0.07]",
+      border: "border-emerald-400/15",
+      label: "Paid",
+    },
+
+    partial: {
+      dot: "bg-amber-400",
+      text: "text-amber-300",
+      bg: "bg-amber-400/[0.07]",
+      border: "border-amber-400/15",
+      label: "Partial",
+    },
+
+    due: {
+      dot: "bg-red-400",
+      text: "text-red-300",
+      bg: "bg-red-400/[0.07]",
+      border: "border-red-400/15",
+      label: "Due",
+    },
+
+    upcoming: {
+      dot: "bg-blue-400",
+      text: "text-blue-300",
+      bg: "bg-blue-400/[0.06]",
+      border: "border-blue-400/15",
+      label: "Upcoming",
+    },
+
+    not_started: {
+      dot: "bg-slate-700",
+      text: "text-slate-600",
+      bg: "bg-white/[0.01]",
+      border: "border-white/[0.04]",
+      label: "Not started",
+    },
+
+    unknown: {
+      dot: "bg-slate-600",
+      text: "text-slate-500",
+      bg: "bg-white/[0.01]",
+      border: "border-white/[0.04]",
+      label: "—",
+    },
+  };
+
+  const style = styles[status] || styles.unknown;
+
+  return (
+    <span
+      className={`
+        inline-flex items-center gap-1.5
+        rounded-full border
+        px-2 py-1
+        text-[9px] font-semibold
+        ${style.text}
+        ${style.bg}
+        ${style.border}
+      `}
+    >
+      {loading ? (
+        <Loader2 className="h-2.5 w-2.5 animate-spin" />
+      ) : (
+        <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
+      )}
+
+      {loading ? "Loading" : style.label}
+    </span>
+  );
 }
 
 /* ============================================================
@@ -309,13 +444,17 @@ function MonthStatusCard({ month, status, selected, onClick }) {
 
   const style = styles[status] || styles.upcoming;
 
+  const monthlyFee = Number(month.monthly_amount || 0);
+  const paid = Number(month.paid_amount || 0);
+  const owing = Math.max(monthlyFee - paid, 0);
+
   return (
     <button
       type="button"
       disabled={!clickable}
       onClick={() => clickable && onClick(month)}
       className={`
-        group relative min-h-[86px] w-full rounded-xl border p-3
+        group relative min-h-[118px] w-full rounded-xl border p-3
         text-left transition-all
         ${style.box}
         ${
@@ -340,14 +479,34 @@ function MonthStatusCard({ month, status, selected, onClick }) {
         <span className={`mt-1 h-2 w-2 rounded-full shrink-0 ${style.dot}`} />
       </div>
 
-      <div className="mt-3 flex items-center justify-between gap-2">
-        <span className="text-[9px] font-medium truncate">{style.label}</span>
+      <div className="mt-3 space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[8px] text-slate-600">Monthly</span>
 
-        {Number(month.paid_amount || 0) > 0 && (
-          <span className="text-[9px] opacity-70 whitespace-nowrap">
-            {formatMoney(month.paid_amount)}
+          <span className="text-[9px] font-semibold text-slate-300">
+            {monthlyFee > 0 ? formatMoney(monthlyFee) : "—"}
           </span>
-        )}
+        </div>
+
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[8px] text-slate-600">Paid</span>
+
+          <span className="text-[9px] font-semibold text-slate-300">
+            {paid > 0 ? formatMoney(paid) : "AFN 0"}
+          </span>
+        </div>
+
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[8px] text-slate-600">Owing</span>
+
+          <span
+            className={`text-[9px] font-bold ${
+              owing > 0 ? "text-red-300" : "text-emerald-300"
+            }`}
+          >
+            {monthlyFee > 0 ? formatMoney(owing) : "—"}
+          </span>
+        </div>
       </div>
     </button>
   );
@@ -383,6 +542,7 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
   const amount = Number(paymentAmount || 0);
 
   const existingPaid = Number(month.paid_amount || 0);
+
   const existingCalculated = Number(month.calculated_amount || feeAmount || 0);
 
   const existingDue = Math.max(existingCalculated - existingPaid, 0);
@@ -434,12 +594,23 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
           my-auto
         "
       >
-        {/* HEADER */}
-
-        <div className="shrink-0 flex items-start justify-between gap-3 px-4 sm:px-5 py-4 border-b border-white/[0.06]">
+        <div
+          className="
+            shrink-0 flex items-start justify-between gap-3
+            px-4 sm:px-5 py-4
+            border-b border-white/[0.06]
+          "
+        >
           <div className="min-w-0">
             <div className="flex items-center gap-2.5">
-              <div className="h-8 w-8 shrink-0 rounded-lg bg-[#f2bd19]/10 border border-[#f2bd19]/20 grid place-items-center">
+              <div
+                className="
+                  h-8 w-8 shrink-0 rounded-lg
+                  bg-[#f2bd19]/10
+                  border border-[#f2bd19]/20
+                  grid place-items-center
+                "
+              >
                 <CreditCard className="h-4 w-4 text-[#f2bd19]" />
               </div>
 
@@ -469,16 +640,26 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
           </button>
         </div>
 
-        {/* CONTENT */}
-
         <form onSubmit={submit} className="min-h-0 flex flex-col">
           <div className="flex-1 overflow-y-auto overscroll-contain">
             <div className="p-4 sm:p-5 space-y-4">
-              {/* STUDENT */}
-
-              <div className="rounded-xl border border-white/[0.06] bg-[#0d1013] p-3.5 sm:p-4">
+              <div
+                className="
+                  rounded-xl
+                  border border-white/[0.06]
+                  bg-[#0d1013]
+                  p-3.5 sm:p-4
+                "
+              >
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className="h-10 w-10 shrink-0 rounded-xl bg-white/[0.04] border border-white/[0.06] grid place-items-center">
+                  <div
+                    className="
+                      h-10 w-10 shrink-0 rounded-xl
+                      bg-white/[0.04]
+                      border border-white/[0.06]
+                      grid place-items-center
+                    "
+                  >
                     <UserRound className="h-4 w-4 text-slate-500" />
                   </div>
 
@@ -505,16 +686,21 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
 
                   <InfoBox
                     label="Time"
-                    value={`${formatTime(
-                      enrollment.start_time,
-                    )}–${formatTime(enrollment.end_time)}`}
+                    value={`${formatTime(enrollment.start_time)}–${formatTime(
+                      enrollment.end_time,
+                    )}`}
                   />
                 </div>
               </div>
 
-              {/* PAYMENT PERIOD */}
-
-              <div className="rounded-xl border border-[#f2bd19]/15 bg-[#f2bd19]/[0.04] p-3.5 sm:p-4">
+              <div
+                className="
+                  rounded-xl
+                  border border-[#f2bd19]/15
+                  bg-[#f2bd19]/[0.04]
+                  p-3.5 sm:p-4
+                "
+              >
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <p className="text-[8px] uppercase tracking-[0.15em] text-[#f2bd19]/60">
@@ -536,38 +722,22 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                     </p>
                   </div>
                 </div>
-
-                <div className="mt-3 rounded-lg border border-white/[0.05] bg-white/[0.02] px-3 py-2">
-                  <p className="text-[9px] text-slate-600">Coverage</p>
-
-                  <p className="text-[10px] text-slate-300 mt-1">
-                    {formatSolarDate(
-                      Number(month.solar_year),
-                      Number(month.solar_month),
-                      1,
-                    )}
-                    {" — "}
-                    {formatSolarDate(
-                      Number(month.solar_year),
-                      Number(month.solar_month),
-                      month.month_days ||
-                        getSolarMonthDays(
-                          Number(month.solar_year),
-                          Number(month.solar_month),
-                        ),
-                    )}
-                  </p>
-                </div>
               </div>
-
-              {/* PAYMENT DATE */}
 
               <div>
                 <label className="text-[9px] uppercase tracking-[0.14em] text-slate-600">
                   Payment Date
                 </label>
 
-                <div className="mt-1 min-h-11 rounded-lg border border-white/[0.07] bg-[#0d1013] px-3 py-2 flex items-center gap-2">
+                <div
+                  className="
+                    mt-1 min-h-11 rounded-lg
+                    border border-white/[0.07]
+                    bg-[#0d1013]
+                    px-3 py-2
+                    flex items-center gap-2
+                  "
+                >
                   <CalendarDays className="h-4 w-4 shrink-0 text-[#f2bd19]/70" />
 
                   <div className="min-w-0">
@@ -580,21 +750,35 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                     </p>
                   </div>
 
-                  <span className="ml-auto shrink-0 text-[8px] rounded-full border border-emerald-400/15 bg-emerald-400/[0.05] px-2 py-1 text-emerald-400">
+                  <span
+                    className="
+                      ml-auto shrink-0
+                      text-[8px] rounded-full
+                      border border-emerald-400/15
+                      bg-emerald-400/[0.05]
+                      px-2 py-1
+                      text-emerald-400
+                    "
+                  >
                     Today
                   </span>
                 </div>
               </div>
 
-              {/* MONTHLY FEE */}
-
               <div>
                 <label className="text-[9px] uppercase tracking-[0.14em] text-slate-600">
-                  Monthly Fee
+                  Full Monthly Fee
                 </label>
 
                 <div className="mt-1 relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-[10px] font-semibold">
+                  <span
+                    className="
+                      absolute left-3 top-1/2
+                      -translate-y-1/2
+                      text-slate-500
+                      text-[10px] font-semibold
+                    "
+                  >
                     AFN
                   </span>
 
@@ -604,7 +788,7 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                     step="10"
                     value={monthlyAmount}
                     onChange={(e) => setMonthlyAmount(e.target.value)}
-                    placeholder="Enter monthly fee"
+                    placeholder="Enter full monthly fee"
                     className="
                       h-11 w-full rounded-lg
                       border border-white/[0.07]
@@ -618,7 +802,23 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                 </div>
               </div>
 
-              {/* PAYMENT */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <BalanceBox
+                  label="Full Monthly Fee"
+                  value={formatMoney(existingCalculated || feeAmount)}
+                />
+
+                <BalanceBox
+                  label="Already Paid"
+                  value={formatMoney(existingPaid)}
+                />
+
+                <BalanceBox
+                  label="Currently Owing"
+                  value={formatMoney(existingDue)}
+                  danger={existingDue > 0}
+                />
+              </div>
 
               <div>
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1.5">
@@ -634,7 +834,12 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                           String(Number(suggestedFullPayment.toFixed(2))),
                         )
                       }
-                      className="text-left sm:text-right text-[9px] text-[#f2bd19] hover:text-[#ffd34d]"
+                      className="
+                        text-left sm:text-right
+                        text-[9px]
+                        text-[#f2bd19]
+                        hover:text-[#ffd34d]
+                      "
                     >
                       Pay remaining {formatMoney(suggestedFullPayment)}
                     </button>
@@ -642,7 +847,14 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                 </div>
 
                 <div className="mt-1 relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-[10px] font-semibold">
+                  <span
+                    className="
+                      absolute left-3 top-1/2
+                      -translate-y-1/2
+                      text-slate-500
+                      text-[10px] font-semibold
+                    "
+                  >
                     AFN
                   </span>
 
@@ -670,12 +882,10 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                   <p className="text-[9px] text-amber-400 mt-2 leading-relaxed">
                     Already paid: {formatMoney(existingPaid)}
                     {" • "}
-                    Remaining: {formatMoney(existingDue)}
+                    Owing: {formatMoney(existingDue)}
                   </p>
                 )}
               </div>
-
-              {/* COMMENT */}
 
               <div>
                 <label className="text-[9px] uppercase tracking-[0.14em] text-slate-600">
@@ -706,10 +916,15 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                 </p>
               </div>
 
-              {/* PARTIAL */}
-
               {isPartial && (
-                <div className="rounded-lg border border-amber-400/15 bg-amber-400/[0.04] p-3 flex gap-2">
+                <div
+                  className="
+                    rounded-lg
+                    border border-amber-400/15
+                    bg-amber-400/[0.04]
+                    p-3 flex gap-2
+                  "
+                >
                   <AlertCircle className="h-4 w-4 text-amber-400 shrink-0" />
 
                   <div className="min-w-0">
@@ -718,19 +933,24 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                     </p>
 
                     <p className="text-[9px] text-slate-600 mt-0.5 leading-relaxed">
-                      This month will remain marked Partial until its remaining
-                      balance is paid.
+                      This month will remain Partial until the remaining balance
+                      is paid.
                     </p>
                   </div>
                 </div>
               )}
 
-              {/* FULL PAYMENT */}
-
               {amount > 0 &&
                 suggestedFullPayment > 0 &&
                 amount === suggestedFullPayment && (
-                  <div className="rounded-lg border border-emerald-400/15 bg-emerald-400/[0.04] p-3 flex gap-2">
+                  <div
+                    className="
+                      rounded-lg
+                      border border-emerald-400/15
+                      bg-emerald-400/[0.04]
+                      p-3 flex gap-2
+                    "
+                  >
                     <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
 
                     <div>
@@ -748,9 +968,16 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
             </div>
           </div>
 
-          {/* FOOTER */}
-
-          <div className="shrink-0 px-4 sm:px-5 py-3 sm:py-4 border-t border-white/[0.06] flex flex-col-reverse sm:flex-row sm:justify-end gap-2 bg-[#121519]">
+          <div
+            className="
+              shrink-0
+              px-4 sm:px-5 py-3 sm:py-4
+              border-t border-white/[0.06]
+              flex flex-col-reverse sm:flex-row
+              sm:justify-end gap-2
+              bg-[#121519]
+            "
+          >
             <button
               type="button"
               onClick={onClose}
@@ -802,12 +1029,327 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
 }
 
 /* ============================================================
+   EDIT PAYMENT MODAL
+============================================================ */
+
+function EditPaymentModal({ open, payment, onClose, onSubmit, saving }) {
+  const [amount, setAmount] = useState("");
+  const [comment, setComment] = useState("");
+
+  useEffect(() => {
+    if (!open || !payment) return;
+
+    setAmount(payment.amount ? String(Number(payment.amount)) : "");
+    setComment(payment.comment || "");
+  }, [open, payment]);
+
+  if (!open || !payment) {
+    return null;
+  }
+
+  const numericAmount = Number(amount || 0);
+  const valid = numericAmount > 0;
+
+  function submit(e) {
+    e.preventDefault();
+
+    if (!valid || saving) return;
+
+    onSubmit({
+      paymentId: payment.payment_id,
+      amount: numericAmount,
+      comment: comment.trim(),
+    });
+  }
+
+  return (
+    <div
+      className="
+        fixed inset-0 z-[8500]
+        bg-black/75 backdrop-blur-sm
+        flex items-start sm:items-center justify-center
+        p-2 sm:p-4
+        overflow-y-auto
+      "
+    >
+      <div
+        className="
+          w-full max-w-md
+          rounded-2xl
+          border border-white/10
+          bg-[#121519]
+          shadow-[0_25px_100px_rgba(0,0,0,0.65)]
+          overflow-hidden
+          my-auto
+        "
+      >
+        <div
+          className="
+            px-4 sm:px-5 py-4
+            border-b border-white/[0.06]
+            flex items-start justify-between gap-3
+          "
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div
+              className="
+                h-8 w-8 shrink-0 rounded-lg
+                bg-[#f2bd19]/10
+                border border-[#f2bd19]/20
+                grid place-items-center
+              "
+            >
+              <Pencil className="h-4 w-4 text-[#f2bd19]" />
+            </div>
+
+            <div className="min-w-0">
+              <h3 className="text-sm font-bold text-white">Edit Transaction</h3>
+
+              <p className="text-[10px] text-slate-600 mt-0.5 truncate">
+                {payment.receipt_number || "Payment"}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            className="
+              h-8 w-8 shrink-0 rounded-lg
+              grid place-items-center
+              text-slate-600
+              hover:text-white hover:bg-white/[0.05]
+              transition
+            "
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <form onSubmit={submit}>
+          <div className="p-4 sm:p-5 space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <TransactionInfo
+                label="Receipt"
+                value={payment.receipt_number || "—"}
+              />
+
+              <TransactionInfo
+                label="Payment Date"
+                value={
+                  payment.payment_solar_date || payment.payment_date || "—"
+                }
+              />
+
+              <TransactionInfo
+                label="Payment For"
+                value={formatPaymentFor(payment)}
+              />
+
+              <TransactionInfo
+                label="Recorded By"
+                value={
+                  payment.recorded_by_name
+                    ? `${payment.recorded_by_name}${
+                        payment.recorded_by_role
+                          ? ` (${payment.recorded_by_role})`
+                          : ""
+                      }`
+                    : "—"
+                }
+              />
+
+              <TransactionInfo
+                label="Current Amount"
+                value={formatMoney(payment.amount)}
+              />
+            </div>
+
+            <div>
+              <label className="text-[9px] uppercase tracking-[0.14em] text-slate-600">
+                Payment Amount
+              </label>
+
+              <div className="mt-1 relative">
+                <span
+                  className="
+                    absolute left-3 top-1/2
+                    -translate-y-1/2
+                    text-slate-500
+                    text-[10px] font-semibold
+                  "
+                >
+                  AFN
+                </span>
+
+                <input
+                  type="number"
+                  min="0"
+                  step="10"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  className="
+                    h-11 w-full rounded-lg
+                    border border-white/[0.07]
+                    bg-[#0d1013]
+                    pl-12 pr-3
+                    text-sm text-white
+                    outline-none
+                    focus:border-[#f2bd19]/50
+                  "
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="text-[9px] uppercase tracking-[0.14em] text-slate-600">
+                Comment
+              </label>
+
+              <textarea
+                value={comment}
+                onChange={(e) => setComment(e.target.value)}
+                placeholder="Optional payment comment"
+                rows={3}
+                maxLength={1000}
+                className="
+                  mt-1 w-full rounded-lg
+                  border border-white/[0.07]
+                  bg-[#0d1013]
+                  px-3 py-2.5
+                  text-[11px] text-white
+                  placeholder:text-slate-700
+                  outline-none
+                  resize-none
+                  focus:border-[#f2bd19]/50
+                "
+              />
+            </div>
+
+            <div
+              className="
+                rounded-lg
+                border border-amber-400/15
+                bg-amber-400/[0.035]
+                p-3
+              "
+            >
+              <p className="text-[9px] text-amber-300 font-semibold">
+                Sensitive transaction
+              </p>
+
+              <p className="text-[9px] text-slate-600 mt-1 leading-relaxed">
+                Editing this payment will be recorded in the transaction audit
+                history.
+              </p>
+            </div>
+          </div>
+
+          <div
+            className="
+              px-4 sm:px-5 py-3 sm:py-4
+              border-t border-white/[0.06]
+              flex flex-col-reverse sm:flex-row
+              sm:justify-end gap-2
+            "
+          >
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={saving}
+              className="
+                h-10 px-4 rounded-lg
+                border border-white/10
+                bg-white/[0.02]
+                text-xs text-slate-500
+                hover:text-white
+                transition
+              "
+            >
+              Cancel
+            </button>
+
+            <button
+              type="submit"
+              disabled={!valid || saving}
+              className="
+                h-10 px-5 rounded-lg
+                bg-[#f2bd19]
+                text-[#0b0d10]
+                text-xs font-bold
+                flex items-center justify-center gap-2
+                hover:bg-[#ffd34d]
+                disabled:opacity-40
+                disabled:cursor-not-allowed
+                transition
+              "
+            >
+              {saving ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                <>
+                  <Check className="h-4 w-4" />
+                  Save Changes
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   BALANCE BOX
+============================================================ */
+
+function BalanceBox({ label, value, danger = false }) {
+  return (
+    <div
+      className="
+        rounded-lg
+        border border-white/[0.05]
+        bg-[#0d1013]
+        p-3
+      "
+    >
+      <p className="text-[8px] uppercase tracking-wider text-slate-700">
+        {label}
+      </p>
+
+      <p
+        className={`
+          text-[11px]
+          font-bold
+          mt-1
+          ${danger ? "text-red-300" : "text-slate-300"}
+        `}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+/* ============================================================
    INFO BOX
 ============================================================ */
 
 function InfoBox({ label, value }) {
   return (
-    <div className="min-w-0 rounded-lg border border-white/[0.05] bg-white/[0.02] p-2.5">
+    <div
+      className="
+        min-w-0 rounded-lg
+        border border-white/[0.05]
+        bg-white/[0.02]
+        p-2.5
+      "
+    >
       <p className="text-[8px] uppercase tracking-wider text-slate-700">
         {label}
       </p>
@@ -815,6 +1357,163 @@ function InfoBox({ label, value }) {
       <p className="text-[10px] text-slate-300 mt-1 break-words">
         {value || "—"}
       </p>
+    </div>
+  );
+}
+
+/* ============================================================
+   TRANSACTION INFO
+============================================================ */
+
+function TransactionInfo({ label, value, danger = false }) {
+  return (
+    <div
+      className="
+        rounded-lg
+        border border-white/[0.04]
+        bg-white/[0.015]
+        p-2.5
+      "
+    >
+      <p className="text-[8px] uppercase tracking-wider text-slate-700">
+        {label}
+      </p>
+
+      <p
+        className={`
+          text-[10px] mt-1
+          ${danger ? "text-red-300 font-semibold" : "text-slate-400"}
+        `}
+      >
+        {value || "—"}
+      </p>
+    </div>
+  );
+}
+
+/* ============================================================
+   STUDENT PAYMENT STATUS
+============================================================ */
+
+function StudentPaymentStatus({
+  status,
+  loading,
+  monthLabel,
+  monthlyFee,
+  paid,
+  owing,
+}) {
+  return (
+    <div className="min-w-[220px]">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[8px] uppercase tracking-[0.13em] text-slate-700">
+          {monthLabel}
+        </span>
+
+        <PaymentStatusBadge status={status} loading={loading} />
+      </div>
+
+      <div className="mt-2 grid grid-cols-3 gap-2">
+        <div>
+          <p className="text-[7px] uppercase tracking-wider text-slate-700">
+            Full
+          </p>
+
+          <p className="text-[9px] font-semibold text-slate-400 mt-0.5">
+            {monthlyFee > 0 ? formatMoney(monthlyFee) : "—"}
+          </p>
+        </div>
+
+        <div>
+          <p className="text-[7px] uppercase tracking-wider text-slate-700">
+            Paid
+          </p>
+
+          <p className="text-[9px] font-semibold text-slate-400 mt-0.5">
+            {formatMoney(paid || 0)}
+          </p>
+        </div>
+
+        <div>
+          <p className="text-[7px] uppercase tracking-wider text-slate-700">
+            Owing
+          </p>
+
+          <p
+            className={`
+              text-[9px]
+              font-semibold
+              mt-0.5
+              ${Number(owing || 0) > 0 ? "text-red-300" : "text-emerald-300"}
+            `}
+          >
+            {monthlyFee > 0 ? formatMoney(owing || 0) : "—"}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   FILTER SELECT
+============================================================ */
+
+function FilterSelect({ label, value, onChange, options }) {
+  return (
+    <div>
+      <label className="text-[9px] uppercase tracking-[0.14em] text-slate-700">
+        {label}
+      </label>
+
+      <div className="relative mt-1">
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="
+            h-10 w-full appearance-none
+            rounded-lg
+            border border-white/[0.07]
+            bg-[#0d1013]
+            px-3 pr-8
+            text-[11px] text-slate-300
+            outline-none
+            focus:border-[#f2bd19]/50
+          "
+        >
+          <option value="all">All {label.toLowerCase()}s</option>
+
+          {options.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+
+        <ChevronDown
+          className="
+            pointer-events-none
+            absolute right-3 top-1/2
+            -translate-y-1/2
+            h-3.5 w-3.5
+            text-slate-700
+          "
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   LEGEND
+============================================================ */
+
+function LegendItem({ dot, label }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+
+      <span className="text-[9px] text-slate-600">{label}</span>
     </div>
   );
 }
@@ -830,25 +1529,62 @@ export default function Fees() {
   const [enrollments, setEnrollments] = useState([]);
 
   const [selectedClassId, setSelectedClassId] = useState("");
+
   const [selectedEnrollment, setSelectedEnrollment] = useState(null);
 
   const [history, setHistory] = useState(null);
 
+  const [studentSearch, setStudentSearch] = useState("");
+
+  const [studentPaymentStatuses, setStudentPaymentStatuses] = useState({});
+
+  const [loadingStudentStatuses, setLoadingStudentStatuses] = useState(false);
+
+  const [studentStatusRefreshKey, setStudentStatusRefreshKey] = useState(0);
+
   const [loading, setLoading] = useState(true);
   const [loadingHistory, setLoadingHistory] = useState(false);
+
   const [savingPayment, setSavingPayment] = useState(false);
+
   const [refreshing, setRefreshing] = useState(false);
 
   const [subjectFilter, setSubjectFilter] = useState("all");
+
   const [teacherFilter, setTeacherFilter] = useState("all");
+
   const [timeFilter, setTimeFilter] = useState("all");
+
   const [search, setSearch] = useState("");
 
+  /* ==========================================================
+     CLASS PAGINATION
+  ========================================================== */
+
+  const classesPerPage = 10;
+
+  const [classPage, setClassPage] = useState(1);
+
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
+
   const [paymentMonth, setPaymentMonth] = useState(null);
 
   const [passwordConfirmOpen, setPasswordConfirmOpen] = useState(false);
+
   const [pendingPayment, setPendingPayment] = useState(null);
+
+  const [editingPayment, setEditingPayment] = useState(null);
+
+  const [editPaymentModalOpen, setEditPaymentModalOpen] = useState(false);
+
+  const [pendingEdit, setPendingEdit] = useState(null);
+
+  const [deletePaymentTarget, setDeletePaymentTarget] = useState(null);
+
+  const [deletePasswordConfirmOpen, setDeletePasswordConfirmOpen] =
+    useState(false);
+
+  const [savingTransaction, setSavingTransaction] = useState(false);
 
   /* ==========================================================
      LOAD
@@ -982,13 +1718,48 @@ export default function Fees() {
   }, [activeClasses, subjectFilter, teacherFilter, timeFilter, search]);
 
   /* ==========================================================
-     SELECT CLASS
+     CLASS PAGINATION
   ========================================================== */
 
-  function selectClass(classItem) {
-    setSelectedClassId(String(classItem.id));
+  const totalClassPages = Math.max(
+    1,
+    Math.ceil(filteredClasses.length / classesPerPage),
+  );
+
+  const paginatedClasses = useMemo(() => {
+    const start = (classPage - 1) * classesPerPage;
+
+    return filteredClasses.slice(start, start + classesPerPage);
+  }, [filteredClasses, classPage]);
+
+  useEffect(() => {
+    setClassPage(1);
+  }, [subjectFilter, teacherFilter, timeFilter, search]);
+
+  useEffect(() => {
+    if (classPage > totalClassPages) {
+      setClassPage(totalClassPages);
+    }
+  }, [classPage, totalClassPages]);
+
+  /* ==========================================================
+     CLASS NAVIGATION
+  ========================================================== */
+
+  function openClass(classId) {
+    const key = String(classId);
+
+    setSelectedClassId(key);
     setSelectedEnrollment(null);
     setHistory(null);
+    setStudentSearch("");
+  }
+
+  function backToClasses() {
+    setSelectedClassId("");
+    setSelectedEnrollment(null);
+    setHistory(null);
+    setStudentSearch("");
   }
 
   const selectedClass = useMemo(
@@ -999,7 +1770,11 @@ export default function Fees() {
     [activeClasses, selectedClassId],
   );
 
-  const classStudents = useMemo(() => {
+  /* ==========================================================
+     CLASS STUDENTS
+  ========================================================== */
+
+  const allClassStudents = useMemo(() => {
     if (!selectedClassId) return [];
 
     const selectedClassData = activeClasses.find(
@@ -1021,6 +1796,129 @@ export default function Fees() {
         ),
       );
   }, [enrollments, selectedClassId, activeClasses]);
+
+  const classStudents = useMemo(() => {
+    const q = studentSearch.trim().toLowerCase();
+
+    if (!q) return allClassStudents;
+
+    return allClassStudents.filter((student) => {
+      const haystack = [
+        student.student_name,
+        student.student_id,
+        student.father_name,
+        student.roll_number,
+        student.phone,
+      ]
+        .filter((value) => value !== null && value !== undefined)
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(q);
+    });
+  }, [allClassStudents, studentSearch]);
+
+  const classStudentIds = useMemo(
+    () => allClassStudents.map((student) => student.enrollment_id).join(","),
+    [allClassStudents],
+  );
+
+  const currentSolar = getTodaySolar();
+
+  /* ==========================================================
+     LOAD CURRENT MONTH STATUS
+  ========================================================== */
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadCurrentMonthStatuses() {
+      if (!selectedClassId || allClassStudents.length === 0) {
+        setStudentPaymentStatuses({});
+        setLoadingStudentStatuses(false);
+        return;
+      }
+
+      setLoadingStudentStatuses(true);
+
+      const today = getTodaySolar();
+
+      try {
+        const results = await Promise.all(
+          allClassStudents.map(async (student) => {
+            try {
+              const { data } = await api.get(
+                `/fees/enrollments/${student.enrollment_id}/history`,
+              );
+
+              const enrolledSolar =
+                parseSolarDate(data?.enrollment?.enrolled_on_solar) ||
+                parseSolarDate(data?.enrollment?.enrolled_on);
+
+              const paidMonth = (data?.months || []).find(
+                (month) =>
+                  Number(month.solar_year) === today.year &&
+                  Number(month.solar_month) === today.month,
+              );
+
+              const status = statusForMonth({
+                year: today.year,
+                month: today.month,
+                currentYear: today.year,
+                currentMonth: today.month,
+                paidMonth,
+                enrolledSolar,
+              });
+
+              const monthlyFee = Number(
+                paidMonth?.monthly_amount || paidMonth?.calculated_amount || 0,
+              );
+
+              const paid = Number(paidMonth?.paid_amount || 0);
+
+              const owing = Math.max(monthlyFee - paid, 0);
+
+              return [
+                student.enrollment_id,
+                {
+                  status,
+                  month: paidMonth || null,
+                  monthlyFee,
+                  paid,
+                  owing,
+                },
+              ];
+            } catch {
+              return [
+                student.enrollment_id,
+                {
+                  status: "unknown",
+                  month: null,
+                  monthlyFee: 0,
+                  paid: 0,
+                  owing: 0,
+                },
+              ];
+            }
+          }),
+        );
+
+        if (!cancelled) {
+          setStudentPaymentStatuses(Object.fromEntries(results));
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingStudentStatuses(false);
+        }
+      }
+    }
+
+    loadCurrentMonthStatuses();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedClassId, classStudentIds, studentStatusRefreshKey]);
 
   /* ==========================================================
      HISTORY
@@ -1127,9 +2025,7 @@ export default function Fees() {
       month.status === "partial" ||
       month.status === "upcoming";
 
-    if (!payable) {
-      return;
-    }
+    if (!payable) return;
 
     if (!selectedEnrollment || !history) {
       return;
@@ -1171,9 +2067,6 @@ export default function Fees() {
         throw new Error("Selected payment month was not found");
       }
 
-      /*
-       * FIRST PAYMENT / NEW FEE
-       */
       if (!selectedMonth.fee_id) {
         const monthDays =
           selectedMonth.month_days || getSolarMonthDays(solarYear, solarMonth);
@@ -1188,6 +2081,7 @@ export default function Fees() {
           enrollment_id: selectedEnrollment.enrollment_id,
 
           from_solar_date: fromSolarDate,
+
           to_solar_date: toSolarDate,
 
           monthly_amounts: [
@@ -1208,9 +2102,6 @@ export default function Fees() {
           description: null,
         });
       } else {
-        /*
-         * EXISTING FEE
-         */
         await api.post(`/fees/${selectedMonth.fee_id}/payment`, {
           amount: paymentAmount,
           comment: comment || null,
@@ -1225,6 +2116,8 @@ export default function Fees() {
       setPaymentMonth(null);
 
       await loadData(false);
+
+      setStudentStatusRefreshKey((value) => value + 1);
 
       if (selectedEnrollment) {
         setLoadingHistory(true);
@@ -1251,6 +2144,112 @@ export default function Fees() {
   }
 
   /* ==========================================================
+     EDIT TRANSACTION
+  ========================================================== */
+
+  function requestEditPayment(payment) {
+    setEditingPayment(payment);
+    setEditPaymentModalOpen(true);
+  }
+
+  function submitEditPayment(payment) {
+    setPendingEdit(payment);
+    setEditPaymentModalOpen(false);
+    setPasswordConfirmOpen(true);
+  }
+
+  async function confirmEditPayment() {
+    if (!pendingEdit) return;
+
+    setSavingTransaction(true);
+
+    try {
+      await api.put(`/fees/payments/${pendingEdit.paymentId}`, {
+        amount: pendingEdit.amount,
+        comment: pendingEdit.comment || null,
+      });
+
+      toast.success("Transaction updated successfully");
+
+      setPasswordConfirmOpen(false);
+      setPendingEdit(null);
+      setEditingPayment(null);
+
+      if (selectedEnrollment) {
+        setLoadingHistory(true);
+
+        try {
+          const { data } = await api.get(
+            `/fees/enrollments/${selectedEnrollment.enrollment_id}/history`,
+          );
+
+          setHistory(data);
+        } finally {
+          setLoadingHistory(false);
+        }
+      }
+
+      setStudentStatusRefreshKey((value) => value + 1);
+    } catch (error) {
+      toast.error(
+        error.response?.data?.error ||
+          error.message ||
+          "Failed to update transaction",
+      );
+    } finally {
+      setSavingTransaction(false);
+    }
+  }
+
+  /* ==========================================================
+     DELETE TRANSACTION
+  ========================================================== */
+
+  function requestDeletePayment(payment) {
+    setDeletePaymentTarget(payment);
+    setDeletePasswordConfirmOpen(true);
+  }
+
+  async function confirmDeletePayment() {
+    if (!deletePaymentTarget) return;
+
+    setSavingTransaction(true);
+
+    try {
+      await api.delete(`/fees/payments/${deletePaymentTarget.payment_id}`);
+
+      toast.success("Transaction deleted successfully");
+
+      setDeletePasswordConfirmOpen(false);
+      setDeletePaymentTarget(null);
+
+      if (selectedEnrollment) {
+        setLoadingHistory(true);
+
+        try {
+          const { data } = await api.get(
+            `/fees/enrollments/${selectedEnrollment.enrollment_id}/history`,
+          );
+
+          setHistory(data);
+        } finally {
+          setLoadingHistory(false);
+        }
+      }
+
+      setStudentStatusRefreshKey((value) => value + 1);
+    } catch (error) {
+      toast.error(
+        error.response?.data?.error ||
+          error.message ||
+          "Failed to delete transaction",
+      );
+    } finally {
+      setSavingTransaction(false);
+    }
+  }
+
+  /* ==========================================================
      REFRESH
   ========================================================== */
 
@@ -1265,18 +2264,112 @@ export default function Fees() {
   }
 
   /* ==========================================================
-     RENDER
+     PAGINATION BUTTONS
   ========================================================== */
+
+  function renderPagination() {
+    if (totalClassPages <= 1) return null;
+
+    const pages = [];
+
+    for (let page = 1; page <= totalClassPages; page += 1) {
+      pages.push(page);
+    }
+
+    return (
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-1">
+        <p className="text-[9px] text-slate-700">
+          Page <span className="text-slate-400 font-semibold">{classPage}</span>{" "}
+          of{" "}
+          <span className="text-slate-400 font-semibold">
+            {totalClassPages}
+          </span>
+        </p>
+
+        <div className="flex items-center justify-center sm:justify-end gap-1.5 flex-wrap">
+          <button
+            type="button"
+            disabled={classPage === 1}
+            onClick={() => setClassPage((page) => Math.max(1, page - 1))}
+            className="
+              h-8 px-2.5 rounded-lg
+              border border-white/[0.07]
+              bg-white/[0.02]
+              text-[9px] text-slate-600
+              hover:text-white hover:bg-white/[0.04]
+              disabled:opacity-30 disabled:cursor-not-allowed
+              transition
+            "
+          >
+            Previous
+          </button>
+
+          {pages.map((page) => (
+            <button
+              type="button"
+              key={page}
+              onClick={() => setClassPage(page)}
+              className={`
+                h-8 min-w-8 px-2 rounded-lg
+                border
+                text-[9px] font-semibold
+                transition
+                ${
+                  page === classPage
+                    ? "border-[#f2bd19]/30 bg-[#f2bd19]/10 text-[#f2bd19]"
+                    : "border-white/[0.07] bg-white/[0.02] text-slate-600 hover:text-white hover:bg-white/[0.04]"
+                }
+              `}
+            >
+              {page}
+            </button>
+          ))}
+
+          <button
+            type="button"
+            disabled={classPage === totalClassPages}
+            onClick={() =>
+              setClassPage((page) => Math.min(totalClassPages, page + 1))
+            }
+            className="
+              h-8 px-2.5 rounded-lg
+              border border-white/[0.07]
+              bg-white/[0.02]
+              text-[9px] text-slate-600
+              hover:text-white hover:bg-white/[0.04]
+              disabled:opacity-30 disabled:cursor-not-allowed
+              transition
+            "
+          >
+            Next
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  /* ============================================================
+     RENDER
+  ============================================================ */
 
   return (
     <div className="min-h-full bg-[#0b0d10] text-slate-100 p-3 sm:p-5 lg:p-6">
       <div className="max-w-[1600px] mx-auto space-y-4 sm:space-y-5">
-        {/* HEADER */}
+        {/* ==================================================
+            HEADER
+        ================================================== */}
 
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0">
             <div className="flex items-center gap-3">
-              <div className="h-10 w-10 shrink-0 rounded-xl bg-[#f2bd19]/10 border border-[#f2bd19]/20 grid place-items-center">
+              <div
+                className="
+                  h-10 w-10 shrink-0 rounded-xl
+                  bg-[#f2bd19]/10
+                  border border-[#f2bd19]/20
+                  grid place-items-center
+                "
+              >
                 <Wallet className="h-5 w-5 text-[#f2bd19]" />
               </div>
 
@@ -1285,10 +2378,7 @@ export default function Fees() {
                   Fees & Payments
                 </h2>
 
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Manage payments directly from classes, time slots, and
-                  enrolled students
-                </p>
+                <p className="text-xs text-slate-500 mt-0.5">Live records</p>
               </div>
             </div>
           </div>
@@ -1317,315 +2407,688 @@ export default function Fees() {
           </button>
         </div>
 
-        {/* STEP 01 */}
+        {/* ==================================================
+            CLASS LIST / CLASS DETAILS
+        ================================================== */}
 
-        <section className="rounded-2xl border border-white/[0.06] bg-[#121519] overflow-hidden">
-          <div className="px-4 sm:px-5 py-4 border-b border-white/[0.06]">
-            <div className="flex items-start gap-3">
-              <span className="h-7 w-7 shrink-0 rounded-lg bg-[#f2bd19]/10 text-[#f2bd19] grid place-items-center text-[10px] font-bold">
-                01
-              </span>
+        {!selectedClass ? (
+          <section
+            className="
+              rounded-2xl
+              border border-white/[0.06]
+              bg-[#121519]
+              overflow-hidden
+            "
+          >
+            <div
+              className="
+                px-4 sm:px-5 py-4
+                border-b border-white/[0.06]
+              "
+            >
+              <div className="flex items-start gap-3">
+                <span
+                  className="
+                    h-7 w-7 shrink-0 rounded-lg
+                    bg-[#f2bd19]/10
+                    text-[#f2bd19]
+                    grid place-items-center
+                    text-[10px] font-bold
+                  "
+                >
+                  01
+                </span>
 
-              <div>
-                <h3 className="text-sm font-bold text-white">Choose Class</h3>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Classes</h3>
 
-                <p className="text-[10px] text-slate-600 mt-1">
-                  Select the exact subject, level/book, teacher, and time slot
-                </p>
+                  <p className="text-[10px] text-slate-600 mt-1">
+                    Select a class to view its payment records and enrolled
+                    students.
+                  </p>
+                </div>
               </div>
             </div>
-          </div>
 
-          <div className="p-4 sm:p-5 space-y-4">
-            {/* FILTERS */}
+            <div className="p-4 sm:p-5 space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+                <FilterSelect
+                  label="Subject"
+                  value={subjectFilter}
+                  onChange={setSubjectFilter}
+                  options={subjects}
+                />
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
-              <FilterSelect
-                label="Subject"
-                value={subjectFilter}
-                onChange={setSubjectFilter}
-                options={subjects}
-              />
+                <FilterSelect
+                  label="Teacher"
+                  value={teacherFilter}
+                  onChange={setTeacherFilter}
+                  options={teachers}
+                />
 
-              <FilterSelect
-                label="Teacher"
-                value={teacherFilter}
-                onChange={setTeacherFilter}
-                options={teachers}
-              />
+                <FilterSelect
+                  label="Time"
+                  value={timeFilter}
+                  onChange={setTimeFilter}
+                  options={times}
+                />
 
-              <FilterSelect
-                label="Time"
-                value={timeFilter}
-                onChange={setTimeFilter}
-                options={times}
-              />
+                <div>
+                  <label className="text-[9px] uppercase tracking-[0.14em] text-slate-700">
+                    Search
+                  </label>
 
-              <div>
-                <label className="text-[9px] uppercase tracking-[0.14em] text-slate-700">
-                  Search
-                </label>
+                  <div className="mt-1 relative">
+                    <Search
+                      className="
+                        absolute left-3 top-1/2
+                        -translate-y-1/2
+                        h-3.5 w-3.5
+                        text-slate-700
+                      "
+                    />
 
-                <div className="mt-1 relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-700" />
+                    <input
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                      placeholder="Subject, teacher, level or room"
+                      className="
+                        h-10 w-full rounded-lg
+                        border border-white/[0.07]
+                        bg-[#0d1013]
+                        pl-9 pr-3
+                        text-[11px] text-white
+                        outline-none
+                        focus:border-[#f2bd19]/50
+                      "
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <p className="text-[10px] text-slate-700">
+                  Showing{" "}
+                  <span className="text-slate-400 font-semibold">
+                    {filteredClasses.length === 0
+                      ? 0
+                      : (classPage - 1) * classesPerPage + 1}
+                    {filteredClasses.length > 0 && (
+                      <>
+                        {"–"}
+                        {Math.min(
+                          classPage * classesPerPage,
+                          filteredClasses.length,
+                        )}
+                      </>
+                    )}
+                  </span>{" "}
+                  of{" "}
+                  <span className="text-slate-400 font-semibold">
+                    {filteredClasses.length}
+                  </span>
+                </p>
+
+                <p className="text-[10px] text-slate-700">
+                  {activeClasses.length} active classes
+                </p>
+              </div>
+
+              {loading ? (
+                <div className="py-16 grid place-items-center">
+                  <Loader2 className="h-6 w-6 text-[#f2bd19] animate-spin" />
+                </div>
+              ) : filteredClasses.length === 0 ? (
+                <div
+                  className="
+                    rounded-xl
+                    border border-dashed
+                    border-white/[0.07]
+                    py-12 text-center
+                  "
+                >
+                  <p className="text-xs text-slate-500">
+                    No matching classes found.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="overflow-hidden rounded-xl border border-white/[0.05]">
+                    <div
+                      className="
+                        hidden lg:grid
+                        grid-cols-[28px_minmax(180px,1.5fr)_minmax(150px,1fr)_minmax(120px,1fr)_120px_100px_90px]
+                        gap-3
+                        px-4 py-2.5
+                        bg-white/[0.015]
+                        border-b border-white/[0.05]
+                      "
+                    >
+                      <span />
+
+                      <span className="text-[8px] uppercase tracking-[0.14em] text-slate-700">
+                        Class
+                      </span>
+
+                      <span className="text-[8px] uppercase tracking-[0.14em] text-slate-700">
+                        Teacher
+                      </span>
+
+                      <span className="text-[8px] uppercase tracking-[0.14em] text-slate-700">
+                        Level / Book
+                      </span>
+
+                      <span className="text-[8px] uppercase tracking-[0.14em] text-slate-700">
+                        Time
+                      </span>
+
+                      <span className="text-[8px] uppercase tracking-[0.14em] text-slate-700">
+                        Students
+                      </span>
+
+                      <span className="text-[8px] uppercase tracking-[0.14em] text-slate-700 text-right">
+                        Status
+                      </span>
+                    </div>
+
+                    <div className="divide-y divide-white/[0.045]">
+                      {paginatedClasses.map((item) => {
+                        return (
+                          <div key={item.id} className="bg-[#0d1013]">
+                            <button
+                              type="button"
+                              onClick={() => openClass(item.id)}
+                              className="
+                                w-full text-left
+                                px-3 sm:px-4 py-3
+                                transition-colors
+                                hover:bg-white/[0.02]
+                              "
+                            >
+                              <div
+                                className="
+                                  hidden lg:grid
+                                  grid-cols-[28px_minmax(180px,1.5fr)_minmax(150px,1fr)_minmax(120px,1fr)_120px_100px_90px]
+                                  gap-3
+                                  items-center
+                                "
+                              >
+                                <div>
+                                  <ArrowLeft className="h-4 w-4 rotate-180 text-slate-600" />
+                                </div>
+
+                                <div className="min-w-0">
+                                  <p className="text-xs font-semibold text-white truncate">
+                                    {item.subject_name || "Unknown Subject"}
+                                  </p>
+
+                                  {item.subject_code && (
+                                    <p className="text-[8px] text-slate-700 mt-1 truncate">
+                                      {item.subject_code}
+                                    </p>
+                                  )}
+                                </div>
+
+                                <div className="min-w-0">
+                                  <p className="text-[10px] text-slate-400 truncate">
+                                    {item.teacher_name || "Unknown Teacher"}
+                                  </p>
+                                </div>
+
+                                <div className="min-w-0">
+                                  <p className="text-[10px] text-slate-400 truncate">
+                                    {formatBooks(item.books)}
+                                  </p>
+                                </div>
+
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <Clock3 className="h-3.5 w-3.5 text-slate-700 shrink-0" />
+
+                                  <span className="text-[10px] text-slate-400 truncate">
+                                    {formatTime(item.start_time)}–
+                                    {formatTime(item.end_time)}
+                                  </span>
+                                </div>
+
+                                <div>
+                                  <span
+                                    className="
+                                      inline-flex
+                                      rounded-full
+                                      border border-white/[0.06]
+                                      bg-white/[0.02]
+                                      px-2 py-1
+                                      text-[9px]
+                                      text-slate-500
+                                    "
+                                  >
+                                    {item.enrolled_count || 0}
+                                  </span>
+                                </div>
+
+                                <div className="text-right">
+                                  <span
+                                    className="
+                                      inline-flex
+                                      rounded-full
+                                      border
+                                      px-2 py-1
+                                      text-[8px]
+                                      font-semibold
+                                      border-emerald-400/15
+                                      bg-emerald-400/[0.05]
+                                      text-emerald-400
+                                    "
+                                  >
+                                    Active
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="lg:hidden flex items-center gap-3">
+                                <ArrowLeft className="h-4 w-4 rotate-180 shrink-0 text-slate-600" />
+
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-xs font-semibold text-white truncate">
+                                    {item.subject_name || "Unknown Subject"}
+                                  </p>
+
+                                  <p className="text-[9px] text-slate-600 mt-1 truncate">
+                                    {item.teacher_name || "Unknown Teacher"}
+                                    {" • "}
+                                    {formatTime(item.start_time)}–
+                                    {formatTime(item.end_time)}
+                                  </p>
+
+                                  <p className="text-[9px] text-slate-700 mt-1 truncate">
+                                    {formatBooks(item.books)}
+                                  </p>
+                                </div>
+
+                                <span className="shrink-0 rounded-full border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-[8px] text-slate-500">
+                                  {item.enrolled_count || 0}
+                                </span>
+                              </div>
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {renderPagination()}
+                </>
+              )}
+            </div>
+          </section>
+        ) : (
+          <section
+            className="
+              rounded-2xl
+              border border-white/[0.06]
+              bg-[#121519]
+              overflow-hidden
+            "
+          >
+            <div
+              className="
+                px-4 sm:px-5 py-4
+                border-b border-white/[0.06]
+                flex flex-col sm:flex-row
+                sm:items-center
+                sm:justify-between
+                gap-3
+              "
+            >
+              <div className="min-w-0 flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={backToClasses}
+                  className="
+                    h-8 px-2.5
+                    rounded-lg
+                    border border-white/[0.07]
+                    bg-white/[0.02]
+                    text-slate-500
+                    hover:text-white
+                    hover:bg-white/[0.04]
+                    transition
+                    flex items-center gap-1.5
+                    text-[10px]
+                    font-medium
+                    shrink-0
+                  "
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                  Back
+                </button>
+
+                <div className="min-w-0">
+                  <h3 className="text-sm font-bold text-white truncate">
+                    {selectedClass.subject_name || "Class Details"}
+                  </h3>
+
+                  <p className="text-[10px] text-slate-600 mt-1">
+                    Class information and enrolled students.
+                  </p>
+                </div>
+              </div>
+
+              <span
+                className="
+                  inline-flex
+                  self-start sm:self-auto
+                  rounded-full
+                  border border-emerald-400/15
+                  bg-emerald-400/[0.05]
+                  px-2 py-1
+                  text-[8px]
+                  font-semibold
+                  text-emerald-400
+                "
+              >
+                Active
+              </span>
+            </div>
+
+            <div className="p-4 sm:p-5">
+              <div
+                className="
+                  grid
+                  grid-cols-2
+                  md:grid-cols-3
+                  xl:grid-cols-6
+                  gap-2
+                  mb-5
+                "
+              >
+                <InfoBox label="Subject" value={selectedClass.subject_name} />
+
+                <InfoBox label="Teacher" value={selectedClass.teacher_name} />
+
+                <InfoBox
+                  label="Level / Book"
+                  value={formatBooks(selectedClass.books)}
+                />
+
+                <InfoBox
+                  label="Time"
+                  value={`${formatTime(
+                    selectedClass.start_time,
+                  )}–${formatTime(selectedClass.end_time)}`}
+                />
+
+                <InfoBox label="Room" value={selectedClass.room || "—"} />
+
+                <InfoBox
+                  label="Enrolled"
+                  value={`${selectedClass.enrolled_count || 0} students`}
+                />
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
+                <div>
+                  <p className="text-[10px] font-semibold text-slate-400">
+                    Class Students
+                  </p>
+
+                  <p className="text-[8px] text-slate-700 mt-1">
+                    Current payment status is shown for{" "}
+                    {monthName(currentSolar.month)} {currentSolar.year}.
+                  </p>
+                </div>
+
+                <div className="relative w-full sm:w-[320px]">
+                  <Search
+                    className="
+                      absolute left-3
+                      top-1/2
+                      -translate-y-1/2
+                      h-3.5 w-3.5
+                      text-slate-700
+                    "
+                  />
 
                   <input
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Subject, teacher, level or room"
+                    value={studentSearch}
+                    onChange={(e) => setStudentSearch(e.target.value)}
+                    placeholder="Search student, ID, father, roll or phone..."
                     className="
-                      h-10 w-full rounded-lg
+                      h-9 w-full
+                      rounded-lg
                       border border-white/[0.07]
                       bg-[#0d1013]
                       pl-9 pr-3
-                      text-[11px] text-white
+                      text-[10px]
+                      text-white
+                      placeholder:text-slate-700
                       outline-none
                       focus:border-[#f2bd19]/50
                     "
                   />
                 </div>
               </div>
-            </div>
 
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-              <p className="text-[10px] text-slate-700">
-                Showing{" "}
-                <span className="text-slate-400 font-semibold">
-                  {filteredClasses.length}
-                </span>{" "}
-                of{" "}
-                <span className="text-slate-400 font-semibold">
-                  {activeClasses.length}
-                </span>
-              </p>
+              <div className="overflow-hidden rounded-xl border border-white/[0.05]">
+                <div
+                  className="
+                    hidden md:grid
+                    grid-cols-[minmax(180px,1.4fr)_minmax(130px,1fr)_100px_minmax(230px,1.5fr)_28px]
+                    gap-3
+                    px-3 sm:px-4 py-2.5
+                    bg-white/[0.015]
+                    border-b border-white/[0.05]
+                  "
+                >
+                  <span className="text-[8px] uppercase tracking-[0.14em] text-slate-700">
+                    Student
+                  </span>
 
-              <p className="text-[10px] text-slate-700">
-                {activeClasses.length} active classes
-              </p>
-            </div>
+                  <span className="text-[8px] uppercase tracking-[0.14em] text-slate-700">
+                    Father / Contact
+                  </span>
 
-            {/* CLASS GRID */}
+                  <span className="text-[8px] uppercase tracking-[0.14em] text-slate-700">
+                    ID / Roll
+                  </span>
 
-            {loading ? (
-              <div className="py-16 grid place-items-center">
-                <Loader2 className="h-6 w-6 text-[#f2bd19] animate-spin" />
-              </div>
-            ) : filteredClasses.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-white/[0.07] py-12 text-center">
-                <p className="text-xs text-slate-500">
-                  No matching classes found.
-                </p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                {filteredClasses.map((item) => {
-                  const selected = String(item.id) === String(selectedClassId);
+                  <span className="text-[8px] uppercase tracking-[0.14em] text-slate-700">
+                    Current Month
+                  </span>
 
-                  return (
-                    <button
-                      type="button"
-                      key={item.id}
-                      onClick={() => selectClass(item)}
-                      className={`
-                        rounded-xl border p-4 text-left
-                        transition-all min-w-0
-                        ${
-                          selected
-                            ? "border-[#f2bd19]/40 bg-[#f2bd19]/[0.06] ring-1 ring-[#f2bd19]/20"
-                            : "border-white/[0.06] bg-[#0d1013] hover:border-white/[0.12] hover:bg-white/[0.02]"
-                        }
-                      `}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="text-sm font-bold text-white truncate">
-                            {item.subject_name || "Unknown Subject"}
-                          </p>
-
-                          <p className="text-[10px] text-slate-500 mt-1 truncate">
-                            {item.teacher_name || "Unknown Teacher"}
-                          </p>
-                        </div>
-
-                        {selected && (
-                          <CheckCircle2 className="h-4 w-4 shrink-0 text-[#f2bd19]" />
-                        )}
-                      </div>
-
-                      <div className="mt-3 rounded-lg border border-white/[0.05] bg-white/[0.02] px-2.5 py-2">
-                        <p className="text-[8px] uppercase tracking-wider text-slate-700">
-                          Level / Book
-                        </p>
-
-                        <p className="text-[10px] text-slate-300 mt-1 break-words">
-                          {formatBooks(item.books)}
-                        </p>
-                      </div>
-
-                      <div className="mt-3 flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-1.5 text-[10px] text-slate-500 min-w-0">
-                          <Clock3 className="h-3.5 w-3.5 shrink-0" />
-
-                          <span className="truncate">
-                            {formatTime(item.start_time)}–
-                            {formatTime(item.end_time)}
-                          </span>
-                        </div>
-
-                        <span className="shrink-0 text-[9px] rounded-full border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-slate-600">
-                          {item.enrolled_count || 0} enrolled
-                        </span>
-                      </div>
-
-                      {item.room && (
-                        <p className="text-[9px] text-slate-700 mt-3 truncate">
-                          {item.room}
-                        </p>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </section>
-
-        {/* STEP 02 */}
-
-        <section className="rounded-2xl border border-white/[0.06] bg-[#121519] overflow-hidden">
-          <div className="px-4 sm:px-5 py-4 border-b border-white/[0.06]">
-            <div className="flex items-start gap-3">
-              <span className="h-7 w-7 shrink-0 rounded-lg bg-[#f2bd19]/10 text-[#f2bd19] grid place-items-center text-[10px] font-bold">
-                02
-              </span>
-
-              <div className="min-w-0">
-                <h3 className="text-sm font-bold text-white">Students</h3>
-
-                {selectedClass ? (
-                  <>
-                    <p className="text-[10px] text-slate-600 mt-1 truncate">
-                      {selectedClass.subject_name}
-                      {" • "}
-                      {formatBooks(selectedClass.books)}
-                      {" • "}
-                      {selectedClass.teacher_name}
-                      {" • "}
-                      {formatTime(selectedClass.start_time)}–
-                      {formatTime(selectedClass.end_time)}
-                    </p>
-                  </>
-                ) : (
-                  <p className="text-[10px] text-slate-600 mt-1">
-                    Select a class above to view enrolled students
-                  </p>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div className="p-4 sm:p-5">
-            {!selectedClass ? (
-              <div className="py-10 text-center">
-                <UserRound className="h-7 w-7 text-slate-800 mx-auto" />
-
-                <p className="text-xs text-slate-600 mt-3">
-                  Select a class to see its students.
-                </p>
-              </div>
-            ) : classStudents.length === 0 ? (
-              <div className="py-10 text-center">
-                <p className="text-xs text-slate-600">
-                  No students are enrolled in this time slot.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between mb-3">
-                  <p className="text-[10px] text-slate-600">
-                    {classStudents.length}{" "}
-                    {classStudents.length === 1 ? "student" : "students"}
-                  </p>
+                  <span />
                 </div>
 
-                {classStudents.map((student) => {
-                  const selected =
-                    selectedEnrollment?.enrollment_id === student.enrollment_id;
+                <div className="divide-y divide-white/[0.045]">
+                  {classStudents.length === 0 ? (
+                    <div className="py-8 text-center">
+                      <p className="text-[10px] text-slate-600">
+                        No students found in this class.
+                      </p>
+                    </div>
+                  ) : (
+                    classStudents.map((student) => {
+                      const paymentStatus =
+                        studentPaymentStatuses[student.enrollment_id];
 
-                  return (
-                    <button
-                      type="button"
-                      key={student.enrollment_id}
-                      onClick={() => selectStudent(student)}
-                      className={`
-                        w-full rounded-xl border p-3 sm:p-4
-                        text-left transition-all
-                        ${
-                          selected
-                            ? "border-[#f2bd19]/35 bg-[#f2bd19]/[0.05]"
-                            : "border-white/[0.05] bg-[#0d1013] hover:border-white/[0.10]"
-                        }
-                      `}
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className="h-10 w-10 shrink-0 rounded-xl bg-white/[0.04] border border-white/[0.06] grid place-items-center">
-                          <UserRound className="h-4 w-4 text-slate-600" />
-                        </div>
+                      const studentSelected =
+                        selectedEnrollment?.enrollment_id ===
+                        student.enrollment_id;
 
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-semibold text-white truncate">
-                            {student.student_name}
-                          </p>
+                      return (
+                        <button
+                          type="button"
+                          key={student.enrollment_id}
+                          onClick={() =>
+                            selectStudent({
+                              ...student,
+                              books: selectedClass.books || [],
+                            })
+                          }
+                          className={`
+                            w-full
+                            text-left
+                            px-3 sm:px-4
+                            py-3
+                            transition-colors
+                            ${
+                              studentSelected
+                                ? "bg-[#f2bd19]/[0.045]"
+                                : "hover:bg-white/[0.02]"
+                            }
+                          `}
+                        >
+                          <div className="hidden md:grid grid-cols-[minmax(180px,1.4fr)_minmax(130px,1fr)_100px_minmax(230px,1.5fr)_28px] gap-3 items-center">
+                            <div className="min-w-0">
+                              <p className="text-xs font-semibold text-white truncate">
+                                {student.student_name}
+                              </p>
+                            </div>
 
-                          <p className="text-[10px] text-slate-600 mt-1 truncate">
-                            Father:{" "}
-                            <span className="text-slate-400">
-                              {student.father_name || "—"}
-                            </span>
-                          </p>
+                            <div className="min-w-0">
+                              <p className="text-[10px] text-slate-500 truncate">
+                                {student.father_name || "—"}
+                              </p>
 
-                          {student.roll_number && (
-                            <p className="text-[9px] text-slate-700 mt-0.5">
-                              Roll: {student.roll_number}
-                            </p>
-                          )}
-                        </div>
+                              <p className="text-[9px] text-slate-700 mt-1 truncate">
+                                {student.phone || "Phone —"}
+                              </p>
+                            </div>
 
-                        <div className="text-right shrink-0 hidden sm:block">
-                          <p className="text-[10px] text-slate-500">
-                            {student.subject_name}
-                          </p>
+                            <div>
+                              <p className="text-[9px] text-slate-500">
+                                #{student.student_id ?? "—"}
+                              </p>
 
-                          <p className="text-[9px] text-slate-600 mt-1 max-w-[180px]">
-                            {formatBooks(student.books)}
-                          </p>
+                              {student.roll_number && (
+                                <p className="text-[8px] text-slate-700 mt-1">
+                                  Roll {student.roll_number}
+                                </p>
+                              )}
+                            </div>
 
-                          <p className="text-[9px] text-slate-700 mt-1">
-                            {formatTime(student.start_time)}–
-                            {formatTime(student.end_time)}
-                          </p>
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
+                            <StudentPaymentStatus
+                              status={paymentStatus?.status}
+                              loading={loadingStudentStatuses && !paymentStatus}
+                              monthLabel={`${MONTH_SHORT[currentSolar.month - 1]} ${currentSolar.year}`}
+                              monthlyFee={paymentStatus?.monthlyFee || 0}
+                              paid={paymentStatus?.paid || 0}
+                              owing={paymentStatus?.owing || 0}
+                            />
+
+                            <div className="flex justify-end">
+                              <span className="text-slate-700 text-sm">›</span>
+                            </div>
+                          </div>
+
+                          <div className="md:hidden">
+                            <div className="flex items-start gap-3">
+                              <div
+                                className="
+                                  h-8 w-8
+                                  shrink-0
+                                  rounded-lg
+                                  bg-white/[0.035]
+                                  border border-white/[0.05]
+                                  grid place-items-center
+                                "
+                              >
+                                <UserRound className="h-3.5 w-3.5 text-slate-600" />
+                              </div>
+
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <p className="text-xs font-semibold text-white truncate">
+                                      {student.student_name}
+                                    </p>
+
+                                    <p className="text-[9px] text-slate-600 mt-1 truncate">
+                                      Father: {student.father_name || "—"}
+                                    </p>
+                                  </div>
+
+                                  <span className="text-slate-700">›</span>
+                                </div>
+
+                                <div className="mt-2">
+                                  <StudentPaymentStatus
+                                    status={paymentStatus?.status}
+                                    loading={
+                                      loadingStudentStatuses && !paymentStatus
+                                    }
+                                    monthLabel={`${MONTH_SHORT[currentSolar.month - 1]} ${currentSolar.year}`}
+                                    monthlyFee={paymentStatus?.monthlyFee || 0}
+                                    paid={paymentStatus?.paid || 0}
+                                    owing={paymentStatus?.owing || 0}
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
               </div>
-            )}
-          </div>
-        </section>
+            </div>
+          </section>
+        )}
 
-        {/* PAYMENT HISTORY */}
+        {/* ==================================================
+            PAYMENT HISTORY
+        ================================================== */}
 
         {selectedEnrollment && (
-          <section className="rounded-2xl border border-white/[0.06] bg-[#121519] overflow-hidden">
-            <div className="px-4 sm:px-5 py-4 border-b border-white/[0.06] flex items-start justify-between gap-4">
+          <section
+            className="
+              rounded-2xl
+              border border-white/[0.06]
+              bg-[#121519]
+              overflow-hidden
+            "
+          >
+            <div
+              className="
+                px-4 sm:px-5 py-4
+                border-b border-white/[0.06]
+                flex items-start justify-between gap-4
+              "
+            >
               <div className="min-w-0">
-                <h3 className="text-sm font-bold text-white">
-                  Payment History
-                </h3>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedEnrollment(null);
+                      setHistory(null);
+                    }}
+                    className="
+                      h-8 px-2.5
+                      rounded-lg
+                      border border-white/[0.07]
+                      bg-white/[0.02]
+                      text-slate-500
+                      hover:text-white
+                      hover:bg-white/[0.04]
+                      transition
+                      flex items-center gap-1.5
+                      text-[10px]
+                      font-medium
+                    "
+                  >
+                    <ArrowLeft className="h-3.5 w-3.5" />
+                    Back
+                  </button>
+
+                  <h3 className="text-sm font-bold text-white">
+                    Payment History
+                  </h3>
+                </div>
 
                 <p className="text-[10px] text-slate-600 mt-1">
-                  Solar Hijri payment coverage
+                  Solar Hijri payment transactions
                 </p>
               </div>
 
@@ -1634,7 +3097,8 @@ export default function Fees() {
                 onClick={refreshHistory}
                 disabled={loadingHistory}
                 className="
-                  h-8 w-8 shrink-0 rounded-lg
+                  h-8 w-8 shrink-0
+                  rounded-lg
                   border border-white/[0.06]
                   bg-white/[0.02]
                   grid place-items-center
@@ -1663,10 +3127,23 @@ export default function Fees() {
                 </div>
               ) : (
                 <>
-                  {/* STUDENT SUMMARY */}
-
-                  <div className="rounded-xl border border-white/[0.06] bg-[#0d1013] p-4">
-                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                  <div
+                    className="
+                      rounded-xl
+                      border border-white/[0.06]
+                      bg-[#0d1013]
+                      p-4
+                    "
+                  >
+                    <div
+                      className="
+                        flex flex-col
+                        md:flex-row
+                        md:items-center
+                        md:justify-between
+                        gap-4
+                      "
+                    >
                       <div className="min-w-0">
                         <p className="text-base font-bold text-white truncate">
                           {history.enrollment.student_name}
@@ -1727,21 +3204,13 @@ export default function Fees() {
                     </div>
                   </div>
 
-                  {/* LEGEND */}
-
                   <div className="mt-5 flex flex-wrap items-center gap-3">
                     <LegendItem dot="bg-emerald-400" label="Paid" />
-
                     <LegendItem dot="bg-amber-400" label="Partial" />
-
                     <LegendItem dot="bg-red-400" label="Payment Due" />
-
                     <LegendItem dot="bg-blue-400" label="Upcoming" />
-
                     <LegendItem dot="bg-slate-800" label="Not Started" />
                   </div>
-
-                  {/* 12 MONTHS */}
 
                   <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
                     {monthCards.map((month) => (
@@ -1759,8 +3228,6 @@ export default function Fees() {
                     ))}
                   </div>
 
-                  {/* TRANSACTIONS */}
-
                   <div className="mt-6">
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 mb-3">
                       <p className="text-[9px] uppercase tracking-[0.15em] text-slate-700">
@@ -1773,100 +3240,165 @@ export default function Fees() {
                     </div>
 
                     {(history.payments || []).length === 0 ? (
-                      <div className="rounded-xl border border-dashed border-white/[0.06] py-8 text-center">
+                      <div
+                        className="
+                          rounded-xl
+                          border border-dashed
+                          border-white/[0.06]
+                          py-8 text-center
+                        "
+                      >
                         <p className="text-xs text-slate-700">
                           No payment transactions yet.
                         </p>
                       </div>
                     ) : (
                       <div className="space-y-2">
-                        {history.payments.map((payment) => (
-                          <div
-                            key={payment.payment_id}
-                            className="
-                              rounded-xl border
-                              border-white/[0.05]
-                              bg-[#0d1013]
-                              px-3 sm:px-4 py-3
-                            "
-                          >
-                            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                              <div className="min-w-0">
-                                <p className="text-xs font-semibold text-white">
-                                  {formatMoney(payment.amount)}
-                                </p>
+                        {history.payments.map((payment) => {
+                          const paymentAmount = Number(payment.amount || 0);
 
-                                <p className="text-[9px] text-slate-600 mt-1 truncate">
-                                  {payment.receipt_number || "Payment"}
-                                </p>
+                          return (
+                            <div
+                              key={payment.payment_id}
+                              className="
+                                rounded-xl
+                                border border-white/[0.05]
+                                bg-[#0d1013]
+                                px-3 sm:px-4 py-3
+                              "
+                            >
+                              <div
+                                className="
+                                  flex flex-col
+                                  sm:flex-row
+                                  sm:items-center
+                                  sm:justify-between
+                                  gap-3
+                                "
+                              >
+                                <div className="min-w-0">
+                                  <p className="text-xs font-semibold text-white">
+                                    {formatMoney(paymentAmount)}
+                                  </p>
+
+                                  <p className="text-[9px] text-slate-600 mt-1 truncate">
+                                    {payment.receipt_number || "Payment"}
+                                  </p>
+                                </div>
+
+                                <div className="flex items-center gap-2 sm:justify-end">
+                                  <div className="sm:text-right">
+                                    <p className="text-[10px] text-slate-400">
+                                      {payment.payment_solar_date ||
+                                        payment.payment_date ||
+                                        "—"}
+                                    </p>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      requestEditPayment(payment);
+                                    }}
+                                    disabled={savingTransaction}
+                                    className="
+                                      h-8 w-8 shrink-0 rounded-lg
+                                      border border-white/[0.06]
+                                      bg-white/[0.02]
+                                      grid place-items-center
+                                      text-slate-600
+                                      hover:text-[#f2bd19]
+                                      hover:border-[#f2bd19]/20
+                                      transition
+                                      disabled:opacity-40
+                                    "
+                                    title="Edit transaction"
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      requestDeletePayment(payment);
+                                    }}
+                                    disabled={savingTransaction}
+                                    className="
+                                      h-8 w-8 shrink-0 rounded-lg
+                                      border border-white/[0.06]
+                                      bg-white/[0.02]
+                                      grid place-items-center
+                                      text-slate-600
+                                      hover:text-red-300
+                                      hover:border-red-400/20
+                                      transition
+                                      disabled:opacity-40
+                                    "
+                                    title="Delete transaction"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                </div>
                               </div>
 
-                              <div className="sm:text-right">
-                                <p className="text-[10px] text-slate-400">
-                                  {payment.payment_solar_date ||
+                              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                                <TransactionInfo
+                                  label="Payment Amount"
+                                  value={formatMoney(paymentAmount)}
+                                />
+
+                                <TransactionInfo
+                                  label="Payment Date"
+                                  value={
+                                    payment.payment_solar_date ||
                                     payment.payment_date ||
-                                    "—"}
-                                </p>
+                                    "—"
+                                  }
+                                />
 
-                                <p className="text-[9px] text-slate-700 mt-1">
-                                  {payment.covered_days || 0} covered days
-                                </p>
+                                <TransactionInfo
+                                  label="Payment For"
+                                  value={formatPaymentFor(payment)}
+                                />
+
+                                <TransactionInfo
+                                  label="Recorded By"
+                                  value={
+                                    payment.recorded_by_name
+                                      ? `${payment.recorded_by_name}${
+                                          payment.recorded_by_role
+                                            ? ` (${payment.recorded_by_role})`
+                                            : ""
+                                        }`
+                                      : "—"
+                                  }
+                                />
                               </div>
+
+                              {payment.comment ? (
+                                <div
+                                  className="
+                                    mt-2
+                                    rounded-lg
+                                    border border-[#f2bd19]/10
+                                    bg-[#f2bd19]/[0.025]
+                                    px-3 py-2
+                                  "
+                                >
+                                  <p className="text-[8px] uppercase tracking-wider text-slate-700">
+                                    Comment
+                                  </p>
+
+                                  <p className="text-[10px] text-slate-400 mt-1 whitespace-pre-wrap break-words">
+                                    {payment.comment}
+                                  </p>
+                                </div>
+                              ) : null}
                             </div>
-
-                            <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
-                              <TransactionInfo
-                                label="Payment Amount"
-                                value={formatMoney(payment.amount)}
-                              />
-
-                              <TransactionInfo
-                                label="Allocated"
-                                value={formatMoney(payment.allocated_amount)}
-                              />
-
-                              <TransactionInfo
-                                label="Covered Days"
-                                value={`${Number(
-                                  payment.covered_days || 0,
-                                )} days`}
-                              />
-                            </div>
-
-                            {payment.from_solar_date ||
-                            payment.to_solar_date ||
-                            payment.coverage_from_solar_date ||
-                            payment.coverage_to_solar_date ? (
-                              <div className="mt-2 rounded-lg border border-white/[0.04] bg-white/[0.015] px-3 py-2">
-                                <p className="text-[8px] uppercase tracking-wider text-slate-700">
-                                  Coverage
-                                </p>
-
-                                <p className="text-[10px] text-slate-400 mt-1">
-                                  {payment.from_solar_date ||
-                                    payment.coverage_from_solar_date ||
-                                    "—"}{" "}
-                                  →{" "}
-                                  {payment.to_solar_date ||
-                                    payment.coverage_to_solar_date ||
-                                    "—"}
-                                </p>
-                              </div>
-                            ) : null}
-
-                            {payment.comment ? (
-                              <div className="mt-2 rounded-lg border border-[#f2bd19]/10 bg-[#f2bd19]/[0.025] px-3 py-2">
-                                <p className="text-[8px] uppercase tracking-wider text-slate-700">
-                                  Comment
-                                </p>
-
-                                <p className="text-[10px] text-slate-400 mt-1 whitespace-pre-wrap break-words">
-                                  {payment.comment}
-                                </p>
-                              </div>
-                            ) : null}
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -1877,7 +3409,9 @@ export default function Fees() {
         )}
       </div>
 
-      {/* PAYMENT MODAL */}
+      {/* ======================================================
+          PAYMENT MODAL
+      ====================================================== */}
 
       <PaymentModal
         open={paymentModalOpen}
@@ -1901,102 +3435,85 @@ export default function Fees() {
         saving={savingPayment}
       />
 
-      {/* PASSWORD CONFIRMATION */}
+      {/* ======================================================
+          EDIT TRANSACTION MODAL
+      ====================================================== */}
+
+      <EditPaymentModal
+        open={editPaymentModalOpen}
+        payment={editingPayment}
+        saving={savingTransaction}
+        onClose={() => {
+          if (savingTransaction) return;
+
+          setEditPaymentModalOpen(false);
+          setEditingPayment(null);
+        }}
+        onSubmit={submitEditPayment}
+      />
+
+      {/* ======================================================
+          PASSWORD CONFIRMATION — CREATE / EDIT
+      ====================================================== */}
 
       <div className="fixed inset-0 z-[9999] pointer-events-none">
         <div className="pointer-events-auto">
           <PasswordConfirmModal
-            open={passwordConfirmOpen}
-            title="Confirm payment"
+            open={passwordConfirmOpen && Boolean(pendingPayment || pendingEdit)}
+            title={pendingEdit ? "Confirm transaction edit" : "Confirm payment"}
             description={
-              pendingPayment
-                ? `Enter your password to record ${formatMoney(
-                    pendingPayment.paymentAmount,
-                  )} for ${monthName(pendingPayment.solarMonth)}.`
-                : "Enter your password to continue."
+              pendingEdit
+                ? `Enter your password to update transaction ${
+                    editingPayment?.receipt_number || ""
+                  }.`
+                : pendingPayment
+                  ? `Enter your password to record ${formatMoney(
+                      pendingPayment.paymentAmount,
+                    )} for ${monthName(pendingPayment.solarMonth)}.`
+                  : "Enter your password to continue."
             }
-            confirmLabel="Verify & Record Payment"
-            onVerified={confirmPayment}
+            confirmLabel={
+              pendingEdit ? "Verify & Save Changes" : "Verify & Record Payment"
+            }
+            onVerified={pendingEdit ? confirmEditPayment : confirmPayment}
             onCancel={() => {
-              if (savingPayment) return;
+              if (savingPayment || savingTransaction) return;
 
               setPasswordConfirmOpen(false);
               setPendingPayment(null);
+              setPendingEdit(null);
             }}
           />
         </div>
       </div>
-    </div>
-  );
-}
 
-/* ============================================================
-   TRANSACTION INFO
-============================================================ */
+      {/* ======================================================
+          DELETE PASSWORD CONFIRMATION
+      ====================================================== */}
 
-function TransactionInfo({ label, value }) {
-  return (
-    <div className="rounded-lg border border-white/[0.04] bg-white/[0.015] p-2.5">
-      <p className="text-[8px] uppercase tracking-wider text-slate-700">
-        {label}
-      </p>
+      <div className="fixed inset-0 z-[10000] pointer-events-none">
+        <div className="pointer-events-auto">
+          <PasswordConfirmModal
+            open={deletePasswordConfirmOpen && Boolean(deletePaymentTarget)}
+            title="Confirm transaction deletion"
+            description={
+              deletePaymentTarget
+                ? `Enter your password to permanently delete ${
+                    deletePaymentTarget.receipt_number || "this transaction"
+                  } (${formatMoney(deletePaymentTarget.amount)}).`
+                : "Enter your password to continue."
+            }
+            confirmLabel="Verify & Delete Transaction"
+            onVerified={confirmDeletePayment}
+            onCancel={() => {
+              if (savingTransaction) return;
 
-      <p className="text-[10px] text-slate-400 mt-1">{value || "—"}</p>
-    </div>
-  );
-}
-
-/* ============================================================
-   FILTER SELECT
-============================================================ */
-
-function FilterSelect({ label, value, onChange, options }) {
-  return (
-    <div>
-      <label className="text-[9px] uppercase tracking-[0.14em] text-slate-700">
-        {label}
-      </label>
-
-      <div className="relative mt-1">
-        <select
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className="
-            h-10 w-full appearance-none
-            rounded-lg
-            border border-white/[0.07]
-            bg-[#0d1013]
-            px-3 pr-8
-            text-[11px] text-slate-300
-            outline-none
-            focus:border-[#f2bd19]/50
-          "
-        >
-          <option value="all">All {label.toLowerCase()}s</option>
-
-          {options.map((option) => (
-            <option key={option} value={option}>
-              {option}
-            </option>
-          ))}
-        </select>
-
-        <ChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-700" />
+              setDeletePasswordConfirmOpen(false);
+              setDeletePaymentTarget(null);
+            }}
+          />
+        </div>
       </div>
-    </div>
-  );
-}
-
-/* ============================================================
-   LEGEND
-============================================================ */
-
-function LegendItem({ dot, label }) {
-  return (
-    <div className="flex items-center gap-1.5">
-      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
-
-      <span className="text-[9px] text-slate-600">{label}</span>
     </div>
   );
 }
