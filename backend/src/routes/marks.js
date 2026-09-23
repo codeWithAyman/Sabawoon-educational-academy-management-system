@@ -142,16 +142,16 @@ async function getExam(examId) {
         e.is_published,
         e.created_at,
 
-        cs.subject_id,
-        s.name AS subject_name,
-        s.code AS subject_code,
+        COALESCE(e.subject_id_snapshot, cs.subject_id) AS subject_id,
+        COALESCE(e.subject_name_snapshot, s.name) AS subject_name,
+        COALESCE(e.subject_code_snapshot, s.code) AS subject_code,
 
-        cs.teacher_id,
-        t.full_name AS teacher_name,
+        COALESCE(e.teacher_id_snapshot, cs.teacher_id) AS teacher_id,
+        COALESCE(e.teacher_name_snapshot, t.full_name) AS teacher_name,
 
-        cs.start_time,
-        cs.end_time,
-        cs.level,
+        COALESCE(e.start_time_snapshot, cs.start_time) AS start_time,
+        COALESCE(e.end_time_snapshot, cs.end_time) AS end_time,
+        COALESCE(e.level_snapshot, cs.level) AS level,
         cs.is_active,
 
         COALESCE(
@@ -168,12 +168,13 @@ async function getExam(examId) {
               ON sb.id = csb.book_id
             WHERE csb.class_slot_id = cs.id
           ),
+          e.books_snapshot,
           '[]'::json
         ) AS books
 
       FROM exams e
 
-      JOIN class_slots cs
+      LEFT JOIN class_slots cs
         ON cs.id = e.class_slot_id
 
       LEFT JOIN subjects s
@@ -200,7 +201,10 @@ async function getExam(examId) {
 
     id: Number(row.id),
 
-    class_slot_id: Number(row.class_slot_id),
+    class_slot_id:
+      row.class_slot_id === null || row.class_slot_id === undefined
+        ? null
+        : Number(row.class_slot_id),
 
     subject_id:
       row.subject_id === null || row.subject_id === undefined
@@ -343,7 +347,9 @@ router.get(
 
     if (subjectId !== null) {
       params.push(subjectId);
-      conditions.push(`cs.subject_id = $${params.length}`);
+      conditions.push(
+        `COALESCE(e.subject_id_snapshot, cs.subject_id) = $${params.length}`,
+      );
     }
 
     const whereClause = conditions.length
@@ -363,16 +369,16 @@ router.get(
           e.is_published,
           e.created_at,
 
-          cs.subject_id,
-          s.name AS subject_name,
-          s.code AS subject_code,
+          COALESCE(e.subject_id_snapshot, cs.subject_id) AS subject_id,
+          COALESCE(e.subject_name_snapshot, s.name) AS subject_name,
+          COALESCE(e.subject_code_snapshot, s.code) AS subject_code,
 
-          cs.teacher_id,
-          t.full_name AS teacher_name,
+          COALESCE(e.teacher_id_snapshot, cs.teacher_id) AS teacher_id,
+          COALESCE(e.teacher_name_snapshot, t.full_name) AS teacher_name,
 
-          cs.start_time,
-          cs.end_time,
-          cs.level,
+          COALESCE(e.start_time_snapshot, cs.start_time) AS start_time,
+          COALESCE(e.end_time_snapshot, cs.end_time) AS end_time,
+          COALESCE(e.level_snapshot, cs.level) AS level,
           cs.is_active,
 
           COALESCE(
@@ -389,6 +395,7 @@ router.get(
                 ON sb.id = csb.book_id
               WHERE csb.class_slot_id = cs.id
             ),
+            e.books_snapshot,
             '[]'::json
           ) AS books,
 
@@ -400,7 +407,7 @@ router.get(
 
         FROM exams e
 
-        JOIN class_slots cs
+        LEFT JOIN class_slots cs
           ON cs.id = e.class_slot_id
 
         LEFT JOIN subjects s
@@ -424,7 +431,10 @@ router.get(
 
         id: Number(row.id),
 
-        class_slot_id: Number(row.class_slot_id),
+        class_slot_id:
+          row.class_slot_id === null || row.class_slot_id === undefined
+            ? null
+            : Number(row.class_slot_id),
 
         subject_id:
           row.subject_id === null || row.subject_id === undefined
@@ -500,14 +510,13 @@ router.post(
       });
     }
 
-    if (
-      classSlot.academic_year === null ||
-      classSlot.academic_year === undefined
-    ) {
-      return res.status(400).json({
-        message: "The selected class does not have an academic year.",
-      });
-    }
+    /*
+     * Academic year is intentionally NOT required.
+     *
+     * The academy uses the actual assessment date as the date of record.
+     * class_slots.academic_year is currently nullable, so assessments
+     * created from existing classes simply keep academic_year as NULL.
+     */
 
     const result = await query(
       `
@@ -518,16 +527,40 @@ router.post(
           total_marks,
           academic_year,
           created_by,
-          is_published
+          is_published,
+
+          subject_id_snapshot,
+          subject_name_snapshot,
+          subject_code_snapshot,
+
+          teacher_id_snapshot,
+          teacher_name_snapshot,
+
+          start_time_snapshot,
+          end_time_snapshot,
+          level_snapshot,
+          books_snapshot
         )
         VALUES (
           $1,
           $2,
           $3,
           $4,
+          NULL,
           $5,
           $6,
-          $7
+
+          $7,
+          $8,
+          $9,
+
+          $10,
+          $11,
+
+          $12,
+          $13,
+          $14,
+          $15
         )
         RETURNING
           id,
@@ -538,16 +571,39 @@ router.post(
           academic_year,
           created_by,
           is_published,
-          created_at
+          created_at,
+
+          subject_id_snapshot,
+          subject_name_snapshot,
+          subject_code_snapshot,
+
+          teacher_id_snapshot,
+          teacher_name_snapshot,
+
+          start_time_snapshot,
+          end_time_snapshot,
+          level_snapshot,
+          books_snapshot
       `,
       [
         cleanName,
         classSlotId,
         cleanExamDate,
         numericTotalMarks,
-        classSlot.academic_year,
         req.user.id,
         Boolean(is_published),
+
+        classSlot.subject_id,
+        classSlot.subject_name,
+        classSlot.subject_code,
+
+        classSlot.teacher_id,
+        classSlot.teacher_name,
+
+        classSlot.start_time,
+        classSlot.end_time,
+        classSlot.level,
+        JSON.stringify(classSlot.books || []),
       ],
     );
 
@@ -634,15 +690,17 @@ router.get(
 
         FROM students s
 
-        JOIN student_enrollments se
+        LEFT JOIN student_enrollments se
           ON se.student_id = s.id
+         AND se.class_slot_id = $2
+         AND se.is_active = TRUE
 
         LEFT JOIN marks m
           ON m.student_id = s.id
          AND m.exam_id = $1
 
-        WHERE se.class_slot_id = $2
-          AND se.is_active = TRUE
+        WHERE se.student_id IS NOT NULL
+           OR m.id IS NOT NULL
 
         ORDER BY
           s.id ASC
@@ -845,22 +903,35 @@ router.put(
     for (const item of scores) {
       const studentId = normalizeId(item?.student_id);
 
-      const enrollment = await query(
+      const enrollment =
+        exam.class_slot_id === null
+          ? { rows: [] }
+          : await query(
+              `
+                SELECT 1
+                FROM student_enrollments
+                WHERE student_id = $1
+                  AND class_slot_id = $2
+                  AND is_active = TRUE
+                LIMIT 1
+              `,
+              [studentId, exam.class_slot_id],
+            );
+
+      const historicalMark = await query(
         `
           SELECT 1
-          FROM student_enrollments
+          FROM marks
           WHERE student_id = $1
-            AND class_slot_id = $2
-            AND is_active = TRUE
+            AND exam_id = $2
           LIMIT 1
         `,
-        [studentId, exam.class_slot_id],
+        [studentId, examId],
       );
 
-      if (!enrollment.rows.length) {
+      if (!enrollment.rows.length && !historicalMark.rows.length) {
         return res.status(400).json({
-          message:
-            `Student ${studentId} is not actively enrolled ` + `in this class.`,
+          message: `Student ${studentId} is not enrolled in this assessment's class.`,
         });
       }
     }
@@ -891,40 +962,51 @@ router.put(
           ? null
           : String(item.remarks).trim();
 
-      await query(
-        `
-          INSERT INTO marks (
-            student_id,
-            exam_id,
-            marks_obtained,
-            grade,
-            remarks
-          )
-          VALUES (
-            $1,
-            $2,
-            $3,
-            $4,
-            $5
-          )
+      if (numericMarks === null) {
+        await query(
+          `
+            DELETE FROM marks
+            WHERE student_id = $1
+              AND exam_id = $2
+          `,
+          [studentId, examId],
+        );
+      } else {
+        await query(
+          `
+            INSERT INTO marks (
+              student_id,
+              exam_id,
+              marks_obtained,
+              grade,
+              remarks
+            )
+            VALUES (
+              $1,
+              $2,
+              $3,
+              $4,
+              $5
+            )
 
-          ON CONFLICT (
-            student_id,
-            exam_id
-          )
+            ON CONFLICT (
+              student_id,
+              exam_id
+            )
 
-          DO UPDATE SET
-            marks_obtained =
-              EXCLUDED.marks_obtained,
+            DO UPDATE SET
+              marks_obtained =
+                EXCLUDED.marks_obtained,
 
-            grade =
-              EXCLUDED.grade,
+              grade =
+                EXCLUDED.grade,
 
-            remarks =
-              EXCLUDED.remarks
-        `,
-        [studentId, examId, numericMarks, grade, remarks],
-      );
+              remarks =
+                EXCLUDED.remarks
+          `,
+          [studentId, examId, numericMarks, grade, remarks],
+        );
+      }
     }
 
     res.json({
@@ -938,6 +1020,9 @@ router.put(
 |--------------------------------------------------------------------------
 | DELETE ASSESSMENT
 |--------------------------------------------------------------------------
+| Assessments are permanent academic records. They may be edited, but
+| they must not be deleted through the API.
+|--------------------------------------------------------------------------
 */
 
 router.delete(
@@ -945,41 +1030,9 @@ router.delete(
   authRequired,
   requireRoles("admin"),
   asyncH(async (req, res) => {
-    const examId = normalizeId(req.params.id);
-
-    if (examId === null || examId <= 0) {
-      return res.status(400).json({
-        message: "Invalid assessment ID.",
-      });
-    }
-
-    const existing = await getExam(examId);
-
-    if (!existing) {
-      return res.status(404).json({
-        message: "Assessment not found.",
-      });
-    }
-
-    await query(
-      `
-        DELETE FROM marks
-        WHERE exam_id = $1
-      `,
-      [examId],
-    );
-
-    await query(
-      `
-        DELETE FROM exams
-        WHERE id = $1
-      `,
-      [examId],
-    );
-
-    res.json({
-      ok: true,
-      message: "Assessment deleted successfully.",
+    return res.status(405).json({
+      message:
+        "Assessments are permanent academic records and cannot be deleted. You can edit the assessment or its scores instead.",
     });
   }),
 );
