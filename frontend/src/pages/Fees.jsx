@@ -60,6 +60,27 @@ const MONTH_SHORT = [
    HELPERS
 ============================================================ */
 
+function roundMoney(value) {
+  const number = Number(value || 0);
+
+  if (!Number.isFinite(number)) {
+    return 0;
+  }
+
+  return Math.round(number / 10) * 10;
+}
+
+function isMultipleOfTen(value) {
+  const number = Number(value);
+
+  return (
+    Number.isFinite(number) &&
+    number > 0 &&
+    Number.isInteger(number) &&
+    number % 10 === 0
+  );
+}
+
 function formatTime(value) {
   if (!value) return "—";
 
@@ -114,6 +135,14 @@ function formatSolarDate(year, month, day) {
     2,
     "0",
   )}/${String(day).padStart(2, "0")}`;
+}
+
+function normalizeSolarDate(value) {
+  const parsed = parseSolarDate(value);
+
+  if (!parsed) return null;
+
+  return formatSolarDate(parsed.year, parsed.month, parsed.day);
 }
 
 function formatPaymentFor(payment) {
@@ -179,7 +208,9 @@ function getTodaySolar() {
     const parts = formatter.formatToParts(new Date());
 
     const year = Number(parts.find((part) => part.type === "year")?.value);
+
     const month = Number(parts.find((part) => part.type === "month")?.value);
+
     const day = Number(parts.find((part) => part.type === "day")?.value);
 
     if (
@@ -221,7 +252,7 @@ function getSolarMonthDays(year, month) {
 
       const start = new Date(Date.UTC(2027, 2, 20, 12, 0, 0));
 
-      for (let offset = 0; offset <= 2; offset++) {
+      for (let offset = 0; offset <= 2; offset += 1) {
         const testDate = new Date(
           start.getTime() + offset * 24 * 60 * 60 * 1000,
         );
@@ -229,7 +260,9 @@ function getSolarMonthDays(year, month) {
         const parts = formatter.formatToParts(testDate);
 
         const jy = Number(parts.find((part) => part.type === "year")?.value);
+
         const jm = Number(parts.find((part) => part.type === "month")?.value);
+
         const jd = Number(parts.find((part) => part.type === "day")?.value);
 
         if (jy === year && jm === 12 && jd === 30) {
@@ -269,7 +302,9 @@ function statusForMonth({
 
   if (paidMonth) {
     const paid = Number(paidMonth.paid_amount || 0);
-    const calculated = Number(paidMonth.calculated_amount || 0);
+    const calculated = Number(
+      paidMonth.calculated_amount || paidMonth.monthly_amount || 0,
+    );
 
     const feeStatus = String(paidMonth.fee_status || "").toLowerCase();
 
@@ -444,8 +479,8 @@ function MonthStatusCard({ month, status, selected, onClick }) {
 
   const style = styles[status] || styles.upcoming;
 
-  const monthlyFee = Number(month.monthly_amount || 0);
-  const paid = Number(month.paid_amount || 0);
+  const monthlyFee = roundMoney(month.monthly_amount);
+  const paid = roundMoney(month.paid_amount);
   const owing = Math.max(monthlyFee - paid, 0);
 
   return (
@@ -519,6 +554,7 @@ function MonthStatusCard({ month, status, selected, onClick }) {
 function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
   const [monthlyAmount, setMonthlyAmount] = useState("");
   const [paymentAmount, setPaymentAmount] = useState("");
+  const [paymentSolarDate, setPaymentSolarDate] = useState("");
   const [comment, setComment] = useState("");
 
   const todaySolar = useMemo(() => getTodaySolar(), []);
@@ -526,24 +562,31 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
   useEffect(() => {
     if (!open) return;
 
-    setMonthlyAmount(
-      month?.monthly_amount ? String(Number(month.monthly_amount)) : "",
+    const existingMonthly = Number(
+      month?.monthly_amount || month?.calculated_amount || 0,
     );
 
+    setMonthlyAmount(existingMonthly > 0 ? String(existingMonthly) : "");
+
     setPaymentAmount("");
+
+    setPaymentSolarDate(todaySolar.formatted);
+
     setComment("");
-  }, [open, month]);
+  }, [open, month, todaySolar.formatted]);
 
   if (!open || !enrollment || !month) {
     return null;
   }
 
-  const feeAmount = Number(monthlyAmount || 0);
-  const amount = Number(paymentAmount || 0);
+  const feeAmount = roundMoney(monthlyAmount);
+  const amount = roundMoney(paymentAmount);
 
-  const existingPaid = Number(month.paid_amount || 0);
+  const existingPaid = roundMoney(month.paid_amount);
 
-  const existingCalculated = Number(month.calculated_amount || feeAmount || 0);
+  const existingCalculated = roundMoney(
+    month.calculated_amount || month.monthly_amount || feeAmount,
+  );
 
   const existingDue = Math.max(existingCalculated - existingPaid, 0);
 
@@ -552,7 +595,12 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
   const isPartial =
     amount > 0 && suggestedFullPayment > 0 && amount < suggestedFullPayment;
 
-  const valid = feeAmount > 0 && amount > 0 && amount <= suggestedFullPayment;
+  const validDate = Boolean(parseSolarDate(paymentSolarDate));
+
+  const validAmount =
+    isMultipleOfTen(amount) && amount <= suggestedFullPayment && amount > 0;
+
+  const valid = feeAmount > 0 && validAmount && validDate;
 
   function submit(e) {
     e.preventDefault();
@@ -564,6 +612,7 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
       solarMonth: Number(month.solar_month),
       monthlyAmount: feeAmount,
       paymentAmount: amount,
+      paymentSolarDate: normalizeSolarDate(paymentSolarDate),
       comment: comment.trim(),
     });
   }
@@ -618,7 +667,7 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                 <h3 className="text-sm font-bold text-white">Record Payment</h3>
 
                 <p className="text-[10px] text-slate-600 mt-0.5">
-                  Payment date is automatically today
+                  Record the exact money received for this month.
                 </p>
               </div>
             </div>
@@ -704,7 +753,7 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <p className="text-[8px] uppercase tracking-[0.15em] text-[#f2bd19]/60">
-                      Payment Period
+                      Payment For
                     </p>
 
                     <p className="text-lg font-bold text-white mt-1">
@@ -722,6 +771,13 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                     </p>
                   </div>
                 </div>
+
+                <div className="mt-3 pt-3 border-t border-white/[0.05]">
+                  <p className="text-[8px] text-slate-600">
+                    This is the month the money is being applied to. It is
+                    separate from the date the money was actually received.
+                  </p>
+                </div>
               </div>
 
               <div>
@@ -729,40 +785,60 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                   Payment Date
                 </label>
 
-                <div
-                  className="
-                    mt-1 min-h-11 rounded-lg
-                    border border-white/[0.07]
-                    bg-[#0d1013]
-                    px-3 py-2
-                    flex items-center gap-2
-                  "
-                >
-                  <CalendarDays className="h-4 w-4 shrink-0 text-[#f2bd19]/70" />
-
-                  <div className="min-w-0">
-                    <p className="text-[11px] font-semibold text-white">
-                      {todaySolar.formatted}
-                    </p>
-
-                    <p className="text-[8px] text-slate-700">
-                      Afghanistan Solar Hijri date
-                    </p>
-                  </div>
-
-                  <span
+                <div className="mt-1 relative">
+                  <CalendarDays
                     className="
-                      ml-auto shrink-0
-                      text-[8px] rounded-full
-                      border border-emerald-400/15
-                      bg-emerald-400/[0.05]
-                      px-2 py-1
-                      text-emerald-400
+                      absolute left-3 top-1/2
+                      -translate-y-1/2
+                      h-4 w-4
+                      text-[#f2bd19]/70
+                      pointer-events-none
+                    "
+                  />
+
+                  <input
+                    type="text"
+                    value={paymentSolarDate}
+                    onChange={(e) => setPaymentSolarDate(e.target.value)}
+                    placeholder="1405/06/26"
+                    inputMode="numeric"
+                    maxLength={10}
+                    className={`
+                      h-11 w-full rounded-lg
+                      border
+                      bg-[#0d1013]
+                      pl-10 pr-3
+                      text-sm text-white
+                      outline-none
+                      ${validDate ? "border-white/[0.07]" : "border-red-400/30"}
+                      focus:border-[#f2bd19]/50
+                    `}
+                  />
+                </div>
+
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <p className="text-[8px] text-slate-700">
+                    Afghanistan Solar Hijri date
+                  </p>
+
+                  <button
+                    type="button"
+                    onClick={() => setPaymentSolarDate(todaySolar.formatted)}
+                    className="
+                      text-[8px]
+                      text-[#f2bd19]
+                      hover:text-[#ffd34d]
                     "
                   >
-                    Today
-                  </span>
+                    Use today ({todaySolar.formatted})
+                  </button>
                 </div>
+
+                {!validDate && paymentSolarDate && (
+                  <p className="text-[8px] text-red-300 mt-1">
+                    Enter the date as YYYY/MM/DD.
+                  </p>
+                )}
               </div>
 
               <div>
@@ -800,6 +876,11 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                     "
                   />
                 </div>
+
+                <p className="text-[8px] text-slate-700 mt-1">
+                  The monthly fee is the full amount. It is not prorated by
+                  days.
+                </p>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
@@ -830,9 +911,7 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                     <button
                       type="button"
                       onClick={() =>
-                        setPaymentAmount(
-                          String(Number(suggestedFullPayment.toFixed(2))),
-                        )
+                        setPaymentAmount(String(suggestedFullPayment))
                       }
                       className="
                         text-left sm:text-right
@@ -860,7 +939,7 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
 
                   <input
                     type="number"
-                    min="0"
+                    min="10"
                     max={suggestedFullPayment || undefined}
                     step="10"
                     value={paymentAmount}
@@ -877,6 +956,12 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                     "
                   />
                 </div>
+
+                {paymentAmount && !isMultipleOfTen(Number(paymentAmount)) && (
+                  <p className="text-[9px] text-red-300 mt-2">
+                    Payment amounts must be positive multiples of AFN 10.
+                  </p>
+                )}
 
                 {existingPaid > 0 && (
                   <p className="text-[9px] text-amber-400 mt-2 leading-relaxed">
@@ -933,8 +1018,8 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
                     </p>
 
                     <p className="text-[9px] text-slate-600 mt-0.5 leading-relaxed">
-                      This month will remain Partial until the remaining balance
-                      is paid.
+                      The money received will be applied to this month. The
+                      remaining balance stays due.
                     </p>
                   </div>
                 </div>
@@ -1034,12 +1119,19 @@ function PaymentModal({ open, enrollment, month, onClose, onSubmit, saving }) {
 
 function EditPaymentModal({ open, payment, onClose, onSubmit, saving }) {
   const [amount, setAmount] = useState("");
+  const [paymentSolarDate, setPaymentSolarDate] = useState("");
   const [comment, setComment] = useState("");
 
   useEffect(() => {
     if (!open || !payment) return;
 
     setAmount(payment.amount ? String(Number(payment.amount)) : "");
+
+    setPaymentSolarDate(
+      normalizeSolarDate(payment.payment_solar_date || payment.payment_date) ||
+        getTodaySolar().formatted,
+    );
+
     setComment(payment.comment || "");
   }, [open, payment]);
 
@@ -1047,8 +1139,10 @@ function EditPaymentModal({ open, payment, onClose, onSubmit, saving }) {
     return null;
   }
 
-  const numericAmount = Number(amount || 0);
-  const valid = numericAmount > 0;
+  const numericAmount = roundMoney(amount);
+
+  const valid =
+    isMultipleOfTen(numericAmount) && Boolean(parseSolarDate(paymentSolarDate));
 
   function submit(e) {
     e.preventDefault();
@@ -1058,6 +1152,7 @@ function EditPaymentModal({ open, payment, onClose, onSubmit, saving }) {
     onSubmit({
       paymentId: payment.payment_id,
       amount: numericAmount,
+      paymentSolarDate: normalizeSolarDate(paymentSolarDate),
       comment: comment.trim(),
     });
   }
@@ -1136,13 +1231,6 @@ function EditPaymentModal({ open, payment, onClose, onSubmit, saving }) {
               />
 
               <TransactionInfo
-                label="Payment Date"
-                value={
-                  payment.payment_solar_date || payment.payment_date || "—"
-                }
-              />
-
-              <TransactionInfo
                 label="Payment For"
                 value={formatPaymentFor(payment)}
               />
@@ -1168,6 +1256,46 @@ function EditPaymentModal({ open, payment, onClose, onSubmit, saving }) {
 
             <div>
               <label className="text-[9px] uppercase tracking-[0.14em] text-slate-600">
+                Payment Date
+              </label>
+
+              <div className="mt-1 relative">
+                <CalendarDays
+                  className="
+                    absolute left-3 top-1/2
+                    -translate-y-1/2
+                    h-4 w-4
+                    text-[#f2bd19]/70
+                    pointer-events-none
+                  "
+                />
+
+                <input
+                  type="text"
+                  value={paymentSolarDate}
+                  onChange={(e) => setPaymentSolarDate(e.target.value)}
+                  placeholder="1405/06/26"
+                  inputMode="numeric"
+                  maxLength={10}
+                  className="
+                    h-11 w-full rounded-lg
+                    border border-white/[0.07]
+                    bg-[#0d1013]
+                    pl-10 pr-3
+                    text-sm text-white
+                    outline-none
+                    focus:border-[#f2bd19]/50
+                  "
+                />
+              </div>
+
+              <p className="text-[8px] text-slate-700 mt-1">
+                Solar Hijri date when the payment was received.
+              </p>
+            </div>
+
+            <div>
+              <label className="text-[9px] uppercase tracking-[0.14em] text-slate-600">
                 Payment Amount
               </label>
 
@@ -1185,7 +1313,7 @@ function EditPaymentModal({ open, payment, onClose, onSubmit, saving }) {
 
                 <input
                   type="number"
-                  min="0"
+                  min="10"
                   step="10"
                   value={amount}
                   onChange={(e) => setAmount(e.target.value)}
@@ -1200,6 +1328,12 @@ function EditPaymentModal({ open, payment, onClose, onSubmit, saving }) {
                   "
                 />
               </div>
+
+              {amount && !isMultipleOfTen(Number(amount)) && (
+                <p className="text-[9px] text-red-300 mt-1">
+                  Payment amounts must be positive multiples of AFN 10.
+                </p>
+              )}
             </div>
 
             <div>
@@ -1240,8 +1374,8 @@ function EditPaymentModal({ open, payment, onClose, onSubmit, saving }) {
               </p>
 
               <p className="text-[9px] text-slate-600 mt-1 leading-relaxed">
-                Editing this payment will be recorded in the transaction audit
-                history.
+                Editing this payment will rebuild its monthly money allocation
+                and will be recorded in the transaction audit history.
               </p>
             </div>
           </div>
@@ -1543,6 +1677,7 @@ export default function Fees() {
   const [studentStatusRefreshKey, setStudentStatusRefreshKey] = useState(0);
 
   const [loading, setLoading] = useState(true);
+
   const [loadingHistory, setLoadingHistory] = useState(false);
 
   const [savingPayment, setSavingPayment] = useState(false);
@@ -1870,11 +2005,11 @@ export default function Fees() {
                 enrolledSolar,
               });
 
-              const monthlyFee = Number(
+              const monthlyFee = roundMoney(
                 paidMonth?.monthly_amount || paidMonth?.calculated_amount || 0,
               );
 
-              const paid = Number(paidMonth?.paid_amount || 0);
+              const paid = roundMoney(paidMonth?.paid_amount || 0);
 
               const owing = Math.max(monthlyFee - paid, 0);
 
@@ -1994,6 +2129,11 @@ export default function Fees() {
         month_days:
           paidMonth?.month_days || getSolarMonthDays(currentYear, solarMonth),
 
+        /*
+         * Payment allocation is now money-based.
+         * Attendance/covered days are deliberately not used
+         * to calculate financial balances.
+         */
         covered_days: paidMonth?.covered_days || 0,
 
         monthly_amount: paidMonth?.monthly_amount || null,
@@ -2046,13 +2186,19 @@ export default function Fees() {
     setPasswordConfirmOpen(true);
   }
 
-  async function confirmPayment() {
+  async function confirmPayment(verification) {
     if (!selectedEnrollment || !pendingPayment) {
       return;
     }
 
-    const { solarYear, solarMonth, monthlyAmount, paymentAmount, comment } =
-      pendingPayment;
+    const {
+      solarYear,
+      solarMonth,
+      monthlyAmount,
+      paymentAmount,
+      paymentSolarDate,
+      comment,
+    } = pendingPayment;
 
     setSavingPayment(true);
 
@@ -2067,6 +2213,25 @@ export default function Fees() {
         throw new Error("Selected payment month was not found");
       }
 
+      if (!isMultipleOfTen(paymentAmount)) {
+        throw new Error(
+          "Payment amount must be a positive multiple of AFN 10.",
+        );
+      }
+
+      const normalizedPaymentDate = normalizeSolarDate(paymentSolarDate);
+
+      if (!normalizedPaymentDate) {
+        throw new Error("A valid Solar payment date is required.");
+      }
+
+      /*
+       * No fee exists for this month yet.
+       *
+       * Creating the fee period with one complete month
+       * creates the full monthly obligation. The initial payment
+       * is then allocated by exact money amount on the backend.
+       */
       if (!selectedMonth.fee_id) {
         const monthDays =
           selectedMonth.month_days || getSolarMonthDays(solarYear, solarMonth);
@@ -2076,6 +2241,8 @@ export default function Fees() {
         const toSolarDate = formatSolarDate(solarYear, solarMonth, monthDays);
 
         await api.post("/fees", {
+          verification_token: verification?.verification_token,
+
           student_id: selectedEnrollment.student_id,
 
           enrollment_id: selectedEnrollment.enrollment_id,
@@ -2088,13 +2255,17 @@ export default function Fees() {
             {
               solar_year: solarYear,
               solar_month: solarMonth,
-              monthly_amount: monthlyAmount,
+              monthly_amount: roundMoney(monthlyAmount),
             },
           ],
 
-          initial_paid_amount: paymentAmount,
+          initial_paid_amount: roundMoney(paymentAmount),
 
-          initial_payment_solar_date: null,
+          /*
+           * This is the actual date money was received.
+           * It is NOT the month being paid for.
+           */
+          initial_payment_solar_date: normalizedPaymentDate,
 
           initial_payment_comment: comment || null,
 
@@ -2102,8 +2273,20 @@ export default function Fees() {
           description: null,
         });
       } else {
+        /*
+         * Existing fee period.
+         *
+         * The backend determines the exact monthly allocation
+         * from the amount. No covered-days or date-range
+         * information is sent because attendance is separate.
+         */
         await api.post(`/fees/${selectedMonth.fee_id}/payment`, {
-          amount: paymentAmount,
+          verification_token: verification?.verification_token,
+
+          amount: roundMoney(paymentAmount),
+
+          payment_solar_date: normalizedPaymentDate,
+
           comment: comment || null,
         });
       }
@@ -2158,14 +2341,19 @@ export default function Fees() {
     setPasswordConfirmOpen(true);
   }
 
-  async function confirmEditPayment() {
+  async function confirmEditPayment(verification) {
     if (!pendingEdit) return;
 
     setSavingTransaction(true);
 
     try {
       await api.put(`/fees/payments/${pendingEdit.paymentId}`, {
-        amount: pendingEdit.amount,
+        verification_token: verification?.verification_token,
+
+        amount: roundMoney(pendingEdit.amount),
+
+        payment_solar_date: normalizeSolarDate(pendingEdit.paymentSolarDate),
+
         comment: pendingEdit.comment || null,
       });
 
@@ -2210,13 +2398,17 @@ export default function Fees() {
     setDeletePasswordConfirmOpen(true);
   }
 
-  async function confirmDeletePayment() {
+  async function confirmDeletePayment(verification) {
     if (!deletePaymentTarget) return;
 
     setSavingTransaction(true);
 
     try {
-      await api.delete(`/fees/payments/${deletePaymentTarget.payment_id}`);
+      await api.delete(`/fees/payments/${deletePaymentTarget.payment_id}`, {
+        data: {
+          verification_token: verification?.verification_token,
+        },
+      });
 
       toast.success("Transaction deleted successfully");
 
@@ -2268,7 +2460,9 @@ export default function Fees() {
   ========================================================== */
 
   function renderPagination() {
-    if (totalClassPages <= 1) return null;
+    if (totalClassPages <= 1) {
+      return null;
+    }
 
     const pages = [];
 
@@ -2491,7 +2685,7 @@ export default function Fees() {
                     <input
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
-                      placeholder="Subject, teacher, level or room"
+                      placeholder="Subject, teacher or level"
                       className="
                         h-10 w-full rounded-lg
                         border border-white/[0.07]
@@ -2592,67 +2786,66 @@ export default function Fees() {
                     </div>
 
                     <div className="divide-y divide-white/[0.045]">
-                      {paginatedClasses.map((item) => {
-                        return (
-                          <div key={item.id} className="bg-[#0d1013]">
-                            <button
-                              type="button"
-                              onClick={() => openClass(item.id)}
-                              className="
+                      {paginatedClasses.map((item) => (
+                        <div key={item.id} className="bg-[#0d1013]">
+                          <button
+                            type="button"
+                            onClick={() => openClass(item.id)}
+                            className="
                                 w-full text-left
                                 px-3 sm:px-4 py-3
                                 transition-colors
                                 hover:bg-white/[0.02]
                               "
-                            >
-                              <div
-                                className="
+                          >
+                            <div
+                              className="
                                   hidden lg:grid
                                   grid-cols-[28px_minmax(180px,1.5fr)_minmax(150px,1fr)_minmax(120px,1fr)_120px_100px_90px]
                                   gap-3
                                   items-center
                                 "
-                              >
-                                <div>
-                                  <ArrowLeft className="h-4 w-4 rotate-180 text-slate-600" />
-                                </div>
+                            >
+                              <div>
+                                <ArrowLeft className="h-4 w-4 rotate-180 text-slate-600" />
+                              </div>
 
-                                <div className="min-w-0">
-                                  <p className="text-xs font-semibold text-white truncate">
-                                    {item.subject_name || "Unknown Subject"}
+                              <div className="min-w-0">
+                                <p className="text-xs font-semibold text-white truncate">
+                                  {item.subject_name || "Unknown Subject"}
+                                </p>
+
+                                {item.subject_code && (
+                                  <p className="text-[8px] text-slate-700 mt-1 truncate">
+                                    {item.subject_code}
                                   </p>
+                                )}
+                              </div>
 
-                                  {item.subject_code && (
-                                    <p className="text-[8px] text-slate-700 mt-1 truncate">
-                                      {item.subject_code}
-                                    </p>
-                                  )}
-                                </div>
+                              <div className="min-w-0">
+                                <p className="text-[10px] text-slate-400 truncate">
+                                  {item.teacher_name || "Unknown Teacher"}
+                                </p>
+                              </div>
 
-                                <div className="min-w-0">
-                                  <p className="text-[10px] text-slate-400 truncate">
-                                    {item.teacher_name || "Unknown Teacher"}
-                                  </p>
-                                </div>
+                              <div className="min-w-0">
+                                <p className="text-[10px] text-slate-400 truncate">
+                                  {formatBooks(item.books)}
+                                </p>
+                              </div>
 
-                                <div className="min-w-0">
-                                  <p className="text-[10px] text-slate-400 truncate">
-                                    {formatBooks(item.books)}
-                                  </p>
-                                </div>
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <Clock3 className="h-3.5 w-3.5 text-slate-700 shrink-0" />
 
-                                <div className="flex items-center gap-1.5 min-w-0">
-                                  <Clock3 className="h-3.5 w-3.5 text-slate-700 shrink-0" />
+                                <span className="text-[10px] text-slate-400 truncate">
+                                  {formatTime(item.start_time)}–
+                                  {formatTime(item.end_time)}
+                                </span>
+                              </div>
 
-                                  <span className="text-[10px] text-slate-400 truncate">
-                                    {formatTime(item.start_time)}–
-                                    {formatTime(item.end_time)}
-                                  </span>
-                                </div>
-
-                                <div>
-                                  <span
-                                    className="
+                              <div>
+                                <span
+                                  className="
                                       inline-flex
                                       rounded-full
                                       border border-white/[0.06]
@@ -2661,14 +2854,14 @@ export default function Fees() {
                                       text-[9px]
                                       text-slate-500
                                     "
-                                  >
-                                    {item.enrolled_count || 0}
-                                  </span>
-                                </div>
+                                >
+                                  {item.enrolled_count || 0}
+                                </span>
+                              </div>
 
-                                <div className="text-right">
-                                  <span
-                                    className="
+                              <div className="text-right">
+                                <span
+                                  className="
                                       inline-flex
                                       rounded-full
                                       border
@@ -2679,40 +2872,39 @@ export default function Fees() {
                                       bg-emerald-400/[0.05]
                                       text-emerald-400
                                     "
-                                  >
-                                    Active
-                                  </span>
-                                </div>
-                              </div>
-
-                              <div className="lg:hidden flex items-center gap-3">
-                                <ArrowLeft className="h-4 w-4 rotate-180 shrink-0 text-slate-600" />
-
-                                <div className="min-w-0 flex-1">
-                                  <p className="text-xs font-semibold text-white truncate">
-                                    {item.subject_name || "Unknown Subject"}
-                                  </p>
-
-                                  <p className="text-[9px] text-slate-600 mt-1 truncate">
-                                    {item.teacher_name || "Unknown Teacher"}
-                                    {" • "}
-                                    {formatTime(item.start_time)}–
-                                    {formatTime(item.end_time)}
-                                  </p>
-
-                                  <p className="text-[9px] text-slate-700 mt-1 truncate">
-                                    {formatBooks(item.books)}
-                                  </p>
-                                </div>
-
-                                <span className="shrink-0 rounded-full border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-[8px] text-slate-500">
-                                  {item.enrolled_count || 0}
+                                >
+                                  Active
                                 </span>
                               </div>
-                            </button>
-                          </div>
-                        );
-                      })}
+                            </div>
+
+                            <div className="lg:hidden flex items-center gap-3">
+                              <ArrowLeft className="h-4 w-4 rotate-180 shrink-0 text-slate-600" />
+
+                              <div className="min-w-0 flex-1">
+                                <p className="text-xs font-semibold text-white truncate">
+                                  {item.subject_name || "Unknown Subject"}
+                                </p>
+
+                                <p className="text-[9px] text-slate-600 mt-1 truncate">
+                                  {item.teacher_name || "Unknown Teacher"}
+                                  {" • "}
+                                  {formatTime(item.start_time)}–
+                                  {formatTime(item.end_time)}
+                                </p>
+
+                                <p className="text-[9px] text-slate-700 mt-1 truncate">
+                                  {formatBooks(item.books)}
+                                </p>
+                              </div>
+
+                              <span className="shrink-0 rounded-full border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-[8px] text-slate-500">
+                                {item.enrolled_count || 0}
+                              </span>
+                            </div>
+                          </button>
+                        </div>
+                      ))}
                     </div>
                   </div>
 
@@ -2813,9 +3005,9 @@ export default function Fees() {
 
                 <InfoBox
                   label="Time"
-                  value={`${formatTime(
-                    selectedClass.start_time,
-                  )}–${formatTime(selectedClass.end_time)}`}
+                  value={`${formatTime(selectedClass.start_time)}–${formatTime(
+                    selectedClass.end_time,
+                  )}`}
                 />
 
                 <InfoBox label="Room" value={selectedClass.room || "—"} />
@@ -2926,17 +3118,17 @@ export default function Fees() {
                             })
                           }
                           className={`
-                            w-full
-                            text-left
-                            px-3 sm:px-4
-                            py-3
-                            transition-colors
-                            ${
-                              studentSelected
-                                ? "bg-[#f2bd19]/[0.045]"
-                                : "hover:bg-white/[0.02]"
-                            }
-                          `}
+                              w-full
+                              text-left
+                              px-3 sm:px-4
+                              py-3
+                              transition-colors
+                              ${
+                                studentSelected
+                                  ? "bg-[#f2bd19]/[0.045]"
+                                  : "hover:bg-white/[0.02]"
+                              }
+                            `}
                         >
                           <div className="hidden md:grid grid-cols-[minmax(180px,1.4fr)_minmax(130px,1fr)_100px_minmax(230px,1.5fr)_28px] gap-3 items-center">
                             <div className="min-w-0">
@@ -2985,13 +3177,13 @@ export default function Fees() {
                             <div className="flex items-start gap-3">
                               <div
                                 className="
-                                  h-8 w-8
-                                  shrink-0
-                                  rounded-lg
-                                  bg-white/[0.035]
-                                  border border-white/[0.05]
-                                  grid place-items-center
-                                "
+                                    h-8 w-8
+                                    shrink-0
+                                    rounded-lg
+                                    bg-white/[0.035]
+                                    border border-white/[0.05]
+                                    grid place-items-center
+                                  "
                               >
                                 <UserRound className="h-3.5 w-3.5 text-slate-600" />
                               </div>
@@ -3206,9 +3398,13 @@ export default function Fees() {
 
                   <div className="mt-5 flex flex-wrap items-center gap-3">
                     <LegendItem dot="bg-emerald-400" label="Paid" />
+
                     <LegendItem dot="bg-amber-400" label="Partial" />
+
                     <LegendItem dot="bg-red-400" label="Payment Due" />
+
                     <LegendItem dot="bg-blue-400" label="Upcoming" />
+
                     <LegendItem dot="bg-slate-800" label="Not Started" />
                   </div>
 
@@ -3221,7 +3417,9 @@ export default function Fees() {
                         selected={
                           paymentMonth &&
                           Number(paymentMonth.solar_month) ===
-                            Number(month.solar_month)
+                            Number(month.solar_month) &&
+                          Number(paymentMonth.solar_year) ===
+                            Number(month.solar_year)
                         }
                         onClick={openPayment}
                       />
@@ -3255,26 +3453,26 @@ export default function Fees() {
                     ) : (
                       <div className="space-y-2">
                         {history.payments.map((payment) => {
-                          const paymentAmount = Number(payment.amount || 0);
+                          const paymentAmount = roundMoney(payment.amount);
 
                           return (
                             <div
                               key={payment.payment_id}
                               className="
-                                rounded-xl
-                                border border-white/[0.05]
-                                bg-[#0d1013]
-                                px-3 sm:px-4 py-3
-                              "
+                                  rounded-xl
+                                  border border-white/[0.05]
+                                  bg-[#0d1013]
+                                  px-3 sm:px-4 py-3
+                                "
                             >
                               <div
                                 className="
-                                  flex flex-col
-                                  sm:flex-row
-                                  sm:items-center
-                                  sm:justify-between
-                                  gap-3
-                                "
+                                    flex flex-col
+                                    sm:flex-row
+                                    sm:items-center
+                                    sm:justify-between
+                                    gap-3
+                                  "
                               >
                                 <div className="min-w-0">
                                   <p className="text-xs font-semibold text-white">
@@ -3299,20 +3497,21 @@ export default function Fees() {
                                     type="button"
                                     onClick={(event) => {
                                       event.stopPropagation();
+
                                       requestEditPayment(payment);
                                     }}
                                     disabled={savingTransaction}
                                     className="
-                                      h-8 w-8 shrink-0 rounded-lg
-                                      border border-white/[0.06]
-                                      bg-white/[0.02]
-                                      grid place-items-center
-                                      text-slate-600
-                                      hover:text-[#f2bd19]
-                                      hover:border-[#f2bd19]/20
-                                      transition
-                                      disabled:opacity-40
-                                    "
+                                        h-8 w-8 shrink-0 rounded-lg
+                                        border border-white/[0.06]
+                                        bg-white/[0.02]
+                                        grid place-items-center
+                                        text-slate-600
+                                        hover:text-[#f2bd19]
+                                        hover:border-[#f2bd19]/20
+                                        transition
+                                        disabled:opacity-40
+                                      "
                                     title="Edit transaction"
                                   >
                                     <Pencil className="h-3.5 w-3.5" />
@@ -3322,20 +3521,21 @@ export default function Fees() {
                                     type="button"
                                     onClick={(event) => {
                                       event.stopPropagation();
+
                                       requestDeletePayment(payment);
                                     }}
                                     disabled={savingTransaction}
                                     className="
-                                      h-8 w-8 shrink-0 rounded-lg
-                                      border border-white/[0.06]
-                                      bg-white/[0.02]
-                                      grid place-items-center
-                                      text-slate-600
-                                      hover:text-red-300
-                                      hover:border-red-400/20
-                                      transition
-                                      disabled:opacity-40
-                                    "
+                                        h-8 w-8 shrink-0 rounded-lg
+                                        border border-white/[0.06]
+                                        bg-white/[0.02]
+                                        grid place-items-center
+                                        text-slate-600
+                                        hover:text-red-300
+                                        hover:border-red-400/20
+                                        transition
+                                        disabled:opacity-40
+                                      "
                                     title="Delete transaction"
                                   >
                                     <Trash2 className="h-3.5 w-3.5" />
@@ -3380,12 +3580,12 @@ export default function Fees() {
                               {payment.comment ? (
                                 <div
                                   className="
-                                    mt-2
-                                    rounded-lg
-                                    border border-[#f2bd19]/10
-                                    bg-[#f2bd19]/[0.025]
-                                    px-3 py-2
-                                  "
+                                      mt-2
+                                      rounded-lg
+                                      border border-[#f2bd19]/10
+                                      bg-[#f2bd19]/[0.025]
+                                      px-3 py-2
+                                    "
                                 >
                                   <p className="text-[8px] uppercase tracking-wider text-slate-700">
                                     Comment
@@ -3477,11 +3677,14 @@ export default function Fees() {
             }
             onVerified={pendingEdit ? confirmEditPayment : confirmPayment}
             onCancel={() => {
-              if (savingPayment || savingTransaction) return;
+              if (savingPayment || savingTransaction) {
+                return;
+              }
 
               setPasswordConfirmOpen(false);
               setPendingPayment(null);
               setPendingEdit(null);
+              setEditingPayment(null);
             }}
           />
         </div>
@@ -3506,7 +3709,9 @@ export default function Fees() {
             confirmLabel="Verify & Delete Transaction"
             onVerified={confirmDeletePayment}
             onCancel={() => {
-              if (savingTransaction) return;
+              if (savingTransaction) {
+                return;
+              }
 
               setDeletePasswordConfirmOpen(false);
               setDeletePaymentTarget(null);

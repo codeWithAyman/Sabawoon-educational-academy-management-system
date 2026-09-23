@@ -1,2428 +1,3084 @@
-import { useEffect, useMemo, useState } from "react";
-
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  AlertTriangle,
   Banknote,
-  CalendarRange,
+  BookOpen,
+  CalendarDays,
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
+  CreditCard,
+  History,
   Loader2,
-  LockKeyhole,
+  Lock,
   RefreshCw,
-  Save,
+  Search,
   ShieldCheck,
+  UserRound,
   Users,
-  WalletCards,
-  XCircle,
+  Wallet,
+  X,
 } from "lucide-react";
 
 import api from "../lib/api";
+import PasswordConfirmModal from "../components/PasswordConfirmModal";
 import { useAuth } from "../context/AuthContext";
+import { useToast } from "../components/Toast";
 
 /* ==========================================================================
-   CONSTANTS
+   SOLAR HIJRI
 ========================================================================== */
 
-const EMPTY_TEACHER_DATA = {
-  current_share_rate: 30,
+const SOLAR_MONTHS = [
+  "Hamal",
+  "Saur",
+  "Jawza",
+  "Saratan",
+  "Asad",
+  "Sunbula",
+  "Mizan",
+  "Aqrab",
+  "Qaws",
+  "Jadi",
+  "Dalw",
+  "Hoot",
+];
 
-  totals: {
-    total_payment_amount: 0,
-    attributable_amount: 0,
-    teacher_share_amount: 0,
-    unattributed_amount: 0,
-    payment_count: 0,
-    teacher_count: 0,
-  },
+const STAFF_HANDOVER_ENDPOINT = "/finance/staff-transactions/handover";
+const TEACHER_STUDENT_SETTLE_ENDPOINT = "/finance/teacher-students/settle";
 
-  teachers: [],
-  payments: [],
-};
-
-const SOLAR_PLACEHOLDER = "1405-06-01";
+const PAGE_SIZE = 25;
 
 /* ==========================================================================
    HELPERS
 ========================================================================== */
 
-function money(value) {
-  return `${Number(value || 0).toLocaleString(undefined, {
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function getTodaySolar() {
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US-u-ca-persian-nu-latn", {
+      timeZone: "Asia/Kabul",
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+    });
+
+    const parts = formatter.formatToParts(new Date());
+
+    const year = Number(parts.find((part) => part.type === "year")?.value);
+    const month = Number(parts.find((part) => part.type === "month")?.value);
+    const day = Number(parts.find((part) => part.type === "day")?.value);
+
+    if (
+      Number.isInteger(year) &&
+      Number.isInteger(month) &&
+      Number.isInteger(day)
+    ) {
+      return {
+        year,
+        month,
+        day,
+        formatted: `${year}/${pad2(month)}/${pad2(day)}`,
+      };
+    }
+  } catch {
+    // Backend remains authoritative.
+  }
+
+  return {
+    year: 1405,
+    month: 1,
+    day: 1,
+    formatted: "1405/01/01",
+  };
+}
+
+function solarMonthDays(year, month) {
+  const y = Number(year);
+  const m = Number(month);
+
+  if (m >= 1 && m <= 6) return 31;
+  if (m >= 7 && m <= 11) return 30;
+
+  if (m === 12) {
+    try {
+      const formatter = new Intl.DateTimeFormat("en-US-u-ca-persian-nu-latn", {
+        timeZone: "Asia/Kabul",
+        year: "numeric",
+        month: "numeric",
+        day: "numeric",
+      });
+
+      const start = new Date(Date.UTC(2027, 2, 20, 12));
+
+      for (let i = 0; i <= 2; i += 1) {
+        const date = new Date(start.getTime() + i * 86400000);
+
+        const parts = formatter.formatToParts(date);
+
+        const jy = Number(parts.find((part) => part.type === "year")?.value);
+        const jm = Number(parts.find((part) => part.type === "month")?.value);
+        const jd = Number(parts.find((part) => part.type === "day")?.value);
+
+        if (jy === y && jm === 12 && jd === 30) {
+          return 30;
+        }
+      }
+    } catch {
+      // Backend remains authoritative.
+    }
+
+    return y % 4 === 3 ? 30 : 29;
+  }
+
+  return 30;
+}
+
+function solarMonthStart(year, month) {
+  return `${year}-${pad2(month)}-01`;
+}
+
+function solarMonthEnd(year, month) {
+  return `${year}-${pad2(month)}-${pad2(solarMonthDays(year, month))}`;
+}
+
+function formatMoney(value) {
+  const number = Number(value || 0);
+
+  return new Intl.NumberFormat("en-US", {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2,
-  })} AFN`;
+  }).format(number);
 }
 
-function normalDate(value) {
-  if (!value) {
-    return "—";
+function formatSolarDate(value) {
+  if (!value) return "—";
+
+  const text = String(value);
+
+  const match = text.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+
+  if (match) {
+    return `${match[1]}/${pad2(match[2])}/${pad2(match[3])}`;
   }
 
-  return String(value).slice(0, 10);
+  return text;
 }
 
-function statusLabel(status) {
-  switch (status) {
-    case "matched":
-      return "Matched";
+function formatPaymentDate(row) {
+  return formatSolarDate(
+    row?.payment_solar_date ||
+      row?.solar_payment_date ||
+      row?.payment_date ||
+      row?.created_at,
+  );
+}
 
-    case "short":
-      return "Short";
+function monthName(month) {
+  return SOLAR_MONTHS[Number(month) - 1] || `Month ${Number(month) || ""}`;
+}
 
-    case "over":
-      return "Over";
+function monthLabel(year, month) {
+  return `${monthName(month)} ${year}`;
+}
 
-    case "pending":
-      return "Pending";
+function normalizeStatus(value) {
+  const status = String(value || "").toLowerCase();
 
-    default:
-      return status || "Unknown";
+  if (
+    status === "paid" ||
+    status === "settled" ||
+    status === "handed_over" ||
+    status === "received" ||
+    status === "complete"
+  ) {
+    return "paid";
   }
-}
 
-function statusClasses(status) {
-  switch (status) {
-    case "matched":
-      return "border-emerald-400/20 bg-emerald-400/10 text-emerald-300";
-
-    case "short":
-      return "border-red-400/20 bg-red-400/10 text-red-300";
-
-    case "over":
-      return "border-amber-400/20 bg-amber-400/10 text-amber-300";
-
-    default:
-      return "border-white/10 bg-white/[0.04] text-slate-300";
+  if (status === "partial" || status === "partially_paid") {
+    return "partial";
   }
+
+  if (status === "pending" || status === "unpaid" || status === "due") {
+    return "pending";
+  }
+
+  return status || "pending";
 }
 
-function inputClassName() {
+function teacherStudentKey(student) {
+  return String(
+    student?.enrollment_id ??
+      student?.student_enrollment_id ??
+      `${student?.student_id || ""}-${student?.class_slot_id || ""}`,
+  );
+}
+
+function getTeacherStudentSettlementStatus(student) {
+  return String(
+    student?.teacher_settlement_status ||
+      student?.teacher_payment_status ||
+      student?.settlement_status ||
+      "pending",
+  ).toLowerCase();
+}
+
+function isTeacherStudentSettled(student) {
+  const status = getTeacherStudentSettlementStatus(student);
+
+  return ["paid", "settled", "handed_over", "complete"].includes(status);
+}
+
+function getStaffTransactionStatus(transaction) {
+  return String(
+    transaction?.handover_status ||
+      transaction?.staff_handover_status ||
+      transaction?.cash_handover_status ||
+      "pending",
+  ).toLowerCase();
+}
+
+function isStaffTransactionHandedOver(transaction) {
   return [
-    "w-full",
-    "rounded-xl",
-    "border",
-    "border-white/[0.08]",
-    "bg-[#0d1014]",
-    "px-3",
-    "py-2.5",
-    "text-sm",
-    "text-white",
-    "outline-none",
-    "transition",
-    "placeholder:text-slate-600",
-    "focus:border-[#f2bd19]/50",
-    "focus:ring-2",
-    "focus:ring-[#f2bd19]/10",
-  ].join(" ");
+    "handed_over",
+    "received",
+    "settled",
+    "reconciled",
+    "paid",
+    "complete",
+  ].includes(getStaffTransactionStatus(transaction));
 }
 
-function buttonClassName(extra = "") {
-  return [
-    "inline-flex",
-    "items-center",
-    "justify-center",
-    "gap-2",
-    "rounded-xl",
-    "px-3.5",
-    "py-2.5",
-    "text-sm",
-    "font-semibold",
-    "transition",
-    "disabled:cursor-not-allowed",
-    "disabled:opacity-50",
-    extra,
-  ].join(" ");
+function normalizePage(data, fallbackPage = 1) {
+  return {
+    page: Number(data?.pagination?.page || fallbackPage),
+    limit: Number(data?.pagination?.limit || PAGE_SIZE),
+    totalItems: Number(
+      data?.pagination?.total_items || data?.pagination?.total || 0,
+    ),
+    totalPages: Number(data?.pagination?.total_pages || 0),
+  };
 }
 
 /* ==========================================================================
    SMALL UI
 ========================================================================== */
 
+function StatusBadge({ status }) {
+  const normalized = normalizeStatus(status);
+
+  const config = {
+    paid: {
+      label: "Paid",
+      dot: "bg-emerald-400",
+      className: "border-emerald-400/15 bg-emerald-400/[0.06] text-emerald-300",
+    },
+    partial: {
+      label: "Partial",
+      dot: "bg-amber-400",
+      className: "border-amber-400/15 bg-amber-400/[0.06] text-amber-300",
+    },
+    pending: {
+      label: "Pending",
+      dot: "bg-red-400",
+      className: "border-red-400/15 bg-red-400/[0.06] text-red-300",
+    },
+  };
+
+  const meta = config[normalized] || {
+    label: String(status || "Pending")
+      .replaceAll("_", " ")
+      .replace(/\b\w/g, (x) => x.toUpperCase()),
+    dot: "bg-slate-500",
+    className: "border-white/[0.06] bg-white/[0.02] text-slate-400",
+  };
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[8px] font-semibold ${meta.className}`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${meta.dot}`} />
+      {meta.label}
+    </span>
+  );
+}
+
+function HandoverBadge({ handedOver }) {
+  if (handedOver) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/15 bg-emerald-400/[0.06] px-2 py-1 text-[8px] font-semibold text-emerald-300">
+        <CheckCircle2 className="h-3 w-3" />
+        Handed Over
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-400/15 bg-amber-400/[0.06] px-2 py-1 text-[8px] font-semibold text-amber-300">
+      <Clock3 className="h-3 w-3" />
+      Pending Handover
+    </span>
+  );
+}
+
 function StatCard({ icon: Icon, label, value, sublabel }) {
   return (
-    <div className="rounded-2xl border border-white/[0.07] bg-[#121519] p-4 shadow-[0_16px_50px_rgba(0,0,0,0.18)]">
+    <div className="rounded-xl border border-white/[0.06] bg-[#121519] p-3">
       <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+        <div className="min-w-0">
+          <p className="text-[8px] uppercase tracking-[0.15em] text-slate-600">
             {label}
-          </div>
-
-          <div className="mt-2 text-xl font-bold tracking-tight text-white">
-            {value}
-          </div>
-
-          {sublabel ? (
-            <div className="mt-1 text-xs text-slate-500">
-              {sublabel}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-[#f2bd19]/15 bg-[#f2bd19]/10">
-          <Icon className="h-5 w-5 text-[#f2bd19]" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SectionHeader({ title, description, right }) {
-  return (
-    <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-      <div>
-        <h2 className="text-base font-bold text-white">
-          {title}
-        </h2>
-
-        {description ? (
-          <p className="mt-1 max-w-3xl text-xs leading-5 text-slate-500">
-            {description}
           </p>
-        ) : null}
-      </div>
 
-      {right}
+          <p className="mt-1.5 text-lg font-bold text-white">{value}</p>
+
+          {sublabel && (
+            <p className="mt-1 text-[8px] text-slate-600">{sublabel}</p>
+          )}
+        </div>
+
+        <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-white/[0.06] bg-white/[0.025]">
+          <Icon className="h-3.5 w-3.5 text-slate-500" />
+        </div>
+      </div>
     </div>
   );
 }
 
-function EmptyState({ title, description }) {
+function EmptyState({ icon: Icon = Wallet, title, description }) {
   return (
-    <div className="rounded-2xl border border-dashed border-white/[0.08] bg-[#0f1216] px-6 py-12 text-center">
-      <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl border border-white/[0.08] bg-white/[0.03]">
-        <Banknote className="h-5 w-5 text-slate-500" />
+    <div className="rounded-xl border border-dashed border-white/[0.07] px-5 py-12 text-center">
+      <div className="mx-auto grid h-10 w-10 place-items-center rounded-xl border border-white/[0.06] bg-white/[0.02]">
+        <Icon className="h-4.5 w-4.5 text-slate-600" />
       </div>
 
-      <div className="mt-4 text-sm font-semibold text-slate-300">
-        {title}
-      </div>
+      <p className="mt-3 text-xs font-semibold text-slate-400">{title}</p>
 
-      <div className="mx-auto mt-1 max-w-md text-xs leading-5 text-slate-600">
-        {description}
+      {description && (
+        <p className="mx-auto mt-1 max-w-sm text-[9px] leading-relaxed text-slate-700">
+          {description}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Pagination({ page, totalPages, onPrevious, onNext }) {
+  if (!totalPages || totalPages <= 1) return null;
+
+  return (
+    <div className="flex items-center justify-between border-t border-white/[0.05] px-3 py-2.5">
+      <p className="text-[8px] text-slate-600">
+        Page {page} of {totalPages}
+      </p>
+
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={onPrevious}
+          disabled={page <= 1}
+          className="grid h-7 w-7 place-items-center rounded-lg border border-white/[0.06] bg-white/[0.02] text-slate-500 transition hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+        >
+          <ChevronLeft className="h-3.5 w-3.5" />
+        </button>
+
+        <button
+          type="button"
+          onClick={onNext}
+          disabled={page >= totalPages}
+          className="grid h-7 w-7 place-items-center rounded-lg border border-white/[0.06] bg-white/[0.02] text-slate-500 transition hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </button>
       </div>
     </div>
   );
 }
 
-/* ==========================================================================
-   PASSWORD LOCK
-========================================================================== */
-
-function FinanceLockScreen({
-  password,
-  setPassword,
-  onUnlock,
-  loading,
-  error,
+function Checkbox({
+  checked,
+  indeterminate = false,
+  onChange,
+  disabled = false,
 }) {
   return (
-    <div className="min-h-full bg-[#0b0d10] px-4 py-6 text-white sm:px-6 lg:px-8">
-      <div className="mx-auto flex min-h-[calc(100vh-120px)] max-w-xl items-center justify-center">
-        <div className="w-full rounded-[28px] border border-white/[0.08] bg-[#121519] p-6 shadow-[0_30px_100px_rgba(0,0,0,0.38)] sm:p-8">
-          <div className="mx-auto grid h-16 w-16 place-items-center rounded-2xl border border-[#f2bd19]/20 bg-[#f2bd19]/10">
-            <LockKeyhole className="h-7 w-7 text-[#f2bd19]" />
-          </div>
-
-          <div className="mt-6 text-center">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-[#f2bd19]">
-              Admin Finance
-            </div>
-
-            <h1 className="mt-2 text-2xl font-bold tracking-tight text-white">
-              Financial area locked
-            </h1>
-
-            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-500">
-              Enter your administrator password to open teacher
-              compensation and cash reconciliation.
-            </p>
-          </div>
-
-          <form
-            className="mt-7 space-y-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              onUnlock();
-            }}
-          >
-            <label className="block text-xs font-semibold text-slate-400">
-              Administrator password
-            </label>
-
-            <input
-              type="password"
-              value={password}
-              onChange={(event) =>
-                setPassword(event.target.value)
-              }
-              placeholder="Enter your password"
-              autoFocus
-              className={inputClassName()}
-            />
-
-            {error ? (
-              <div className="rounded-xl border border-red-400/20 bg-red-400/10 px-3 py-2.5 text-xs text-red-300">
-                {error}
-              </div>
-            ) : null}
-
-            <button
-              type="submit"
-              disabled={loading || !password}
-              className={buttonClassName(
-                "w-full bg-[#f2bd19] text-[#0b0d10] hover:bg-[#ffd449]",
-              )}
-            >
-              {loading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <ShieldCheck className="h-4 w-4" />
-              )}
-
-              {loading
-                ? "Verifying..."
-                : "Unlock Finance"}
-            </button>
-          </form>
-        </div>
-      </div>
-    </div>
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onChange}
+      className={`grid h-4 w-4 shrink-0 place-items-center rounded border transition ${
+        checked || indeterminate
+          ? "border-[#f2bd19] bg-[#f2bd19] text-black"
+          : "border-white/[0.14] bg-white/[0.025] text-transparent hover:border-white/25"
+      } disabled:cursor-not-allowed disabled:opacity-40`}
+      aria-pressed={checked}
+    >
+      {indeterminate ? (
+        <span className="h-0.5 w-2 rounded-full bg-black" />
+      ) : checked ? (
+        <Check className="h-3 w-3" strokeWidth={3} />
+      ) : null}
+    </button>
   );
 }
 
 /* ==========================================================================
-   MAIN PAGE
+   MAIN
 ========================================================================== */
 
 export default function Finance() {
   const { user } = useAuth();
-
-  const [locked, setLocked] = useState(true);
-  const [password, setPassword] = useState("");
-  const [unlocking, setUnlocking] = useState(false);
-  const [unlockError, setUnlockError] = useState("");
-
-  const [tab, setTab] = useState("teacher");
-
-  const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-
-  const [teacherData, setTeacherData] =
-    useState(EMPTY_TEACHER_DATA);
-
-  const [shareRate, setShareRate] = useState(30);
-  const [shareRateInput, setShareRateInput] = useState("30");
-  const [shareRateSaving, setShareRateSaving] =
-    useState(false);
-
-  const [teacherFromDate, setTeacherFromDate] =
-    useState("");
-  const [teacherToDate, setTeacherToDate] =
-    useState("");
-
-  const [collectors, setCollectors] = useState([]);
-
-  const [reconciliations, setReconciliations] =
-    useState([]);
-
-  const [
-    reconciliationCollectorFilter,
-    setReconciliationCollectorFilter,
-  ] = useState("");
-
-  const [
-    reconciliationFromDate,
-    setReconciliationFromDate,
-  ] = useState("");
-
-  const [
-    reconciliationToDate,
-    setReconciliationToDate,
-  ] = useState("");
-
-  const [reconciliationForm, setReconciliationForm] =
-    useState({
-      collector_user_id: "",
-      from_solar_date: "",
-      to_solar_date: "",
-      handed_over_amount: "",
-      notes: "",
-    });
-
-  const [expectedPreview, setExpectedPreview] =
-    useState(null);
-
-  const [expectedLoading, setExpectedLoading] =
-    useState(false);
-
-  const [
-    reconciliationSaving,
-    setReconciliationSaving,
-  ] = useState(false);
-
-  const [
-    editingReconciliation,
-    setEditingReconciliation,
-  ] = useState(null);
-
-  const [
-    editReconciliationForm,
-    setEditReconciliationForm,
-  ] = useState({
-    handed_over_amount: "",
-    notes: "",
-  });
-
-  const [editSaving, setEditSaving] =
-    useState(false);
+  const toast = useToast();
 
   const isAdmin = user?.role === "admin";
 
-  /* ========================================================================
-     UNLOCK
-  ======================================================================== */
+  const today = useMemo(() => getTodaySolar(), []);
 
-  async function unlockFinance() {
-    if (!password) {
-      return;
-    }
+  const [activeTab, setActiveTab] = useState("teacher");
 
-    setUnlocking(true);
-    setUnlockError("");
+  const [selectedYear, setSelectedYear] = useState(today.year);
+  const [selectedMonth, setSelectedMonth] = useState(today.month);
 
-    try {
-      await api.post("/auth/verify-password", {
-        password,
-      });
+  const selectedMonthLabel = useMemo(
+    () => monthLabel(selectedYear, selectedMonth),
+    [selectedYear, selectedMonth],
+  );
 
-      setPassword("");
-      setLocked(false);
-      setUnlockError("");
-    } catch (requestError) {
-      setUnlockError(
-        requestError.response?.data?.error ||
-          "Administrator password is incorrect.",
-      );
-    } finally {
-      setUnlocking(false);
-    }
-  }
+  /* ==========================================================================
+     FINANCE SECURITY
+  ========================================================================== */
 
-  /* ========================================================================
-     DATA LOADERS
-  ======================================================================== */
+  const [financeUnlocked, setFinanceUnlocked] = useState(false);
+  const [financeVerificationToken, setFinanceVerificationToken] = useState("");
 
-  async function loadTeacherData(showLoader = true) {
-    if (showLoader) {
-      setLoading(true);
-    }
+  const [financePasswordOpen, setFinancePasswordOpen] = useState(false);
 
-    try {
-      const params = {};
+  const [actionPasswordOpen, setActionPasswordOpen] = useState(false);
 
-      if (teacherFromDate.trim()) {
-        params.from_solar_date =
-          teacherFromDate.trim();
-      }
+  const [actionTarget, setActionTarget] = useState(null);
 
-      if (teacherToDate.trim()) {
-        params.to_solar_date =
-          teacherToDate.trim();
-      }
+  /* ==========================================================================
+     TEACHERS
+  ========================================================================== */
 
-      const response = await api.get(
-        "/finance/teacher-shares",
-        { params },
-      );
+  const [teachers, setTeachers] = useState([]);
+  const [teacherSearch, setTeacherSearch] = useState("");
+  const [selectedTeacherId, setSelectedTeacherId] = useState(null);
 
-      const data = {
-        ...EMPTY_TEACHER_DATA,
-        ...response.data,
+  const [teacherLoading, setTeacherLoading] = useState(false);
+  const [teacherRefreshing, setTeacherRefreshing] = useState(false);
 
-        totals: {
-          ...EMPTY_TEACHER_DATA.totals,
-          ...(response.data?.totals || {}),
-        },
+  const [teacherMonthly, setTeacherMonthly] = useState(null);
 
-        teachers: Array.isArray(response.data?.teachers)
-          ? response.data.teachers
-          : [],
+  const [teacherPage, setTeacherPage] = useState(1);
+  const [teacherHistory, setTeacherHistory] = useState([]);
 
-        payments: Array.isArray(response.data?.payments)
-          ? response.data.payments
-          : [],
-      };
+  const [shareRate, setShareRate] = useState(30);
+  const [shareRateEditing, setShareRateEditing] = useState(false);
+  const [shareRateInput, setShareRateInput] = useState("30");
+  const [shareRateSaving, setShareRateSaving] = useState(false);
 
-      setTeacherData(data);
+  const [selectedTeacherStudents, setSelectedTeacherStudents] = useState(
+    new Set(),
+  );
 
-      const rate = Number(
-        response.data?.current_share_rate ?? 30,
-      );
+  const [teacherSettlementLoading, setTeacherSettlementLoading] =
+    useState(false);
 
-      setShareRate(rate);
-      setShareRateInput(String(rate));
+  /* ==========================================================================
+     STAFF
+  ========================================================================== */
 
-      return response;
-    } catch (requestError) {
-      console.error(
-        "Finance teacher-shares error:",
-        requestError,
-      );
+  const [staff, setStaff] = useState([]);
+  const [staffSearch, setStaffSearch] = useState("");
+  const [selectedStaffId, setSelectedStaffId] = useState(null);
 
-      throw requestError;
-    } finally {
-      if (showLoader) {
-        setLoading(false);
-      }
-    }
-  }
+  const [staffLoading, setStaffLoading] = useState(false);
+  const [staffSummary, setStaffSummary] = useState(null);
 
-  async function loadCollectors() {
-    try {
-      const response = await api.get(
-        "/finance/collectors",
-      );
+  const [staffPayments, setStaffPayments] = useState([]);
+  const [staffPaymentsLoading, setStaffPaymentsLoading] = useState(false);
 
-      setCollectors(
-        Array.isArray(response.data)
-          ? response.data
-          : [],
-      );
+  const [staffPage, setStaffPage] = useState(1);
+  const [staffPagination, setStaffPagination] = useState({
+    page: 1,
+    totalPages: 0,
+    totalItems: 0,
+  });
 
-      return response;
-    } catch (requestError) {
-      console.error(
-        "Finance collectors error:",
-        requestError,
-      );
+  const [selectedStaffTransactions, setSelectedStaffTransactions] = useState(
+    new Set(),
+  );
 
-      throw requestError;
-    }
-  }
+  const [staffActivity, setStaffActivity] = useState([]);
+  const [staffActivityLoading, setStaffActivityLoading] = useState(false);
 
-  async function loadReconciliations(
-    showLoader = true,
-  ) {
-    if (showLoader) {
-      setLoading(true);
-    }
+  const [staffActivityPage, setStaffActivityPage] = useState(1);
 
-    try {
-      const params = {};
+  const [staffActivityPagination, setStaffActivityPagination] = useState({
+    page: 1,
+    totalPages: 0,
+    totalItems: 0,
+  });
 
-      if (reconciliationCollectorFilter) {
-        params.collector_user_id =
-          reconciliationCollectorFilter;
-      }
-
-      if (reconciliationFromDate.trim()) {
-        params.from_solar_date =
-          reconciliationFromDate.trim();
-      }
-
-      if (reconciliationToDate.trim()) {
-        params.to_solar_date =
-          reconciliationToDate.trim();
-      }
-
-      const response = await api.get(
-        "/finance/cash-reconciliation",
-        { params },
-      );
-
-      setReconciliations(
-        Array.isArray(response.data)
-          ? response.data
-          : [],
-      );
-
-      return response;
-    } catch (requestError) {
-      console.error(
-        "Finance reconciliation error:",
-        requestError,
-      );
-
-      throw requestError;
-    } finally {
-      if (showLoader) {
-        setLoading(false);
-      }
-    }
-  }
-
-  /*
-    We use Promise.allSettled so one endpoint does not prevent
-    the other Finance sections from loading.
-
-    The first failed endpoint is still surfaced clearly.
-  */
-  async function loadAll() {
-    setError("");
-    setMessage("");
-    setLoading(true);
-
-    try {
-      const results = await Promise.allSettled([
-        loadTeacherData(false),
-        loadCollectors(),
-        loadReconciliations(false),
-      ]);
-
-      const failed = results.find(
-        (result) => result.status === "rejected",
-      );
-
-      if (failed) {
-        const requestError = failed.reason;
-
-        const backendMessage =
-          requestError?.response?.data?.error ||
-          requestError?.response?.data?.message ||
-          requestError?.message ||
-          "Failed to load finance data.";
-
-        console.error(
-          "Finance load failure:",
-          requestError,
-        );
-
-        setError(backendMessage);
-      }
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  /* ========================================================================
-     INITIAL LOAD AFTER UNLOCK
-  ======================================================================== */
+  /* ==========================================================================
+     SECURITY
+  ========================================================================== */
 
   useEffect(() => {
-    if (locked || !isAdmin) {
+    if (!isAdmin) {
+      setFinanceUnlocked(false);
+      setFinanceVerificationToken("");
       return;
     }
 
-    loadAll();
-  }, [locked, isAdmin]);
+    setFinancePasswordOpen(true);
+  }, [isAdmin]);
 
-  /* ========================================================================
-     RATE
-  ======================================================================== */
+  function handleFinancePasswordVerified(response) {
+    const token = response?.verification_token;
+
+    if (!token) {
+      toast.error("Finance verification token was not returned.");
+      return;
+    }
+
+    setFinanceVerificationToken(token);
+    setFinanceUnlocked(true);
+    setFinancePasswordOpen(false);
+  }
+
+  function lockFinance() {
+    setFinanceUnlocked(false);
+    setFinanceVerificationToken("");
+    setFinancePasswordOpen(true);
+  }
+
+  /* ==========================================================================
+     LOAD TEACHERS
+  ========================================================================== */
+
+  const loadTeachers = useCallback(async () => {
+    if (!financeUnlocked) return;
+
+    setTeacherLoading(true);
+
+    try {
+      const { data } = await api.get("/finance/teachers");
+
+      const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.teachers)
+          ? data.teachers
+          : [];
+
+      setTeachers(list);
+
+      if (selectedTeacherId === null && list.length > 0) {
+        setSelectedTeacherId(Number(list[0].teacher_id ?? list[0].id));
+      }
+    } catch (error) {
+      if (error?.response?.status === 401 || error?.response?.status === 403) {
+        lockFinance();
+      }
+
+      toast.error(error?.response?.data?.error || "Failed to load teachers.");
+    } finally {
+      setTeacherLoading(false);
+    }
+  }, [financeUnlocked, selectedTeacherId, toast]);
+
+  /* ==========================================================================
+     LOAD TEACHER MONTHLY
+  ========================================================================== */
+
+  const loadTeacherMonthly = useCallback(
+    async (showSpinner = true) => {
+      if (!financeUnlocked || !selectedTeacherId) {
+        return;
+      }
+
+      if (showSpinner) {
+        setTeacherLoading(true);
+      } else {
+        setTeacherRefreshing(true);
+      }
+
+      try {
+        const params = new URLSearchParams();
+
+        params.set("teacher_id", String(selectedTeacherId));
+        params.set("solar_year", String(selectedYear));
+        params.set("solar_month", String(selectedMonth));
+        params.set("page", String(teacherPage));
+        params.set("limit", String(PAGE_SIZE));
+
+        const { data } = await api.get(
+          `/finance/teacher-monthly?${params.toString()}`,
+        );
+
+        setTeacherMonthly(data || null);
+
+        if (data?.summary?.share_percent !== undefined) {
+          setShareRate(Number(data.summary.share_percent));
+          setShareRateInput(String(data.summary.share_percent));
+        }
+
+        setSelectedTeacherStudents(new Set());
+      } catch (error) {
+        if (
+          error?.response?.status === 401 ||
+          error?.response?.status === 403
+        ) {
+          lockFinance();
+        }
+
+        toast.error(
+          error?.response?.data?.error ||
+            "Failed to load teacher financial data.",
+        );
+      } finally {
+        setTeacherLoading(false);
+        setTeacherRefreshing(false);
+      }
+    },
+    [
+      financeUnlocked,
+      selectedTeacherId,
+      selectedYear,
+      selectedMonth,
+      teacherPage,
+      toast,
+    ],
+  );
+
+  /* ==========================================================================
+     LOAD TEACHER HISTORY
+  ========================================================================== */
+
+  const loadTeacherHistory = useCallback(async () => {
+    if (!financeUnlocked || !selectedTeacherId) {
+      return;
+    }
+
+    try {
+      const { data } = await api.get(
+        `/finance/teacher-history?teacher_id=${encodeURIComponent(
+          selectedTeacherId,
+        )}`,
+      );
+
+      const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.history)
+          ? data.history
+          : [];
+
+      setTeacherHistory(list);
+    } catch (error) {
+      if (error?.response?.status === 401 || error?.response?.status === 403) {
+        lockFinance();
+      }
+
+      setTeacherHistory([]);
+
+      toast.error(
+        error?.response?.data?.error ||
+          "Failed to load teacher payment history.",
+      );
+    }
+  }, [financeUnlocked, selectedTeacherId, toast]);
+
+  /* ==========================================================================
+     LOAD SHARE RATE
+  ========================================================================== */
+
+  const loadShareRate = useCallback(async () => {
+    if (!financeUnlocked) return;
+
+    try {
+      const { data } = await api.get("/finance/teacher-share-rate");
+
+      const current = data?.current;
+
+      if (current?.percentage !== undefined) {
+        const value = Number(current.percentage);
+
+        setShareRate(value);
+        setShareRateInput(String(value));
+      }
+    } catch (error) {
+      if (error?.response?.status === 401 || error?.response?.status === 403) {
+        lockFinance();
+      }
+    }
+  }, [financeUnlocked]);
+
+  /* ==========================================================================
+     LOAD STAFF
+  ========================================================================== */
+
+  const loadStaff = useCallback(async () => {
+    if (!financeUnlocked) return;
+
+    setStaffLoading(true);
+
+    try {
+      const { data } = await api.get(
+        `/finance/staff-summary?solar_year=${selectedYear}&solar_month=${selectedMonth}&page=1&limit=100`,
+      );
+
+      const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.staff)
+          ? data.staff
+          : Array.isArray(data?.collectors)
+            ? data.collectors
+            : [];
+
+      setStaff(list);
+
+      if (selectedStaffId === null && list.length > 0) {
+        setSelectedStaffId(
+          Number(list[0].staff_user_id ?? list[0].user_id ?? list[0].id),
+        );
+      }
+    } catch (error) {
+      if (error?.response?.status === 401 || error?.response?.status === 403) {
+        lockFinance();
+      }
+
+      toast.error(
+        error?.response?.data?.error || "Failed to load staff financial data.",
+      );
+    } finally {
+      setStaffLoading(false);
+    }
+  }, [financeUnlocked, selectedYear, selectedMonth, selectedStaffId, toast]);
+
+  /* ==========================================================================
+     LOAD SELECTED STAFF SUMMARY
+  ========================================================================== */
+
+  const loadSelectedStaffSummary = useCallback(async () => {
+    if (!financeUnlocked || !selectedStaffId) {
+      return;
+    }
+
+    try {
+      const { data } = await api.get(
+        `/finance/staff-summary?solar_year=${selectedYear}&solar_month=${selectedMonth}&page=1&limit=100`,
+      );
+
+      const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.staff)
+          ? data.staff
+          : [];
+
+      const match = list.find(
+        (item) =>
+          Number(item.staff_user_id ?? item.user_id ?? item.id) ===
+          Number(selectedStaffId),
+      );
+
+      setStaffSummary(match || null);
+    } catch (error) {
+      if (error?.response?.status === 401 || error?.response?.status === 403) {
+        lockFinance();
+      }
+    }
+  }, [financeUnlocked, selectedStaffId, selectedYear, selectedMonth]);
+
+  /* ==========================================================================
+     LOAD STAFF PAYMENTS
+  ========================================================================== */
+
+  const loadStaffPayments = useCallback(async () => {
+    if (!financeUnlocked || !selectedStaffId) {
+      return;
+    }
+
+    setStaffPaymentsLoading(true);
+
+    try {
+      const params = new URLSearchParams();
+
+      params.set("collector_user_id", String(selectedStaffId));
+      params.set(
+        "from_solar_date",
+        solarMonthStart(selectedYear, selectedMonth),
+      );
+      params.set("to_solar_date", solarMonthEnd(selectedYear, selectedMonth));
+      params.set("page", String(staffPage));
+      params.set("limit", String(PAGE_SIZE));
+
+      const { data } = await api.get(
+        `/finance/staff-payments?${params.toString()}`,
+      );
+
+      const rows = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.payments)
+          ? data.payments
+          : [];
+
+      /*
+       * A payment can have multiple allocation rows.
+       * The staff transaction queue must never duplicate
+       * the same payment.
+       */
+      const unique = new Map();
+
+      rows.forEach((row) => {
+        const paymentId =
+          row?.payment_id ??
+          row?.id ??
+          `${row?.receipt_number || ""}-${row?.payment_date || ""}-${row?.amount || ""}`;
+
+        if (!unique.has(String(paymentId))) {
+          unique.set(String(paymentId), {
+            ...row,
+            payment_id: row?.payment_id ?? row?.id,
+          });
+        }
+      });
+
+      const normalized = Array.from(unique.values());
+
+      setStaffPayments(normalized);
+
+      setStaffPagination(normalizePage(data, staffPage));
+
+      setSelectedStaffTransactions(new Set());
+    } catch (error) {
+      if (error?.response?.status === 401 || error?.response?.status === 403) {
+        lockFinance();
+      }
+
+      toast.error(
+        error?.response?.data?.error || "Failed to load staff transactions.",
+      );
+    } finally {
+      setStaffPaymentsLoading(false);
+    }
+  }, [
+    financeUnlocked,
+    selectedStaffId,
+    selectedYear,
+    selectedMonth,
+    staffPage,
+    toast,
+  ]);
+
+  /* ==========================================================================
+     LOAD STAFF ACTIVITY
+  ========================================================================== */
+
+  const loadStaffActivity = useCallback(async () => {
+    if (!financeUnlocked || !selectedStaffId) {
+      return;
+    }
+
+    setStaffActivityLoading(true);
+
+    try {
+      const params = new URLSearchParams();
+
+      params.set("user_id", String(selectedStaffId));
+      params.set("page", String(staffActivityPage));
+      params.set("limit", String(PAGE_SIZE));
+
+      const { data } = await api.get(
+        `/finance/staff-activity?${params.toString()}`,
+      );
+
+      const rows = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.activity)
+          ? data.activity
+          : [];
+
+      setStaffActivity(rows);
+
+      setStaffActivityPagination(normalizePage(data, staffActivityPage));
+    } catch (error) {
+      if (error?.response?.status === 401 || error?.response?.status === 403) {
+        lockFinance();
+      }
+
+      setStaffActivity([]);
+
+      toast.error(
+        error?.response?.data?.error || "Failed to load staff activity.",
+      );
+    } finally {
+      setStaffActivityLoading(false);
+    }
+  }, [financeUnlocked, selectedStaffId, staffActivityPage, toast]);
+
+  /* ==========================================================================
+     EFFECTS
+  ========================================================================== */
+
+  useEffect(() => {
+    if (!financeUnlocked) return;
+
+    loadTeachers();
+    loadStaff();
+    loadShareRate();
+  }, [financeUnlocked, selectedYear, selectedMonth]);
+
+  useEffect(() => {
+    if (!financeUnlocked) return;
+
+    loadTeacherMonthly();
+    loadTeacherHistory();
+  }, [
+    financeUnlocked,
+    selectedTeacherId,
+    selectedYear,
+    selectedMonth,
+    teacherPage,
+  ]);
+
+  useEffect(() => {
+    if (!financeUnlocked) return;
+
+    loadSelectedStaffSummary();
+    loadStaffPayments();
+    loadStaffActivity();
+  }, [
+    financeUnlocked,
+    selectedStaffId,
+    selectedYear,
+    selectedMonth,
+    staffPage,
+    staffActivityPage,
+  ]);
+
+  /* ==========================================================================
+     FILTERS
+  ========================================================================== */
+
+  const filteredTeachers = useMemo(() => {
+    const query = teacherSearch.trim().toLowerCase();
+
+    if (!query) return teachers;
+
+    return teachers.filter((teacher) =>
+      String(teacher.teacher_name ?? teacher.full_name ?? "")
+        .toLowerCase()
+        .includes(query),
+    );
+  }, [teachers, teacherSearch]);
+
+  const filteredStaff = useMemo(() => {
+    const query = staffSearch.trim().toLowerCase();
+
+    if (!query) return staff;
+
+    return staff.filter((member) =>
+      String(
+        member.staff_name ?? member.full_name ?? member.collector_name ?? "",
+      )
+        .toLowerCase()
+        .includes(query),
+    );
+  }, [staff, staffSearch]);
+
+  const selectedTeacher = useMemo(
+    () =>
+      teachers.find(
+        (teacher) =>
+          Number(teacher.teacher_id ?? teacher.id) ===
+          Number(selectedTeacherId),
+      ) || null,
+    [teachers, selectedTeacherId],
+  );
+
+  const selectedStaff = useMemo(
+    () =>
+      staff.find(
+        (member) =>
+          Number(member.staff_user_id ?? member.user_id ?? member.id) ===
+          Number(selectedStaffId),
+      ) ||
+      staffSummary ||
+      null,
+    [staff, selectedStaffId, staffSummary],
+  );
+
+  /* ==========================================================================
+     TEACHER STUDENTS
+  ========================================================================== */
+
+  const teacherStudents = useMemo(() => {
+    const list = Array.isArray(teacherMonthly?.students)
+      ? teacherMonthly.students
+      : [];
+
+    /*
+     * The queue contains only the teacher share
+     * that is still awaiting Admin settlement.
+     *
+     * Once the backend reports the specific student/
+     * enrollment as settled, it disappears from this
+     * pending queue.
+     */
+    const pending = list.filter((student) => !isTeacherStudentSettled(student));
+
+    /*
+     * Protect the UI from duplicated enrollment rows.
+     */
+    const unique = new Map();
+
+    pending.forEach((student) => {
+      const key = teacherStudentKey(student);
+
+      if (!unique.has(key)) {
+        unique.set(key, student);
+      }
+    });
+
+    return Array.from(unique.values());
+  }, [teacherMonthly]);
+
+  const selectedTeacherStudentRows = useMemo(
+    () =>
+      teacherStudents.filter((student) =>
+        selectedTeacherStudents.has(teacherStudentKey(student)),
+      ),
+    [teacherStudents, selectedTeacherStudents],
+  );
+
+  const allTeacherStudentsSelected =
+    teacherStudents.length > 0 &&
+    teacherStudents.every((student) =>
+      selectedTeacherStudents.has(teacherStudentKey(student)),
+    );
+
+  const someTeacherStudentsSelected = selectedTeacherStudents.size > 0;
+
+  function toggleTeacherStudent(student) {
+    const key = teacherStudentKey(student);
+
+    setSelectedTeacherStudents((current) => {
+      const next = new Set(current);
+
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+
+      return next;
+    });
+  }
+
+  function toggleAllTeacherStudents() {
+    if (allTeacherStudentsSelected) {
+      setSelectedTeacherStudents(new Set());
+      return;
+    }
+
+    setSelectedTeacherStudents(new Set(teacherStudents.map(teacherStudentKey)));
+  }
+
+  const selectedTeacherAmount = useMemo(
+    () =>
+      selectedTeacherStudentRows.reduce(
+        (sum, student) =>
+          sum +
+          Number(
+            student.teacher_share_amount ??
+              student.share_amount ??
+              student.owed_teacher_share ??
+              0,
+          ),
+        0,
+      ),
+    [selectedTeacherStudentRows],
+  );
+
+  /* ==========================================================================
+     STAFF TRANSACTIONS
+  ========================================================================== */
+
+  const pendingStaffTransactions = useMemo(
+    () =>
+      staffPayments.filter(
+        (transaction) => !isStaffTransactionHandedOver(transaction),
+      ),
+    [staffPayments],
+  );
+
+  const selectedStaffTransactionRows = useMemo(
+    () =>
+      staffPayments.filter((transaction) =>
+        selectedStaffTransactions.has(
+          String(transaction.payment_id ?? transaction.id),
+        ),
+      ),
+    [staffPayments, selectedStaffTransactions],
+  );
+
+  const allVisibleStaffSelected =
+    pendingStaffTransactions.length > 0 &&
+    pendingStaffTransactions.every((transaction) =>
+      selectedStaffTransactions.has(
+        String(transaction.payment_id ?? transaction.id),
+      ),
+    );
+
+  const selectedStaffAmount = useMemo(
+    () =>
+      selectedStaffTransactionRows.reduce(
+        (sum, transaction) =>
+          sum +
+          Number(
+            transaction.amount ??
+              transaction.payment_amount ??
+              transaction.paid_amount ??
+              0,
+          ),
+        0,
+      ),
+    [selectedStaffTransactionRows],
+  );
+
+  function toggleStaffTransaction(transaction) {
+    if (isStaffTransactionHandedOver(transaction)) {
+      return;
+    }
+
+    const key = String(transaction.payment_id ?? transaction.id);
+
+    setSelectedStaffTransactions((current) => {
+      const next = new Set(current);
+
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+
+      return next;
+    });
+  }
+
+  function toggleAllStaffTransactions() {
+    if (allVisibleStaffSelected) {
+      setSelectedStaffTransactions(new Set());
+      return;
+    }
+
+    setSelectedStaffTransactions(
+      new Set(
+        pendingStaffTransactions.map((transaction) =>
+          String(transaction.payment_id ?? transaction.id),
+        ),
+      ),
+    );
+  }
+
+  /* ==========================================================================
+     SAVE SHARE RATE
+  ========================================================================== */
 
   async function saveShareRate() {
-    const value = Number(shareRateInput);
+    const percentage = Number(shareRateInput);
 
-    if (
-      !Number.isFinite(value) ||
-      value < 0 ||
-      value > 100
-    ) {
-      setError(
-        "Teacher share percentage must be between 0 and 100.",
-      );
+    if (!Number.isFinite(percentage) || percentage < 0 || percentage > 100) {
+      toast.error("Teacher share percentage must be between 0 and 100.");
       return;
     }
 
     setShareRateSaving(true);
-    setError("");
-    setMessage("");
 
     try {
-      const response = await api.put(
-        "/finance/teacher-share-rate",
-        {
-          percentage: value,
-        },
-      );
+      await api.put("/finance/teacher-share-rate", {
+        percentage,
+      });
 
-      const nextRate = Number(
-        response.data?.rate?.percentage ?? value,
-      );
+      setShareRate(percentage);
+      setShareRateInput(String(percentage));
+      setShareRateEditing(false);
 
-      setShareRate(nextRate);
-      setShareRateInput(String(nextRate));
+      toast.success("Teacher share rate updated.");
 
-      setMessage(
-        "Teacher share percentage updated successfully.",
-      );
-
-      await loadTeacherData(false);
-    } catch (requestError) {
-      setError(
-        requestError.response?.data?.error ||
-          "Failed to update teacher share percentage.",
+      await Promise.all([loadTeacherMonthly(false), loadTeacherHistory()]);
+    } catch (error) {
+      toast.error(
+        error?.response?.data?.error || "Failed to update teacher share rate.",
       );
     } finally {
       setShareRateSaving(false);
     }
   }
 
-  /* ========================================================================
-     REFRESH
-  ======================================================================== */
+  /* ==========================================================================
+     TEACHER STUDENT CLEAR / SETTLE
+  ========================================================================== */
 
-  async function refresh() {
-    setRefreshing(true);
-    setError("");
-    setMessage("");
-
-    try {
-      await loadAll();
-
-      setMessage("Finance data refreshed.");
-    } finally {
-      setRefreshing(false);
+  function requestTeacherStudentSettlement() {
+    if (selectedTeacherStudentRows.length === 0) {
+      toast.error("Select at least one student first.");
+      return;
     }
+
+    setActionTarget({
+      type: "teacher_students",
+      rows: selectedTeacherStudentRows,
+      name: selectedTeacher?.teacher_name || "this teacher",
+      amount: selectedTeacherAmount,
+    });
+
+    setActionPasswordOpen(true);
   }
 
-  /* ========================================================================
-     EXPECTED CASH PREVIEW
-  ======================================================================== */
+  async function settleSelectedTeacherStudents(verification) {
+    const token = verification?.verification_token;
 
-  async function calculateExpectedCash() {
-    if (
-      !reconciliationForm.collector_user_id ||
-      !reconciliationForm.from_solar_date ||
-      !reconciliationForm.to_solar_date
-    ) {
-      setError(
-        "Select a collector and enter both settlement dates.",
-      );
+    if (!token) {
+      toast.error("Administrator verification token was not returned.");
       return;
     }
 
-    setExpectedLoading(true);
-    setError("");
-    setMessage("");
-    setExpectedPreview(null);
+    if (!actionTarget || actionTarget.type !== "teacher_students") {
+      return;
+    }
+
+    setTeacherSettlementLoading(true);
 
     try {
-      const response = await api.get(
-        "/finance/cash-reconciliation/expected",
-        {
-          params: {
-            collector_user_id:
-              reconciliationForm.collector_user_id,
+      /*
+       * Individual enrollment IDs are sent rather than
+       * student IDs because one student can have multiple
+       * class enrollments.
+       */
+      const enrollmentIds = actionTarget.rows
+        .map((student) =>
+          Number(student.enrollment_id ?? student.student_enrollment_id),
+        )
+        .filter((id) => Number.isInteger(id) && id > 0);
 
-            from_solar_date:
-              reconciliationForm.from_solar_date.trim(),
+      if (enrollmentIds.length === 0) {
+        toast.error(
+          "The selected students do not contain valid enrollment records.",
+        );
+        return;
+      }
 
-            to_solar_date:
-              reconciliationForm.to_solar_date.trim(),
-          },
-        },
-      );
-
-      setExpectedPreview(response.data);
-    } catch (requestError) {
-      setError(
-        requestError.response?.data?.error ||
-          "Could not calculate expected cash.",
-      );
-    } finally {
-      setExpectedLoading(false);
-    }
-  }
-
-  /* ========================================================================
-     CREATE RECONCILIATION
-  ======================================================================== */
-
-  async function createReconciliation(event) {
-    event.preventDefault();
-
-    if (
-      !reconciliationForm.collector_user_id ||
-      !reconciliationForm.from_solar_date ||
-      !reconciliationForm.to_solar_date
-    ) {
-      setError(
-        "Collector, from date, and to date are required.",
-      );
-      return;
-    }
-
-    const handedAmount =
-      reconciliationForm.handed_over_amount === ""
-        ? null
-        : Number(
-            reconciliationForm.handed_over_amount,
-          );
-
-    if (
-      handedAmount !== null &&
-      (!Number.isFinite(handedAmount) ||
-        handedAmount < 0)
-    ) {
-      setError(
-        "Handed-over amount must be zero or greater.",
-      );
-      return;
-    }
-
-    setReconciliationSaving(true);
-    setError("");
-    setMessage("");
-
-    try {
-      await api.post(
-        "/finance/cash-reconciliation",
-        {
-          collector_user_id: Number(
-            reconciliationForm.collector_user_id,
-          ),
-
-          from_solar_date:
-            reconciliationForm.from_solar_date.trim(),
-
-          to_solar_date:
-            reconciliationForm.to_solar_date.trim(),
-
-          handed_over_amount: handedAmount,
-
-          notes:
-            reconciliationForm.notes.trim() || null,
-        },
-      );
-
-      setReconciliationForm({
-        collector_user_id: "",
-        from_solar_date: "",
-        to_solar_date: "",
-        handed_over_amount: "",
-        notes: "",
+      await api.post(TEACHER_STUDENT_SETTLE_ENDPOINT, {
+        teacher_id: Number(selectedTeacherId),
+        solar_year: Number(selectedYear),
+        solar_month: Number(selectedMonth),
+        enrollment_ids: enrollmentIds,
+        verification_token: token,
       });
 
-      setExpectedPreview(null);
-
-      setMessage(
-        "Cash reconciliation created successfully.",
+      toast.success(
+        `${enrollmentIds.length} teacher student balance${
+          enrollmentIds.length === 1 ? "" : "s"
+        } settled.`,
       );
 
-      await loadReconciliations(false);
-    } catch (requestError) {
-      setError(
-        requestError.response?.data?.error ||
-          "Failed to create reconciliation.",
+      setActionPasswordOpen(false);
+      setActionTarget(null);
+      setSelectedTeacherStudents(new Set());
+
+      await Promise.all([loadTeacherMonthly(false), loadTeacherHistory()]);
+    } catch (error) {
+      toast.error(
+        error?.response?.data?.error ||
+          error?.message ||
+          "Failed to settle the selected teacher balances.",
       );
     } finally {
-      setReconciliationSaving(false);
+      setTeacherSettlementLoading(false);
     }
   }
 
-  /* ========================================================================
-     EDIT RECONCILIATION
-  ======================================================================== */
+  /* ==========================================================================
+     STAFF HANDOVER
+  ========================================================================== */
 
-  function openEditReconciliation(row) {
-    setEditingReconciliation(row);
+  function requestStaffHandover() {
+    if (selectedStaffTransactionRows.length === 0) {
+      toast.error("Select at least one pending transaction first.");
+      return;
+    }
 
-    setEditReconciliationForm({
-      handed_over_amount:
-        row.handed_over_amount === null ||
-        row.handed_over_amount === undefined
-          ? ""
-          : String(row.handed_over_amount),
-
-      notes: row.notes || "",
+    setActionTarget({
+      type: "staff_handover",
+      rows: selectedStaffTransactionRows,
+      name:
+        selectedStaff?.staff_name ||
+        selectedStaff?.full_name ||
+        selectedStaff?.collector_name ||
+        "this staff member",
+      amount: selectedStaffAmount,
     });
+
+    setActionPasswordOpen(true);
   }
 
-  async function saveReconciliationEdit(event) {
-    event.preventDefault();
+  async function handoverSelectedStaffTransactions(verification) {
+    const token = verification?.verification_token;
 
-    if (!editingReconciliation) {
+    if (!token) {
+      toast.error("Administrator verification token was not returned.");
       return;
     }
 
-    const handedAmount =
-      editReconciliationForm.handed_over_amount === ""
-        ? null
-        : Number(
-            editReconciliationForm.handed_over_amount,
-          );
-
-    if (
-      handedAmount !== null &&
-      (!Number.isFinite(handedAmount) ||
-        handedAmount < 0)
-    ) {
-      setError(
-        "Handed-over amount must be zero or greater.",
-      );
+    if (!actionTarget || actionTarget.type !== "staff_handover") {
       return;
     }
-
-    setEditSaving(true);
-    setError("");
-    setMessage("");
 
     try {
-      await api.put(
-        `/finance/cash-reconciliation/${editingReconciliation.id}`,
-        {
-          handed_over_amount: handedAmount,
-          notes:
-            editReconciliationForm.notes.trim() ||
-            null,
-        },
-      );
+      const paymentIds = actionTarget.rows
+        .map((transaction) => Number(transaction.payment_id ?? transaction.id))
+        .filter((id) => Number.isInteger(id) && id > 0);
 
-      setEditingReconciliation(null);
-
-      setMessage(
-        "Cash reconciliation updated successfully.",
-      );
-
-      await loadReconciliations(false);
-    } catch (requestError) {
-      setError(
-        requestError.response?.data?.error ||
-          "Failed to update reconciliation.",
-      );
-    } finally {
-      setEditSaving(false);
-    }
-  }
-
-  /* ========================================================================
-     VERIFY RECONCILIATION
-  ======================================================================== */
-
-  async function verifyReconciliation(row) {
-    if (
-      row.handed_over_amount === null ||
-      row.handed_over_amount === undefined
-    ) {
-      setError(
-        "A handed-over amount is required before verification.",
-      );
-      return;
-    }
-
-    const confirmed = window.confirm(
-      `Verify this cash reconciliation for ${row.collector_name} (${row.from_solar_date} → ${row.to_solar_date})?`,
-    );
-
-    if (!confirmed) {
-      return;
-    }
-
-    setError("");
-    setMessage("");
-
-    try {
-      await api.put(
-        `/finance/cash-reconciliation/${row.id}`,
-        {
-          verify: true,
-        },
-      );
-
-      setMessage(
-        "Cash reconciliation verified.",
-      );
-
-      await loadReconciliations(false);
-    } catch (requestError) {
-      setError(
-        requestError.response?.data?.error ||
-          "Failed to verify reconciliation.",
-      );
-    }
-  }
-
-  /* ========================================================================
-     DERIVED VALUES
-  ======================================================================== */
-
-  const reconciliationTotals = useMemo(() => {
-    let expected = 0;
-    let handed = 0;
-
-    let matched = 0;
-    let short = 0;
-    let over = 0;
-    let pending = 0;
-
-    for (const row of reconciliations) {
-      expected += Number(
-        row.expected_amount || 0,
-      );
-
-      if (row.handed_over_amount !== null) {
-        handed += Number(
-          row.handed_over_amount || 0,
+      if (paymentIds.length === 0) {
+        toast.error(
+          "The selected transactions do not contain valid payment IDs.",
         );
+        return;
       }
 
-      if (row.status === "matched") {
-        matched += 1;
-      } else if (row.status === "short") {
-        short += 1;
-      } else if (row.status === "over") {
-        over += 1;
-      } else {
-        pending += 1;
-      }
+      await api.put(STAFF_HANDOVER_ENDPOINT, {
+        payment_ids: paymentIds,
+        collector_user_id: Number(selectedStaffId),
+        solar_year: Number(selectedYear),
+        solar_month: Number(selectedMonth),
+        verification_token: token,
+      });
+
+      toast.success(
+        `${paymentIds.length} transaction${
+          paymentIds.length === 1 ? "" : "s"
+        } marked as handed over.`,
+      );
+
+      setActionPasswordOpen(false);
+      setActionTarget(null);
+      setSelectedStaffTransactions(new Set());
+
+      await Promise.all([
+        loadStaff(),
+        loadSelectedStaffSummary(),
+        loadStaffPayments(),
+        loadStaffActivity(),
+      ]);
+    } catch (error) {
+      toast.error(
+        error?.response?.data?.error ||
+          error?.message ||
+          "Failed to mark the selected transactions as handed over.",
+      );
+    }
+  }
+
+  async function handleActionPasswordVerified(verification) {
+    if (!actionTarget) return;
+
+    if (actionTarget.type === "teacher_students") {
+      await settleSelectedTeacherStudents(verification);
+      return;
     }
 
-    return {
-      expected,
-      handed,
-      difference: handed - expected,
+    if (actionTarget.type === "staff_handover") {
+      await handoverSelectedStaffTransactions(verification);
+    }
+  }
 
-      matched,
-      short,
-      over,
-      pending,
-    };
-  }, [reconciliations]);
+  /* ==========================================================================
+     MONTH NAVIGATION
+  ========================================================================== */
 
-  /* ========================================================================
-     ACCESS
-  ======================================================================== */
+  function goToPreviousMonth() {
+    let year = Number(selectedYear);
+    let month = Number(selectedMonth) - 1;
+
+    if (month < 1) {
+      month = 12;
+      year -= 1;
+    }
+
+    setSelectedYear(year);
+    setSelectedMonth(month);
+    setTeacherPage(1);
+    setStaffPage(1);
+    setStaffActivityPage(1);
+    setSelectedTeacherStudents(new Set());
+    setSelectedStaffTransactions(new Set());
+  }
+
+  function goToNextMonth() {
+    let year = Number(selectedYear);
+    let month = Number(selectedMonth) + 1;
+
+    if (month > 12) {
+      month = 1;
+      year += 1;
+    }
+
+    setSelectedYear(year);
+    setSelectedMonth(month);
+    setTeacherPage(1);
+    setStaffPage(1);
+    setStaffActivityPage(1);
+    setSelectedTeacherStudents(new Set());
+    setSelectedStaffTransactions(new Set());
+  }
+
+  function goToToday() {
+    setSelectedYear(today.year);
+    setSelectedMonth(today.month);
+    setTeacherPage(1);
+    setStaffPage(1);
+    setStaffActivityPage(1);
+  }
+
+  async function refreshFinance() {
+    if (!financeUnlocked) {
+      setFinancePasswordOpen(true);
+      return;
+    }
+
+    if (activeTab === "teacher") {
+      await Promise.all([
+        loadTeachers(),
+        loadTeacherMonthly(false),
+        loadTeacherHistory(),
+        loadShareRate(),
+      ]);
+    } else {
+      await Promise.all([
+        loadStaff(),
+        loadSelectedStaffSummary(),
+        loadStaffPayments(),
+        loadStaffActivity(),
+      ]);
+    }
+  }
+
+  /* ==========================================================================
+     LOCKED SCREEN
+  ========================================================================== */
 
   if (!isAdmin) {
     return (
-      <div className="min-h-full bg-[#0b0d10] p-4 text-white sm:p-6">
-        <div className="mx-auto max-w-xl rounded-2xl border border-red-400/20 bg-[#121519] p-6 text-center">
-          <XCircle className="mx-auto h-8 w-8 text-red-300" />
+      <div className="min-h-[70vh] grid place-items-center p-5">
+        <div className="w-full max-w-sm rounded-2xl border border-white/[0.06] bg-[#121519] p-7 text-center">
+          <div className="mx-auto grid h-11 w-11 place-items-center rounded-xl border border-red-400/15 bg-red-400/[0.05]">
+            <Lock className="h-5 w-5 text-red-300" />
+          </div>
 
-          <h1 className="mt-4 text-lg font-bold">
+          <h2 className="mt-4 text-sm font-bold text-white">
             Finance is restricted
-          </h1>
+          </h2>
 
-          <p className="mt-2 text-sm text-slate-500">
-            Only administrators can access financial data.
+          <p className="mt-2 text-[10px] leading-relaxed text-slate-600">
+            Finance is available only to active administrators. Staff passwords
+            cannot unlock this page.
           </p>
         </div>
       </div>
     );
   }
 
-  if (locked) {
+  if (!financeUnlocked) {
     return (
-      <FinanceLockScreen
-        password={password}
-        setPassword={setPassword}
-        onUnlock={unlockFinance}
-        loading={unlocking}
-        error={unlockError}
-      />
-    );
-  }
-
-  /* ========================================================================
-     RENDER
-  ======================================================================== */
-
-  return (
-    <div className="min-h-full bg-[#0b0d10] px-3 py-4 text-slate-100 sm:px-5 lg:px-6 lg:py-6">
-      <div className="mx-auto max-w-[1700px] space-y-4 lg:space-y-5">
-
-        {/* HEADER */}
-        <div className="rounded-2xl border border-white/[0.07] bg-[#121519] p-4 shadow-[0_16px_50px_rgba(0,0,0,0.18)]">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="min-w-0">
-              <div className="flex items-center gap-3">
-                <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-[#f2bd19]/15 bg-[#f2bd19]/10">
-                  <Banknote className="h-5 w-5 text-[#f2bd19]" />
-                </div>
-
-                <div className="min-w-0">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#f2bd19]">
-                    Administration
-                  </div>
-
-                  <h1 className="truncate text-xl font-bold tracking-tight text-white sm:text-2xl">
-                    Finance
-                  </h1>
-
-                  <p className="mt-1 text-xs text-slate-500">
-                    Teacher shares and cash reconciliation
-                    built from real academy payment records.
-                  </p>
-                </div>
-              </div>
+      <>
+        <div className="min-h-[70vh] grid place-items-center p-5">
+          <div className="w-full max-w-sm rounded-2xl border border-white/[0.06] bg-[#121519] p-7 text-center">
+            <div className="mx-auto grid h-11 w-11 place-items-center rounded-xl border border-[#f2bd19]/15 bg-[#f2bd19]/[0.05]">
+              <ShieldCheck className="h-5 w-5 text-[#f2bd19]" />
             </div>
+
+            <h2 className="mt-4 text-sm font-bold text-white">
+              Administrator verification required
+            </h2>
+
+            <p className="mt-2 text-[10px] leading-relaxed text-slate-600">
+              Enter the administrator password to access Finance.
+            </p>
 
             <button
               type="button"
-              onClick={refresh}
-              disabled={refreshing || loading}
-              className={buttonClassName(
-                "border border-white/[0.08] bg-white/[0.03] text-slate-200 hover:bg-white/[0.06]",
-              )}
+              onClick={() => setFinancePasswordOpen(true)}
+              className="mt-5 h-9 rounded-lg bg-[#f2bd19] px-4 text-[10px] font-bold text-black transition hover:bg-[#ffd34d]"
             >
-              {refreshing ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <RefreshCw className="h-4 w-4" />
-              )}
-
-              Refresh
+              Verify Administrator
             </button>
           </div>
+        </div>
 
-          {(message || error) && (
-            <div className="mt-4 space-y-2">
-              {message ? (
-                <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-3 py-2.5 text-xs text-emerald-300">
-                  {message}
-                </div>
-              ) : null}
+        <PasswordConfirmModal
+          open={financePasswordOpen}
+          title="Unlock Finance"
+          description="Enter your administrator password to access Finance."
+          endpoint="/finance/verify-admin-password"
+          onCancel={() => setFinancePasswordOpen(false)}
+          onVerified={handleFinancePasswordVerified}
+        />
+      </>
+    );
+  }
 
-              {error ? (
-                <div className="rounded-xl border border-red-400/20 bg-red-400/10 px-3 py-2.5 text-xs text-red-300">
-                  {error}
-                </div>
-              ) : null}
+  /* ==========================================================================
+     TEACHER TAB
+  ========================================================================== */
+
+  function renderTeacherTab() {
+    const summary = teacherMonthly?.summary || {};
+
+    const settlement = teacherMonthly?.settlement || {};
+
+    const teacherShare = Number(
+      summary.teacher_share_amount ?? summary.share_amount ?? 0,
+    );
+
+    const settlementPaid = Boolean(
+      settlement.paid_at ||
+      settlement.status === "paid" ||
+      settlement.status === "settled",
+    );
+
+    const teacherPagination = normalizePage(teacherMonthly, teacherPage);
+
+    return (
+      <div className="grid gap-3 xl:grid-cols-[245px_minmax(0,1fr)]">
+        {/* TEACHER SIDEBAR */}
+
+        <aside className="rounded-2xl border border-white/[0.06] bg-[#121519] p-2.5">
+          <div className="p-1.5">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-700" />
+
+              <input
+                value={teacherSearch}
+                onChange={(event) => setTeacherSearch(event.target.value)}
+                placeholder="Search teacher..."
+                className="h-9 w-full rounded-lg border border-white/[0.06] bg-[#0d1013] pl-9 pr-3 text-[10px] text-white outline-none placeholder:text-slate-700 focus:border-[#f2bd19]/30"
+              />
             </div>
-          )}
-        </div>
+          </div>
 
-        {/* TABS */}
-        <div className="flex rounded-xl border border-white/[0.07] bg-[#121519] p-1">
-          <button
-            type="button"
-            onClick={() => setTab("teacher")}
-            className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-semibold transition ${
-              tab === "teacher"
-                ? "bg-[#f2bd19] text-[#0b0d10]"
-                : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
-            }`}
-          >
-            <Users className="h-4 w-4" />
-            Teacher Shares
-          </button>
+          <div className="mt-2 space-y-1">
+            {teacherLoading && teachers.length === 0 ? (
+              <div className="grid place-items-center py-10">
+                <Loader2 className="h-5 w-5 animate-spin text-[#f2bd19]" />
+              </div>
+            ) : filteredTeachers.length === 0 ? (
+              <div className="px-3 py-8 text-center">
+                <p className="text-[10px] text-slate-600">No teachers found.</p>
+              </div>
+            ) : (
+              filteredTeachers.map((teacher) => {
+                const id = Number(teacher.teacher_id ?? teacher.id);
 
-          <button
-            type="button"
-            onClick={() => setTab("cash")}
-            className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-semibold transition ${
-              tab === "cash"
-                ? "bg-[#f2bd19] text-[#0b0d10]"
-                : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
-            }`}
-          >
-            <WalletCards className="h-4 w-4" />
-            Cash Reconciliation
-          </button>
-        </div>
+                const selected = id === Number(selectedTeacherId);
 
-        {/* ==================================================================
-            TEACHER TAB
-        ================================================================== */}
+                return (
+                  <button
+                    type="button"
+                    key={id}
+                    onClick={() => {
+                      setSelectedTeacherId(id);
+                      setTeacherPage(1);
+                      setSelectedTeacherStudents(new Set());
+                    }}
+                    className={`w-full rounded-xl border p-2.5 text-left transition ${
+                      selected
+                        ? "border-[#f2bd19]/15 bg-[#f2bd19]/[0.06]"
+                        : "border-transparent hover:border-white/[0.05] hover:bg-white/[0.02]"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <div
+                        className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg border ${
+                          selected
+                            ? "border-[#f2bd19]/15 bg-[#f2bd19]/[0.08]"
+                            : "border-white/[0.06] bg-white/[0.025]"
+                        }`}
+                      >
+                        <UserRound
+                          className={`h-3.5 w-3.5 ${
+                            selected ? "text-[#f2bd19]" : "text-slate-600"
+                          }`}
+                        />
+                      </div>
 
-        {tab === "teacher" ? (
-          <div className="space-y-4 lg:space-y-5">
+                      <div className="min-w-0 flex-1">
+                        <p
+                          className={`truncate text-[10px] font-semibold ${
+                            selected ? "text-white" : "text-slate-400"
+                          }`}
+                        >
+                          {teacher.teacher_name ??
+                            teacher.full_name ??
+                            "Unnamed teacher"}
+                        </p>
 
-            {/* RATE + FILTER */}
-            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-
-              {/* RATE */}
-              <div className="rounded-2xl border border-white/[0.07] bg-[#121519] p-4">
-                <SectionHeader
-                  title="Teacher share settings"
-                  description="The rate is versioned. New rates take effect from the time they are changed, while previous payment calculations keep their original rate."
-                />
-
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-                  <div className="max-w-[260px] flex-1">
-                    <label className="mb-1.5 block text-xs font-semibold text-slate-500">
-                      Current share percentage
-                    </label>
-
-                    <div className="relative">
-                      <input
-                        type="number"
-                        min="0"
-                        max="100"
-                        step="0.01"
-                        value={shareRateInput}
-                        onChange={(event) =>
-                          setShareRateInput(
-                            event.target.value,
-                          )
-                        }
-                        className={`${inputClassName()} pr-12`}
-                      />
-
-                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm font-bold text-slate-500">
-                        %
-                      </span>
+                        <p className="mt-0.5 text-[8px] text-slate-700">
+                          {Number(
+                            teacher.class_count ?? teacher.classes_count ?? 0,
+                          )}{" "}
+                          classes ·{" "}
+                          {Number(
+                            teacher.student_count ??
+                              teacher.students_count ??
+                              0,
+                          )}{" "}
+                          students
+                        </p>
+                      </div>
                     </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </aside>
+
+        {/* TEACHER CONTENT */}
+
+        <main className="min-w-0 space-y-3">
+          <section className="rounded-2xl border border-white/[0.06] bg-[#121519] p-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <h2 className="truncate text-sm font-bold text-white">
+                    {selectedTeacher?.teacher_name ??
+                      selectedTeacher?.full_name ??
+                      teacherMonthly?.teacher?.full_name ??
+                      "Teacher"}
+                  </h2>
+
+                  <span className="rounded-full border border-emerald-400/15 bg-emerald-400/[0.05] px-2 py-1 text-[7px] font-semibold text-emerald-300">
+                    Admin settlement
+                  </span>
+                </div>
+
+                <p className="mt-1 text-[9px] text-slate-600">
+                  {selectedMonthLabel} · Teacher financial record
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1 rounded-lg border border-white/[0.06] bg-[#0d1013] p-1">
+                  <button
+                    type="button"
+                    onClick={goToPreviousMonth}
+                    className="grid h-7 w-7 place-items-center rounded-md text-slate-600 transition hover:bg-white/[0.04] hover:text-white"
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </button>
+
+                  <div className="min-w-[100px] text-center">
+                    <p className="text-[9px] font-semibold text-slate-300">
+                      {monthName(selectedMonth)}
+                    </p>
+
+                    <p className="text-[7px] text-slate-700">{selectedYear}</p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={goToNextMonth}
+                    className="grid h-7 w-7 place-items-center rounded-md text-slate-600 transition hover:bg-white/[0.04] hover:text-white"
+                  >
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={goToToday}
+                  className="h-9 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 text-[9px] text-slate-500 transition hover:text-white"
+                >
+                  Today
+                </button>
+
+                <button
+                  type="button"
+                  onClick={refreshFinance}
+                  disabled={teacherRefreshing || teacherLoading}
+                  className="grid h-9 w-9 place-items-center rounded-lg border border-white/[0.06] bg-white/[0.02] text-slate-500 transition hover:text-white disabled:opacity-40"
+                >
+                  <RefreshCw
+                    className={`h-3.5 w-3.5 ${
+                      teacherRefreshing ? "animate-spin" : ""
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+          </section>
+
+          {/* SHARE RATE */}
+
+          <section className="rounded-xl border border-white/[0.06] bg-[#121519] p-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="grid h-8 w-8 place-items-center rounded-lg border border-[#f2bd19]/10 bg-[#f2bd19]/[0.05]">
+                  <Wallet className="h-3.5 w-3.5 text-[#f2bd19]" />
+                </div>
+
+                <div>
+                  <p className="text-[10px] font-semibold text-white">
+                    Teacher share rate
+                  </p>
+
+                  <p className="mt-0.5 text-[8px] text-slate-600">
+                    Historical payment attribution remains tied to its
+                    applicable rate.
+                  </p>
+                </div>
+              </div>
+
+              {shareRateEditing ? (
+                <div className="flex items-center gap-2">
+                  <div className="relative">
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.01"
+                      value={shareRateInput}
+                      onChange={(event) =>
+                        setShareRateInput(event.target.value)
+                      }
+                      className="h-8 w-24 rounded-lg border border-[#f2bd19]/25 bg-[#0d1013] px-3 pr-7 text-[10px] text-white outline-none focus:border-[#f2bd19]/50"
+                    />
+
+                    <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[9px] text-slate-600">
+                      %
+                    </span>
                   </div>
 
                   <button
                     type="button"
                     onClick={saveShareRate}
                     disabled={shareRateSaving}
-                    className={buttonClassName(
-                      "bg-[#f2bd19] text-[#0b0d10] hover:bg-[#ffd449]",
-                    )}
+                    className="grid h-8 w-8 place-items-center rounded-lg bg-[#f2bd19] text-black disabled:opacity-40"
                   >
                     {shareRateSaving ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     ) : (
-                      <Save className="h-4 w-4" />
+                      <Check className="h-3.5 w-3.5" />
                     )}
+                  </button>
 
-                    Save rate
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShareRateEditing(false);
+                      setShareRateInput(String(shareRate));
+                    }}
+                    className="grid h-8 w-8 place-items-center rounded-lg border border-white/[0.06] text-slate-600 hover:text-white"
+                  >
+                    <X className="h-3.5 w-3.5" />
                   </button>
                 </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setShareRateEditing(true)}
+                  className="rounded-lg border border-[#f2bd19]/15 bg-[#f2bd19]/[0.05] px-3 py-2 text-[10px] font-bold text-[#f2bd19]"
+                >
+                  {Number(summary.share_percent ?? shareRate ?? 30).toFixed(2)}%
+                </button>
+              )}
+            </div>
+          </section>
 
-                <div className="mt-4 flex items-center gap-2 text-xs text-slate-500">
-                  <ShieldCheck className="h-4 w-4 text-[#f2bd19]" />
+          {/* STATS */}
 
-                  Current backend rate:
+          <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
+            <StatCard
+              icon={Users}
+              label="Students"
+              value={summary.student_count ?? teacherStudents.length}
+              sublabel={selectedMonthLabel}
+            />
 
-                  <span className="font-semibold text-slate-300">
-                    {shareRate}%
-                  </span>
-                </div>
+            <StatCard
+              icon={CheckCircle2}
+              label="Paid"
+              value={summary.paid_students ?? 0}
+              sublabel={`AFN ${formatMoney(summary.paid_amount)}`}
+            />
+
+            <StatCard
+              icon={Clock3}
+              label="Partial / Unpaid"
+              value={`${Number(summary.partial_students ?? 0)} / ${Number(
+                summary.unpaid_students ?? 0,
+              )}`}
+              sublabel={`Outstanding AFN ${formatMoney(
+                summary.outstanding_amount,
+              )}`}
+            />
+
+            <StatCard
+              icon={Banknote}
+              label="Teacher Share"
+              value={`AFN ${formatMoney(teacherShare)}`}
+              sublabel={`${Number(
+                summary.share_percent ?? shareRate ?? 30,
+              ).toFixed(2)}% applicable`}
+            />
+          </div>
+
+          {/* TEACHER SETTLEMENT */}
+
+          <section className="rounded-xl border border-white/[0.06] bg-[#121519] p-3.5">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-[8px] uppercase tracking-[0.14em] text-slate-600">
+                  Teacher settlement
+                </p>
+
+                <p className="mt-1 text-base font-bold text-white">
+                  AFN {formatMoney(teacherShare)}
+                </p>
+
+                {settlementPaid ? (
+                  <p className="mt-1 text-[8px] text-emerald-300">
+                    Paid {formatSolarDate(settlement.paid_at)} ·{" "}
+                    {settlement.paid_by?.full_name ||
+                      settlement.paid_by_name ||
+                      "Administrator"}
+                  </p>
+                ) : (
+                  <p className="mt-1 text-[8px] text-amber-300">
+                    Waiting for Admin settlement
+                  </p>
+                )}
               </div>
 
-              {/* FILTER */}
-              <div className="rounded-2xl border border-white/[0.07] bg-[#121519] p-4">
-                <SectionHeader
-                  title="Payment period"
-                  description="Leave both blank to show all recorded payments."
-                />
+              {settlementPaid ? (
+                <span className="inline-flex w-fit items-center gap-1.5 rounded-lg border border-emerald-400/15 bg-emerald-400/[0.06] px-3 py-2 text-[9px] font-semibold text-emerald-300">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Settled
+                </span>
+              ) : (
+                <span className="inline-flex w-fit items-center gap-1.5 rounded-lg border border-amber-400/15 bg-amber-400/[0.05] px-3 py-2 text-[9px] font-semibold text-amber-300">
+                  <Clock3 className="h-3.5 w-3.5" />
+                  Pending
+                </span>
+              )}
+            </div>
+          </section>
 
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
-                  <div>
-                    <label className="mb-1.5 block text-xs font-semibold text-slate-500">
-                      From — Solar Hijri
-                    </label>
+          {/* STUDENT PAYMENT STATUS */}
 
-                    <input
-                      type="text"
-                      value={teacherFromDate}
-                      onChange={(event) =>
-                        setTeacherFromDate(
-                          event.target.value,
-                        )
-                      }
-                      placeholder={SOLAR_PLACEHOLDER}
-                      className={inputClassName()}
-                    />
-                  </div>
+          <section className="overflow-hidden rounded-xl border border-white/[0.06] bg-[#121519]">
+            <div className="flex flex-col gap-3 border-b border-white/[0.06] p-3.5 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-xs font-bold text-white">
+                  Student payment status
+                </p>
 
-                  <div>
-                    <label className="mb-1.5 block text-xs font-semibold text-slate-500">
-                      To — Solar Hijri
-                    </label>
+                <p className="mt-1 text-[9px] text-slate-600">
+                  Only teacher-share balances that have not yet been settled by
+                  Admin remain here.
+                </p>
+              </div>
 
-                    <input
-                      type="text"
-                      value={teacherToDate}
-                      onChange={(event) =>
-                        setTeacherToDate(
-                          event.target.value,
-                        )
-                      }
-                      placeholder={SOLAR_PLACEHOLDER}
-                      className={inputClassName()}
-                    />
-                  </div>
-                </div>
+              <div className="flex items-center gap-2">
+                {someTeacherStudentsSelected && (
+                  <span className="text-[8px] text-slate-600">
+                    {selectedTeacherStudents.size} selected
+                    {selectedTeacherAmount > 0
+                      ? ` · AFN ${formatMoney(selectedTeacherAmount)}`
+                      : ""}
+                  </span>
+                )}
 
                 <button
                   type="button"
-                  onClick={() => loadTeacherData(true)}
-                  disabled={loading}
-                  className={buttonClassName(
-                    "mt-3 w-full border border-white/[0.08] bg-white/[0.03] text-slate-200 hover:bg-white/[0.06]",
-                  )}
+                  onClick={toggleAllTeacherStudents}
+                  disabled={teacherStudents.length === 0}
+                  className="h-8 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 text-[8px] font-semibold text-slate-500 transition hover:text-white disabled:opacity-30"
                 >
-                  {loading ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <CalendarRange className="h-4 w-4" />
-                  )}
+                  {allTeacherStudentsSelected ? "Unselect all" : "Select all"}
+                </button>
 
-                  Apply period
+                <button
+                  type="button"
+                  onClick={requestTeacherStudentSettlement}
+                  disabled={
+                    selectedTeacherStudents.size === 0 ||
+                    teacherSettlementLoading
+                  }
+                  className="flex h-8 items-center gap-1.5 rounded-lg bg-[#f2bd19] px-3 text-[8px] font-bold text-black transition hover:bg-[#ffd34d] disabled:cursor-not-allowed disabled:opacity-30"
+                >
+                  {teacherSettlementLoading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Check className="h-3.5 w-3.5" />
+                  )}
+                  Clear selected
                 </button>
               </div>
             </div>
 
-            {/* STATS */}
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-              <StatCard
-                icon={Banknote}
-                label="Recorded payments"
-                value={money(
-                  teacherData.totals
-                    .total_payment_amount,
-                )}
-                sublabel={`${teacherData.totals.payment_count} payment records`}
-              />
-
-              <StatCard
+            {teacherLoading && !teacherMonthly ? (
+              <div className="grid place-items-center py-16">
+                <Loader2 className="h-5 w-5 animate-spin text-[#f2bd19]" />
+              </div>
+            ) : teacherStudents.length === 0 ? (
+              <EmptyState
                 icon={CheckCircle2}
-                label="Teacher attributable"
-                value={money(
-                  teacherData.totals
-                    .attributable_amount,
-                )}
-                sublabel="Traceable payment allocations"
+                title="No pending teacher balances"
+                description="Every teacher-share balance returned by the backend for this period has already been settled."
               />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[720px]">
+                  <thead>
+                    <tr className="border-b border-white/[0.05] bg-[#0e1114]">
+                      <th className="w-10 px-3 py-2.5 text-left">
+                        <Checkbox
+                          checked={allTeacherStudentsSelected}
+                          indeterminate={
+                            someTeacherStudentsSelected &&
+                            !allTeacherStudentsSelected
+                          }
+                          onChange={toggleAllTeacherStudents}
+                        />
+                      </th>
 
-              <StatCard
-                icon={Users}
-                label="Teacher share"
-                value={money(
-                  teacherData.totals
-                    .teacher_share_amount,
-                )}
-                sublabel={`${shareRate}% current rate`}
-              />
+                      <th className="px-3 py-2.5 text-left text-[8px] uppercase tracking-wider text-slate-600">
+                        Student
+                      </th>
 
-              <StatCard
-                icon={AlertTriangle}
-                label="Unattributed"
-                value={money(
-                  teacherData.totals
-                    .unattributed_amount,
-                )}
-                sublabel="Not currently traceable to a teacher"
-              />
+                      <th className="px-3 py-2.5 text-left text-[8px] uppercase tracking-wider text-slate-600">
+                        Class
+                      </th>
 
-              <StatCard
-                icon={ShieldCheck}
-                label="Teachers"
-                value={
-                  teacherData.totals.teacher_count
-                }
-                sublabel="Teachers with attributable payments"
-              />
+                      <th className="px-3 py-2.5 text-right text-[8px] uppercase tracking-wider text-slate-600">
+                        Expected
+                      </th>
+
+                      <th className="px-3 py-2.5 text-right text-[8px] uppercase tracking-wider text-slate-600">
+                        Paid
+                      </th>
+
+                      <th className="px-3 py-2.5 text-right text-[8px] uppercase tracking-wider text-slate-600">
+                        Outstanding
+                      </th>
+
+                      <th className="px-3 py-2.5 text-left text-[8px] uppercase tracking-wider text-slate-600">
+                        Status
+                      </th>
+
+                      <th className="px-3 py-2.5 text-right text-[8px] uppercase tracking-wider text-slate-600">
+                        Last payment
+                      </th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {teacherStudents.map((student) => {
+                      const key = teacherStudentKey(student);
+
+                      const selected = selectedTeacherStudents.has(key);
+
+                      const expected = Number(
+                        student.expected_amount ??
+                          student.calculated_amount ??
+                          student.expected ??
+                          0,
+                      );
+
+                      const paid = Number(
+                        student.paid_amount ?? student.paid ?? 0,
+                      );
+
+                      const outstanding = Number(
+                        student.outstanding_amount ??
+                          student.outstanding ??
+                          Math.max(expected - paid, 0),
+                      );
+
+                      const className =
+                        student.subject_name ??
+                        student.class_name ??
+                        student.class ??
+                        "—";
+
+                      const teacherShareAmount = Number(
+                        student.teacher_share_amount ??
+                          student.share_amount ??
+                          student.owed_teacher_share ??
+                          0,
+                      );
+
+                      return (
+                        <tr
+                          key={key}
+                          className={`border-b border-white/[0.035] transition last:border-0 ${
+                            selected
+                              ? "bg-[#f2bd19]/[0.035]"
+                              : "hover:bg-white/[0.015]"
+                          }`}
+                        >
+                          <td className="px-3 py-3">
+                            <Checkbox
+                              checked={selected}
+                              onChange={() => toggleTeacherStudent(student)}
+                            />
+                          </td>
+
+                          <td className="px-3 py-3">
+                            <div>
+                              <p className="text-[10px] font-semibold text-white">
+                                {student.student_name ??
+                                  student.full_name ??
+                                  "Unnamed student"}
+                              </p>
+
+                              <p className="mt-0.5 text-[8px] text-slate-700">
+                                Teacher share: AFN{" "}
+                                {formatMoney(teacherShareAmount)}
+                              </p>
+                            </div>
+                          </td>
+
+                          <td className="px-3 py-3">
+                            <div>
+                              <p className="text-[9px] text-slate-300">
+                                {className}
+                              </p>
+
+                              {(student.level || student.book_name) && (
+                                <p className="mt-0.5 text-[8px] text-slate-700">
+                                  {student.level || student.book_name}
+                                </p>
+                              )}
+                            </div>
+                          </td>
+
+                          <td className="px-3 py-3 text-right text-[9px] text-slate-400">
+                            AFN {formatMoney(expected)}
+                          </td>
+
+                          <td className="px-3 py-3 text-right text-[9px] font-semibold text-white">
+                            AFN {formatMoney(paid)}
+                          </td>
+
+                          <td className="px-3 py-3 text-right text-[9px] font-semibold">
+                            <span
+                              className={
+                                outstanding > 0
+                                  ? "text-red-300"
+                                  : "text-emerald-300"
+                              }
+                            >
+                              AFN {formatMoney(outstanding)}
+                            </span>
+                          </td>
+
+                          <td className="px-3 py-3">
+                            <StatusBadge
+                              status={
+                                student.status ??
+                                student.payment_status ??
+                                (outstanding > 0 ? "partial" : "paid")
+                              }
+                            />
+                          </td>
+
+                          <td className="px-3 py-3 text-right text-[8px] text-slate-600">
+                            {formatSolarDate(
+                              student.last_payment_solar_date ??
+                                student.last_payment_date,
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <Pagination
+              page={teacherPagination.page}
+              totalPages={teacherPagination.totalPages}
+              onPrevious={() => setTeacherPage((page) => Math.max(1, page - 1))}
+              onNext={() => setTeacherPage((page) => page + 1)}
+            />
+          </section>
+
+          {/* ASSIGNED CLASSES */}
+
+          <section className="rounded-xl border border-white/[0.06] bg-[#121519] p-3.5">
+            <div className="mb-3 flex items-center gap-2">
+              <BookOpen className="h-3.5 w-3.5 text-slate-600" />
+
+              <div>
+                <p className="text-[10px] font-semibold text-white">
+                  Assigned classes
+                </p>
+              </div>
             </div>
 
-            {/* TEACHER SUMMARY */}
-            <div className="rounded-2xl border border-white/[0.07] bg-[#121519] p-4">
-              <SectionHeader
-                title="Teacher compensation summary"
-                description="Each amount comes from actual payment allocations. The student's original payment amount remains untouched."
-              />
-
-              {teacherData.teachers.length ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[760px] text-left">
-                    <thead>
-                      <tr className="border-b border-white/[0.07] text-[11px] uppercase tracking-[0.14em] text-slate-600">
-                        <th className="px-3 py-3 font-semibold">
-                          Teacher
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Payments
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Attributable
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Share
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Effective rate
-                        </th>
-                      </tr>
-                    </thead>
-
-                    <tbody>
-                      {teacherData.teachers.map(
-                        (teacher) => (
-                          <tr
-                            key={teacher.teacher_id}
-                            className="border-b border-white/[0.05] last:border-b-0"
-                          >
-                            <td className="px-3 py-3">
-                              <div className="font-semibold text-slate-200">
-                                {teacher.teacher_name}
-                              </div>
-                            </td>
-
-                            <td className="px-3 py-3 text-sm text-slate-400">
-                              {teacher.payment_count}
-                            </td>
-
-                            <td className="px-3 py-3 text-sm font-semibold text-slate-300">
-                              {money(
-                                teacher.attributable_amount,
-                              )}
-                            </td>
-
-                            <td className="px-3 py-3 text-sm font-bold text-[#f2bd19]">
-                              {money(
-                                teacher.teacher_share_amount,
-                              )}
-                            </td>
-
-                            <td className="px-3 py-3 text-sm text-slate-400">
-                              Preserved per payment
-                            </td>
-                          </tr>
-                        ),
-                      )}
-                    </tbody>
-                  </table>
-                </div>
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              {(
+                selectedTeacher?.classes ||
+                teacherMonthly?.teacher?.classes ||
+                []
+              ).length === 0 ? (
+                <p className="text-[9px] text-slate-700">
+                  No assigned classes.
+                </p>
               ) : (
-                <EmptyState
-                  title="No attributable teacher payments"
-                  description="There are currently no payment allocations connected to teachers for the selected period."
-                />
+                (
+                  selectedTeacher?.classes ||
+                  teacherMonthly?.teacher?.classes ||
+                  []
+                ).map((classItem, index) => (
+                  <div
+                    key={classItem.id ?? classItem.class_slot_id ?? index}
+                    className="rounded-lg border border-white/[0.05] bg-[#0d1013] p-3"
+                  >
+                    <p className="text-[10px] font-semibold text-white">
+                      {classItem.subject_name ?? classItem.name ?? "Class"}
+                    </p>
+
+                    <p className="mt-1 text-[8px] text-slate-600">
+                      {classItem.start_time && classItem.end_time
+                        ? `${String(classItem.start_time).slice(
+                            0,
+                            5,
+                          )} – ${String(classItem.end_time).slice(0, 5)}`
+                        : "Time not set"}
+                    </p>
+
+                    <p className="mt-1.5 text-[8px] text-slate-700">
+                      {Number(classItem.student_count ?? 0)} students
+                    </p>
+                  </div>
+                ))
               )}
             </div>
+          </section>
 
-            {/* PAYMENT TRACE */}
-            <div className="rounded-2xl border border-white/[0.07] bg-[#121519] p-4">
-              <SectionHeader
-                title="Payment attribution"
-                description="This is the audit-friendly detail view showing exactly which real payment allocation produced the teacher share."
+          {/* HISTORY */}
+
+          <section className="rounded-xl border border-white/[0.06] bg-[#121519] p-3.5">
+            <div className="mb-3 flex items-center gap-2">
+              <History className="h-3.5 w-3.5 text-slate-600" />
+
+              <div>
+                <p className="text-[10px] font-semibold text-white">
+                  Teacher payment history
+                </p>
+
+                <p className="mt-0.5 text-[8px] text-slate-700">
+                  Historical monthly teacher earnings.
+                </p>
+              </div>
+            </div>
+
+            {teacherHistory.length === 0 ? (
+              <p className="py-5 text-center text-[9px] text-slate-700">
+                No historical teacher settlements.
+              </p>
+            ) : (
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {teacherHistory.map((item, index) => {
+                  const year = Number(item.solar_year);
+                  const month = Number(item.solar_month);
+
+                  return (
+                    <button
+                      type="button"
+                      key={item.id ?? `${year}-${month}-${index}`}
+                      onClick={() => {
+                        if (Number.isInteger(year) && Number.isInteger(month)) {
+                          setSelectedYear(year);
+                          setSelectedMonth(month);
+                          setTeacherPage(1);
+                        }
+                      }}
+                      className="rounded-lg border border-white/[0.05] bg-[#0d1013] p-3 text-left transition hover:border-[#f2bd19]/15 hover:bg-[#f2bd19]/[0.02]"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="text-[10px] font-semibold text-white">
+                            {monthName(month)} {year}
+                          </p>
+
+                          <p className="mt-1 text-[8px] text-slate-700">
+                            {Number(item.payment_count ?? 0)} payments ·{" "}
+                            {Number(item.share_percent ?? shareRate).toFixed(2)}
+                            % share
+                          </p>
+                        </div>
+
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400/70" />
+                      </div>
+
+                      <p className="mt-3 text-[8px] uppercase tracking-wider text-slate-700">
+                        Teacher share
+                      </p>
+
+                      <p className="mt-0.5 text-sm font-bold text-[#f2bd19]">
+                        AFN{" "}
+                        {formatMoney(
+                          item.teacher_share_amount ?? item.share_amount ?? 0,
+                        )}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  /* ==========================================================================
+     STAFF TAB
+  ========================================================================== */
+
+  function renderStaffTab() {
+    const staffSettlement =
+      staffSummary?.settlement || staffSummary?.staff_settlement || {};
+
+    const received = Boolean(
+      staffSettlement.received_at ||
+      staffSettlement.status === "received" ||
+      staffSettlement.status === "settled",
+    );
+
+    const totalCollected = Number(
+      staffSummary?.total_amount ?? staffSummary?.collected_amount ?? 0,
+    );
+
+    const transactionCount = Number(
+      staffSummary?.payment_count ?? staffSummary?.transaction_count ?? 0,
+    );
+
+    const handedOverAmount =
+      staffSummary?.handed_over_amount !== undefined
+        ? Number(staffSummary.handed_over_amount)
+        : received
+          ? totalCollected
+          : 0;
+
+    const pendingAmount = Math.max(totalCollected - handedOverAmount, 0);
+
+    return (
+      <div className="grid gap-3 xl:grid-cols-[245px_minmax(0,1fr)]">
+        {/* STAFF SIDEBAR */}
+
+        <aside className="rounded-2xl border border-white/[0.06] bg-[#121519] p-2.5">
+          <div className="p-1.5">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-700" />
+
+              <input
+                value={staffSearch}
+                onChange={(event) => setStaffSearch(event.target.value)}
+                placeholder="Search staff..."
+                className="h-9 w-full rounded-lg border border-white/[0.06] bg-[#0d1013] pl-9 pr-3 text-[10px] text-white outline-none placeholder:text-slate-700 focus:border-[#f2bd19]/30"
               />
-
-              {teacherData.payments.length ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[1250px] text-left">
-                    <thead>
-                      <tr className="border-b border-white/[0.07] text-[11px] uppercase tracking-[0.14em] text-slate-600">
-                        <th className="px-3 py-3 font-semibold">
-                          Date
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Student
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Payment
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Subject
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Teacher
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Attributable
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Rate
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Teacher share
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Collected by
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Receipt
-                        </th>
-                      </tr>
-                    </thead>
-
-                    <tbody>
-                      {teacherData.payments.map(
-                        (payment) => (
-                          <tr
-                            key={`${payment.payment_id}-${payment.allocation_id || "unallocated"}`}
-                            className="border-b border-white/[0.05] last:border-b-0"
-                          >
-                            {/* DATE */}
-                            <td className="px-3 py-3 align-top">
-                              <div className="text-sm font-semibold text-slate-300">
-                                {payment.payment_solar_date ||
-                                  normalDate(
-                                    payment.payment_date,
-                                  )}
-                              </div>
-                            </td>
-
-                            {/* STUDENT */}
-                            <td className="px-3 py-3 align-top">
-                              <div className="font-semibold text-slate-200">
-                                {payment.student_name ||
-                                  "Unknown"}
-                              </div>
-
-                              <div className="mt-0.5 text-xs text-slate-600">
-                                Roll:{" "}
-                                {payment.roll_number ||
-                                  "—"}
-                              </div>
-                            </td>
-
-                            {/* PAYMENT */}
-                            <td className="px-3 py-3 align-top">
-                              <div className="font-bold text-slate-200">
-                                {money(
-                                  payment.payment_amount,
-                                )}
-                              </div>
-
-                              <div className="mt-0.5 text-xs text-slate-600">
-                                {payment.receipt_number ||
-                                  "No receipt"}
-                              </div>
-                            </td>
-
-                            {/* SUBJECT */}
-                            <td className="px-3 py-3 align-top">
-                              <div className="text-sm text-slate-300">
-                                {payment.subject_name ||
-                                  "Unattributed"}
-                              </div>
-
-                              {payment.subject_code ? (
-                                <div className="mt-0.5 text-xs text-slate-600">
-                                  {payment.subject_code}
-                                </div>
-                              ) : null}
-                            </td>
-
-                            {/* TEACHER */}
-                            <td className="px-3 py-3 align-top">
-                              {payment.teacher_name ? (
-                                <>
-                                  <div className="font-semibold text-slate-200">
-                                    {payment.teacher_name}
-                                  </div>
-
-                                  {payment.covered_days !==
-                                  null ? (
-                                    <div className="mt-0.5 text-xs text-slate-600">
-                                      {
-                                        payment.covered_days
-                                      }{" "}
-                                      covered day
-                                      {payment.covered_days ===
-                                      1
-                                        ? ""
-                                        : "s"}
-                                    </div>
-                                  ) : null}
-                                </>
-                              ) : (
-                                <span className="text-xs text-amber-300">
-                                  Unattributed
-                                </span>
-                              )}
-                            </td>
-
-                            {/* ATTRIBUTABLE */}
-                            <td className="px-3 py-3 align-top">
-                              <span className="font-semibold text-slate-300">
-                                {payment.allocated_amount !==
-                                null
-                                  ? money(
-                                      payment.allocated_amount,
-                                    )
-                                  : "—"}
-                              </span>
-                            </td>
-
-                            {/* RATE */}
-                            <td className="px-3 py-3 align-top">
-                              <span className="rounded-lg border border-[#f2bd19]/15 bg-[#f2bd19]/10 px-2 py-1 text-xs font-bold text-[#f2bd19]">
-                                {payment.share_percent}%
-                              </span>
-                            </td>
-
-                            {/* SHARE */}
-                            <td className="px-3 py-3 align-top">
-                              <span className="font-bold text-[#f2bd19]">
-                                {payment.teacher_share_amount
-                                  ? money(
-                                      payment.teacher_share_amount,
-                                    )
-                                  : "—"}
-                              </span>
-                            </td>
-
-                            {/* COLLECTOR */}
-                            <td className="px-3 py-3 align-top">
-                              <div className="text-sm text-slate-300">
-                                {payment.collector_name ||
-                                  "Unassigned"}
-                              </div>
-
-                              {payment.collector_role ? (
-                                <div className="mt-0.5 text-xs uppercase tracking-wide text-slate-600">
-                                  {
-                                    payment.collector_role
-                                  }
-                                </div>
-                              ) : null}
-                            </td>
-
-                            {/* RECEIPT */}
-                            <td className="px-3 py-3 align-top">
-                              <span className="text-xs text-slate-500">
-                                {payment.receipt_number ||
-                                  "—"}
-                              </span>
-                            </td>
-                          </tr>
-                        ),
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <EmptyState
-                  title="No payment records"
-                  description="No real payments were found for the selected period."
-                />
-              )}
             </div>
           </div>
-        ) : null}
 
-        {/* ==================================================================
-            CASH TAB
-        ================================================================== */}
+          <div className="mt-2 space-y-1">
+            {staffLoading && staff.length === 0 ? (
+              <div className="grid place-items-center py-10">
+                <Loader2 className="h-5 w-5 animate-spin text-[#f2bd19]" />
+              </div>
+            ) : filteredStaff.length === 0 ? (
+              <div className="px-3 py-8 text-center">
+                <p className="text-[10px] text-slate-600">No staff found.</p>
+              </div>
+            ) : (
+              filteredStaff.map((member) => {
+                const id = Number(
+                  member.staff_user_id ?? member.user_id ?? member.id,
+                );
 
-        {tab === "cash" ? (
-          <div className="space-y-4 lg:space-y-5">
+                const selected = id === Number(selectedStaffId);
 
-            {/* CREATE */}
-            <div className="rounded-2xl border border-white/[0.07] bg-[#121519] p-4">
-              <SectionHeader
-                title="New cash reconciliation"
-                description="Choose one collector and one settlement period. Expected cash is calculated directly from payments that were recorded under that collector."
-              />
+                const memberTotal = Number(
+                  member.total_amount ?? member.collected_amount ?? 0,
+                );
 
-              <form
-                onSubmit={createReconciliation}
-                className="grid gap-3 xl:grid-cols-6"
-              >
-                {/* COLLECTOR */}
-                <div className="xl:col-span-1">
-                  <label className="mb-1.5 block text-xs font-semibold text-slate-500">
-                    Collector
-                  </label>
+                const memberSettlement =
+                  member.settlement || member.staff_settlement || {};
 
-                  <div className="relative">
-                    <select
-                      value={
-                        reconciliationForm.collector_user_id
-                      }
-                      onChange={(event) => {
-                        setReconciliationForm(
-                          (current) => ({
-                            ...current,
-                            collector_user_id:
-                              event.target.value,
-                          }),
-                        );
+                const memberReceived = Boolean(
+                  member.handover_status === "handed_over" ||
+                  memberReceivedStatus(memberSettlement),
+                );
 
-                        setExpectedPreview(null);
-                      }}
-                      className={`${inputClassName()} appearance-none pr-10`}
-                    >
-                      <option value="">
-                        Select collector
-                      </option>
-
-                      {collectors.map(
-                        (collector) => (
-                          <option
-                            key={collector.id}
-                            value={collector.id}
-                          >
-                            {collector.full_name} —{" "}
-                            {collector.role}
-                          </option>
-                        ),
-                      )}
-                    </select>
-
-                    <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-600" />
-                  </div>
-                </div>
-
-                {/* FROM */}
-                <div>
-                  <label className="mb-1.5 block text-xs font-semibold text-slate-500">
-                    From — Solar Hijri
-                  </label>
-
-                  <input
-                    type="text"
-                    value={
-                      reconciliationForm.from_solar_date
-                    }
-                    onChange={(event) => {
-                      setReconciliationForm(
-                        (current) => ({
-                          ...current,
-                          from_solar_date:
-                            event.target.value,
-                        }),
-                      );
-
-                      setExpectedPreview(null);
-                    }}
-                    placeholder={SOLAR_PLACEHOLDER}
-                    className={inputClassName()}
-                  />
-                </div>
-
-                {/* TO */}
-                <div>
-                  <label className="mb-1.5 block text-xs font-semibold text-slate-500">
-                    To — Solar Hijri
-                  </label>
-
-                  <input
-                    type="text"
-                    value={
-                      reconciliationForm.to_solar_date
-                    }
-                    onChange={(event) => {
-                      setReconciliationForm(
-                        (current) => ({
-                          ...current,
-                          to_solar_date:
-                            event.target.value,
-                        }),
-                      );
-
-                      setExpectedPreview(null);
-                    }}
-                    placeholder={SOLAR_PLACEHOLDER}
-                    className={inputClassName()}
-                  />
-                </div>
-
-                {/* HANDOVER */}
-                <div>
-                  <label className="mb-1.5 block text-xs font-semibold text-slate-500">
-                    Handed over
-                  </label>
-
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={
-                      reconciliationForm.handed_over_amount
-                    }
-                    onChange={(event) =>
-                      setReconciliationForm(
-                        (current) => ({
-                          ...current,
-                          handed_over_amount:
-                            event.target.value,
-                        }),
-                      )
-                    }
-                    placeholder="Optional"
-                    className={inputClassName()}
-                  />
-                </div>
-
-                {/* NOTES */}
-                <div>
-                  <label className="mb-1.5 block text-xs font-semibold text-slate-500">
-                    Notes
-                  </label>
-
-                  <input
-                    type="text"
-                    value={reconciliationForm.notes}
-                    onChange={(event) =>
-                      setReconciliationForm(
-                        (current) => ({
-                          ...current,
-                          notes: event.target.value,
-                        }),
-                      )
-                    }
-                    placeholder="Optional notes"
-                    className={inputClassName()}
-                  />
-                </div>
-
-                {/* ACTIONS */}
-                <div className="flex items-end gap-2">
+                return (
                   <button
                     type="button"
-                    onClick={
-                      calculateExpectedCash
-                    }
-                    disabled={expectedLoading}
-                    className={buttonClassName(
-                      "flex-1 border border-white/[0.08] bg-white/[0.03] text-slate-200 hover:bg-white/[0.06]",
-                    )}
+                    key={id}
+                    onClick={() => {
+                      setSelectedStaffId(id);
+                      setStaffPage(1);
+                      setStaffActivityPage(1);
+                      setSelectedStaffTransactions(new Set());
+                    }}
+                    className={`w-full rounded-xl border p-2.5 text-left transition ${
+                      selected
+                        ? "border-[#f2bd19]/15 bg-[#f2bd19]/[0.06]"
+                        : "border-transparent hover:border-white/[0.05] hover:bg-white/[0.02]"
+                    }`}
                   >
-                    {expectedLoading ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Banknote className="h-4 w-4" />
-                    )}
+                    <div className="flex items-center gap-2.5">
+                      <div
+                        className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg border ${
+                          selected
+                            ? "border-[#f2bd19]/15 bg-[#f2bd19]/[0.08]"
+                            : "border-white/[0.06] bg-white/[0.025]"
+                        }`}
+                      >
+                        <UserRound
+                          className={`h-3.5 w-3.5 ${
+                            selected ? "text-[#f2bd19]" : "text-slate-600"
+                          }`}
+                        />
+                      </div>
 
-                    Calculate
+                      <div className="min-w-0 flex-1">
+                        <p
+                          className={`truncate text-[10px] font-semibold ${
+                            selected ? "text-white" : "text-slate-400"
+                          }`}
+                        >
+                          {member.staff_name ??
+                            member.full_name ??
+                            member.collector_name ??
+                            "Unnamed staff"}
+                        </p>
+
+                        <div className="mt-1 flex items-center gap-1.5">
+                          <span className="text-[7px] uppercase text-slate-700">
+                            {member.role || "staff"}
+                          </span>
+
+                          <span className="text-[7px] text-slate-800">·</span>
+
+                          <span
+                            className={
+                              memberReceived
+                                ? "text-[7px] text-emerald-400"
+                                : memberTotal > 0
+                                  ? "text-[7px] text-amber-400"
+                                  : "text-[7px] text-slate-700"
+                            }
+                          >
+                            {memberReceived
+                              ? "Handed Over"
+                              : memberTotal > 0
+                                ? "Pending"
+                                : "No Collections"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
                   </button>
+                );
+              })
+            )}
+          </div>
+        </aside>
+
+        {/* STAFF CONTENT */}
+
+        <main className="min-w-0 space-y-3">
+          <section className="rounded-2xl border border-white/[0.06] bg-[#121519] p-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-bold text-white">
+                    {selectedStaff?.staff_name ??
+                      selectedStaff?.full_name ??
+                      selectedStaff?.collector_name ??
+                      "Staff member"}
+                  </h2>
+
+                  <span className="rounded-full border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-[7px] font-semibold uppercase text-slate-500">
+                    {selectedStaff?.role || "staff"}
+                  </span>
+                </div>
+
+                <p className="mt-1 text-[9px] text-slate-600">
+                  {selectedMonthLabel} · Cash collected by this staff member
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1 rounded-lg border border-white/[0.06] bg-[#0d1013] p-1">
+                  <button
+                    type="button"
+                    onClick={goToPreviousMonth}
+                    className="grid h-7 w-7 place-items-center rounded-md text-slate-600 hover:bg-white/[0.04] hover:text-white"
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </button>
+
+                  <div className="min-w-[100px] text-center">
+                    <p className="text-[9px] font-semibold text-slate-300">
+                      {monthName(selectedMonth)}
+                    </p>
+
+                    <p className="text-[7px] text-slate-700">{selectedYear}</p>
+                  </div>
 
                   <button
-                    type="submit"
-                    disabled={reconciliationSaving}
-                    className={buttonClassName(
-                      "flex-1 bg-[#f2bd19] text-[#0b0d10] hover:bg-[#ffd449]",
-                    )}
+                    type="button"
+                    onClick={goToNextMonth}
+                    className="grid h-7 w-7 place-items-center rounded-md text-slate-600 hover:bg-white/[0.04] hover:text-white"
                   >
-                    {reconciliationSaving ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Save className="h-4 w-4" />
-                    )}
-
-                    Save
+                    <ChevronRight className="h-3.5 w-3.5" />
                   </button>
                 </div>
-              </form>
 
-              {/* EXPECTED PREVIEW */}
-              {expectedPreview ? (
-                <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                  <div className="rounded-xl border border-white/[0.07] bg-[#0f1216] p-3">
-                    <div className="text-[11px] uppercase tracking-[0.14em] text-slate-600">
-                      Collector
-                    </div>
+                <button
+                  type="button"
+                  onClick={goToToday}
+                  className="h-9 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 text-[9px] text-slate-500 hover:text-white"
+                >
+                  Today
+                </button>
 
-                    <div className="mt-1 font-semibold text-slate-200">
-                      {
-                        expectedPreview.collector
-                          ?.full_name
-                      }
-                    </div>
-                  </div>
+                <button
+                  type="button"
+                  onClick={refreshFinance}
+                  disabled={staffLoading}
+                  className="grid h-9 w-9 place-items-center rounded-lg border border-white/[0.06] bg-white/[0.02] text-slate-500 hover:text-white disabled:opacity-40"
+                >
+                  <RefreshCw
+                    className={`h-3.5 w-3.5 ${
+                      staffLoading ? "animate-spin" : ""
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+          </section>
 
-                  <div className="rounded-xl border border-white/[0.07] bg-[#0f1216] p-3">
-                    <div className="text-[11px] uppercase tracking-[0.14em] text-slate-600">
-                      Expected cash
-                    </div>
+          {/* STAFF STATS */}
 
-                    <div className="mt-1 text-lg font-bold text-[#f2bd19]">
-                      {money(
-                        expectedPreview.expected_amount,
-                      )}
-                    </div>
-                  </div>
+          <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
+            <StatCard
+              icon={CreditCard}
+              label="Transactions"
+              value={transactionCount}
+              sublabel={selectedMonthLabel}
+            />
 
-                  <div className="rounded-xl border border-white/[0.07] bg-[#0f1216] p-3">
-                    <div className="text-[11px] uppercase tracking-[0.14em] text-slate-600">
-                      Payment count
-                    </div>
+            <StatCard
+              icon={Banknote}
+              label="Collected"
+              value={`AFN ${formatMoney(totalCollected)}`}
+              sublabel="Recorded by this staff member"
+            />
 
-                    <div className="mt-1 text-lg font-bold text-white">
-                      {
-                        expectedPreview.payment_count
-                      }
-                    </div>
-                  </div>
-                </div>
-              ) : null}
+            <StatCard
+              icon={CheckCircle2}
+              label="Handed Over"
+              value={`AFN ${formatMoney(handedOverAmount)}`}
+              sublabel={received ? "Admin received" : "Awaiting Admin"}
+            />
+
+            <StatCard
+              icon={Clock3}
+              label="Pending Handover"
+              value={`AFN ${formatMoney(pendingAmount)}`}
+              sublabel={
+                pendingAmount > 0 ? "Still with staff" : "Nothing pending"
+              }
+            />
+          </div>
+
+          {/* STAFF HANDOVER SUMMARY */}
+
+          <section className="rounded-xl border border-white/[0.06] bg-[#121519] p-3.5">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-[8px] uppercase tracking-[0.14em] text-slate-600">
+                  Cash handover
+                </p>
+
+                <p className="mt-1 text-[10px] text-slate-400">
+                  Select the actual payment transactions this staff member is
+                  handing to Admin.
+                </p>
+              </div>
+
+              {received && pendingStaffTransactions.length === 0 ? (
+                <span className="inline-flex w-fit items-center gap-1.5 rounded-lg border border-emerald-400/15 bg-emerald-400/[0.06] px-3 py-2 text-[9px] font-semibold text-emerald-300">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Handed Over
+                </span>
+              ) : (
+                <span className="inline-flex w-fit items-center gap-1.5 rounded-lg border border-amber-400/15 bg-amber-400/[0.05] px-3 py-2 text-[9px] font-semibold text-amber-300">
+                  <Clock3 className="h-3.5 w-3.5" />
+                  Pending Handover
+                </span>
+              )}
+            </div>
+          </section>
+
+          {/* TRANSACTIONS */}
+
+          <section className="overflow-hidden rounded-xl border border-white/[0.06] bg-[#121519]">
+            <div className="flex flex-col gap-3 border-b border-white/[0.06] p-3.5 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-xs font-bold text-white">Transactions</p>
+
+                <p className="mt-1 text-[9px] text-slate-600">
+                  Payments recorded by{" "}
+                  {selectedStaff?.staff_name ??
+                    selectedStaff?.full_name ??
+                    "this staff member"}{" "}
+                  for {selectedMonthLabel}.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {selectedStaffTransactions.size > 0 && (
+                  <span className="text-[8px] text-slate-600">
+                    {selectedStaffTransactions.size} selected
+                    {" · "}
+                    AFN {formatMoney(selectedStaffAmount)}
+                  </span>
+                )}
+
+                <button
+                  type="button"
+                  onClick={toggleAllStaffTransactions}
+                  disabled={pendingStaffTransactions.length === 0}
+                  className="h-8 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 text-[8px] font-semibold text-slate-500 hover:text-white disabled:opacity-30"
+                >
+                  {allVisibleStaffSelected ? "Unselect all" : "Select all"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={requestStaffHandover}
+                  disabled={selectedStaffTransactions.size === 0}
+                  className="flex h-8 items-center gap-1.5 rounded-lg bg-[#f2bd19] px-3 text-[8px] font-bold text-black transition hover:bg-[#ffd34d] disabled:cursor-not-allowed disabled:opacity-30"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  Mark as Handed Over
+                </button>
+              </div>
             </div>
 
-            {/* FILTERS */}
-            <div className="rounded-2xl border border-white/[0.07] bg-[#121519] p-4">
-              <SectionHeader
-                title="Reconciliation history"
-                description="Historical reconciliations are kept. Shortages and overages are never silently removed."
+            {staffPaymentsLoading ? (
+              <div className="grid place-items-center py-16">
+                <Loader2 className="h-5 w-5 animate-spin text-[#f2bd19]" />
+              </div>
+            ) : staffPayments.length === 0 ? (
+              <EmptyState
+                icon={Banknote}
+                title="No transactions"
+                description="This staff member has no payment transactions recorded for the selected Solar month."
               />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[800px]">
+                  <thead>
+                    <tr className="border-b border-white/[0.05] bg-[#0e1114]">
+                      <th className="w-10 px-3 py-2.5 text-left">
+                        <Checkbox
+                          checked={allVisibleStaffSelected}
+                          indeterminate={
+                            selectedStaffTransactions.size > 0 &&
+                            !allVisibleStaffSelected
+                          }
+                          onChange={toggleAllStaffTransactions}
+                        />
+                      </th>
 
-              <div className="grid gap-3 md:grid-cols-4">
+                      <th className="px-3 py-2.5 text-left text-[8px] uppercase tracking-wider text-slate-600">
+                        Transaction
+                      </th>
 
-                {/* COLLECTOR */}
+                      <th className="px-3 py-2.5 text-left text-[8px] uppercase tracking-wider text-slate-600">
+                        Payment date
+                      </th>
+
+                      <th className="px-3 py-2.5 text-left text-[8px] uppercase tracking-wider text-slate-600">
+                        Paid for
+                      </th>
+
+                      <th className="px-3 py-2.5 text-right text-[8px] uppercase tracking-wider text-slate-600">
+                        Amount
+                      </th>
+
+                      <th className="px-3 py-2.5 text-left text-[8px] uppercase tracking-wider text-slate-600">
+                        Recorded by
+                      </th>
+
+                      <th className="px-3 py-2.5 text-left text-[8px] uppercase tracking-wider text-slate-600">
+                        Status
+                      </th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {staffPayments.map((transaction) => {
+                      const paymentId = String(
+                        transaction.payment_id ?? transaction.id,
+                      );
+
+                      const handedOver =
+                        isStaffTransactionHandedOver(transaction);
+
+                      const selected = selectedStaffTransactions.has(paymentId);
+
+                      const amount = Number(
+                        transaction.amount ??
+                          transaction.payment_amount ??
+                          transaction.paid_amount ??
+                          0,
+                      );
+
+                      return (
+                        <tr
+                          key={paymentId}
+                          className={`border-b border-white/[0.035] last:border-0 ${
+                            selected
+                              ? "bg-[#f2bd19]/[0.035]"
+                              : "hover:bg-white/[0.015]"
+                          }`}
+                        >
+                          <td className="px-3 py-3">
+                            <Checkbox
+                              checked={selected}
+                              disabled={handedOver}
+                              onChange={() =>
+                                toggleStaffTransaction(transaction)
+                              }
+                            />
+                          </td>
+
+                          <td className="px-3 py-3">
+                            <div>
+                              <p className="text-[10px] font-semibold text-white">
+                                {transaction.receipt_number
+                                  ? `Receipt ${transaction.receipt_number}`
+                                  : `Payment #${paymentId}`}
+                              </p>
+
+                              <p className="mt-0.5 text-[8px] text-slate-700">
+                                {transaction.student_name
+                                  ? `Student: ${transaction.student_name}`
+                                  : "Student payment"}
+                              </p>
+                            </div>
+                          </td>
+
+                          <td className="px-3 py-3 text-[9px] text-slate-400">
+                            {formatPaymentDate(transaction)}
+                          </td>
+
+                          <td className="px-3 py-3">
+                            <div>
+                              <p className="text-[9px] font-semibold text-slate-300">
+                                {formatPaymentForStaff(transaction)}
+                              </p>
+
+                              {transaction.subject_name && (
+                                <p className="mt-0.5 text-[8px] text-slate-700">
+                                  {transaction.subject_name}
+                                </p>
+                              )}
+                            </div>
+                          </td>
+
+                          <td className="px-3 py-3 text-right text-[10px] font-bold text-white">
+                            AFN {formatMoney(amount)}
+                          </td>
+
+                          <td className="px-3 py-3">
+                            <div>
+                              <p className="text-[9px] font-semibold text-slate-300">
+                                {selectedStaff?.staff_name ??
+                                  selectedStaff?.full_name ??
+                                  transaction.collector_name ??
+                                  transaction.recorded_by_name ??
+                                  "—"}
+                              </p>
+
+                              <p className="mt-0.5 text-[8px] text-slate-700">
+                                staff
+                              </p>
+                            </div>
+                          </td>
+
+                          <td className="px-3 py-3">
+                            <HandoverBadge handedOver={handedOver} />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <Pagination
+              page={staffPagination.page}
+              totalPages={staffPagination.totalPages}
+              onPrevious={() => setStaffPage((page) => Math.max(1, page - 1))}
+              onNext={() => setStaffPage((page) => page + 1)}
+            />
+          </section>
+
+          {/* STAFF AUDIT */}
+
+          <section className="overflow-hidden rounded-xl border border-white/[0.06] bg-[#121519]">
+            <div className="border-b border-white/[0.06] p-3.5">
+              <div className="flex items-center gap-2">
+                <History className="h-3.5 w-3.5 text-slate-600" />
+
                 <div>
-                  <label className="mb-1.5 block text-xs font-semibold text-slate-500">
-                    Collector
-                  </label>
+                  <p className="text-[10px] font-semibold text-white">
+                    Staff activity
+                  </p>
 
-                  <div className="relative">
-                    <select
-                      value={
-                        reconciliationCollectorFilter
-                      }
-                      onChange={(event) =>
-                        setReconciliationCollectorFilter(
-                          event.target.value,
-                        )
-                      }
-                      className={`${inputClassName()} appearance-none pr-10`}
-                    >
-                      <option value="">
-                        All collectors
-                      </option>
-
-                      {collectors.map(
-                        (collector) => (
-                          <option
-                            key={collector.id}
-                            value={collector.id}
-                          >
-                            {collector.full_name}
-                          </option>
-                        ),
-                      )}
-                    </select>
-
-                    <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-600" />
-                  </div>
-                </div>
-
-                {/* FROM */}
-                <div>
-                  <label className="mb-1.5 block text-xs font-semibold text-slate-500">
-                    From — Solar Hijri
-                  </label>
-
-                  <input
-                    type="text"
-                    value={reconciliationFromDate}
-                    onChange={(event) =>
-                      setReconciliationFromDate(
-                        event.target.value,
-                      )
-                    }
-                    placeholder={SOLAR_PLACEHOLDER}
-                    className={inputClassName()}
-                  />
-                </div>
-
-                {/* TO */}
-                <div>
-                  <label className="mb-1.5 block text-xs font-semibold text-slate-500">
-                    To — Solar Hijri
-                  </label>
-
-                  <input
-                    type="text"
-                    value={reconciliationToDate}
-                    onChange={(event) =>
-                      setReconciliationToDate(
-                        event.target.value,
-                      )
-                    }
-                    placeholder={SOLAR_PLACEHOLDER}
-                    className={inputClassName()}
-                  />
-                </div>
-
-                {/* FILTER BUTTON */}
-                <div className="flex items-end">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      loadReconciliations(true)
-                    }
-                    disabled={loading}
-                    className={buttonClassName(
-                      "w-full border border-white/[0.08] bg-white/[0.03] text-slate-200 hover:bg-white/[0.06]",
-                    )}
-                  >
-                    {loading ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <CalendarRange className="h-4 w-4" />
-                    )}
-
-                    Apply filters
-                  </button>
+                  <p className="mt-0.5 text-[8px] text-slate-700">
+                    Actions performed by this staff member.
+                  </p>
                 </div>
               </div>
             </div>
 
-            {/* CASH STATS */}
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-              <StatCard
-                icon={Banknote}
-                label="Expected"
-                value={money(
-                  reconciliationTotals.expected,
-                )}
-                sublabel="Selected history"
+            {staffActivityLoading ? (
+              <div className="grid place-items-center py-12">
+                <Loader2 className="h-5 w-5 animate-spin text-[#f2bd19]" />
+              </div>
+            ) : staffActivity.length === 0 ? (
+              <EmptyState
+                icon={History}
+                title="No activity recorded"
+                description="There is no financial activity recorded for this staff member."
               />
+            ) : (
+              <div className="divide-y divide-white/[0.035]">
+                {staffActivity.map((activity, index) => (
+                  <div
+                    key={activity.id ?? `${activity.payment_id}-${index}`}
+                    className="flex flex-col gap-2 p-3.5 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-semibold text-white">
+                          {formatActivityAction(activity)}
+                        </span>
 
-              <StatCard
-                icon={WalletCards}
-                label="Handed over"
-                value={money(
-                  reconciliationTotals.handed,
-                )}
-                sublabel="Recorded physical handovers"
-              />
+                        <span className="rounded-full border border-white/[0.05] bg-white/[0.02] px-1.5 py-0.5 text-[7px] text-slate-600">
+                          staff
+                        </span>
+                      </div>
 
-              <StatCard
-                icon={AlertTriangle}
-                label="Difference"
-                value={money(
-                  Math.abs(
-                    reconciliationTotals.difference,
-                  ),
-                )}
-                sublabel={
-                  reconciliationTotals.difference === 0
-                    ? "No net difference"
-                    : reconciliationTotals.difference <
-                        0
-                      ? "Net short"
-                      : "Net over"
-                }
-              />
+                      <p className="mt-1 text-[8px] text-slate-600">
+                        Performed by{" "}
+                        <span className="text-slate-400">
+                          {selectedStaff?.staff_name ??
+                            selectedStaff?.full_name ??
+                            activity.performed_by_name ??
+                            activity.user_name ??
+                            "this staff member"}
+                        </span>
+                      </p>
 
-              <StatCard
-                icon={CheckCircle2}
-                label="Matched"
-                value={
-                  reconciliationTotals.matched
-                }
-                sublabel="Zero-difference settlements"
-              />
-
-              <StatCard
-                icon={XCircle}
-                label="Short"
-                value={reconciliationTotals.short}
-                sublabel="Shortage settlements"
-              />
-
-              <StatCard
-                icon={Clock3}
-                label="Pending"
-                value={
-                  reconciliationTotals.pending
-                }
-                sublabel={`${reconciliationTotals.over} over settlement${
-                  reconciliationTotals.over === 1
-                    ? ""
-                    : "s"
-                }`}
-              />
-            </div>
-
-            {/* TABLE */}
-            <div className="rounded-2xl border border-white/[0.07] bg-[#121519] p-4">
-              {reconciliations.length ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[1200px] text-left">
-                    <thead>
-                      <tr className="border-b border-white/[0.07] text-[11px] uppercase tracking-[0.14em] text-slate-600">
-                        <th className="px-3 py-3 font-semibold">
-                          Collector
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Period
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Payments
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Expected
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Handed over
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Difference
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Status
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Verification
-                        </th>
-
-                        <th className="px-3 py-3 font-semibold">
-                          Actions
-                        </th>
-                      </tr>
-                    </thead>
-
-                    <tbody>
-                      {reconciliations.map(
-                        (row) => (
-                          <tr
-                            key={row.id}
-                            className="border-b border-white/[0.05] last:border-b-0"
-                          >
-                            {/* COLLECTOR */}
-                            <td className="px-3 py-3 align-top">
-                              <div className="font-semibold text-slate-200">
-                                {row.collector_name}
-                              </div>
-
-                              <div className="mt-0.5 text-xs uppercase tracking-wide text-slate-600">
-                                {row.collector_role}
-                              </div>
-                            </td>
-
-                            {/* PERIOD */}
-                            <td className="px-3 py-3 align-top">
-                              <div className="text-sm font-semibold text-slate-300">
-                                {row.from_solar_date}
-                              </div>
-
-                              <div className="mt-0.5 text-xs text-slate-600">
-                                to{" "}
-                                {row.to_solar_date}
-                              </div>
-                            </td>
-
-                            {/* PAYMENTS */}
-                            <td className="px-3 py-3 align-top text-sm text-slate-400">
-                              {row.payment_count}
-                            </td>
-
-                            {/* EXPECTED */}
-                            <td className="px-3 py-3 align-top text-sm font-bold text-slate-200">
-                              {money(
-                                row.expected_amount,
-                              )}
-                            </td>
-
-                            {/* HANDED */}
-                            <td className="px-3 py-3 align-top text-sm font-semibold text-slate-300">
-                              {row.handed_over_amount ===
-                              null
-                                ? "Not handed over"
-                                : money(
-                                    row.handed_over_amount,
-                                  )}
-                            </td>
-
-                            {/* DIFFERENCE */}
-                            <td className="px-3 py-3 align-top">
-                              {row.difference ===
-                              null ? (
-                                <span className="text-xs text-slate-600">
-                                  —
-                                </span>
-                              ) : (
-                                <span
-                                  className={
-                                    row.difference ===
-                                    0
-                                      ? "font-bold text-emerald-300"
-                                      : row.difference <
-                                          0
-                                        ? "font-bold text-red-300"
-                                        : "font-bold text-amber-300"
-                                  }
-                                >
-                                  {row.difference > 0
-                                    ? "+"
-                                    : ""}
-                                  {money(
-                                    row.difference,
-                                  )}
-                                </span>
-                              )}
-                            </td>
-
-                            {/* STATUS */}
-                            <td className="px-3 py-3 align-top">
-                              <span
-                                className={`inline-flex rounded-lg border px-2 py-1 text-xs font-semibold ${statusClasses(
-                                  row.status,
-                                )}`}
-                              >
-                                {statusLabel(
-                                  row.status,
-                                )}
-                              </span>
-                            </td>
-
-                            {/* VERIFICATION */}
-                            <td className="px-3 py-3 align-top">
-                              {row.verification_date ? (
-                                <div>
-                                  <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-300">
-                                    <CheckCircle2 className="h-3.5 w-3.5" />
-                                    Verified
-                                  </div>
-
-                                  <div className="mt-1 text-xs text-slate-600">
-                                    {
-                                      row.verification_solar_date
-                                    }
-                                  </div>
-
-                                  <div className="mt-0.5 text-xs text-slate-600">
-                                    by{" "}
-                                    {row.verified_by_name ||
-                                      "Admin"}
-                                  </div>
-                                </div>
-                              ) : (
-                                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500">
-                                  <Clock3 className="h-3.5 w-3.5" />
-                                  Unverified
-                                </span>
-                              )}
-                            </td>
-
-                            {/* ACTIONS */}
-                            <td className="px-3 py-3 align-top">
-                              <div className="flex flex-wrap gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    openEditReconciliation(
-                                      row,
-                                    )
-                                  }
-                                  className={buttonClassName(
-                                    "border border-white/[0.08] bg-white/[0.03] px-2.5 py-2 text-xs text-slate-300 hover:bg-white/[0.06]",
-                                  )}
-                                >
-                                  Edit
-                                </button>
-
-                                {!row.verification_date &&
-                                row.handed_over_amount !==
-                                  null ? (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      verifyReconciliation(
-                                        row,
-                                      )
-                                    }
-                                    className={buttonClassName(
-                                      "border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-2 text-xs text-emerald-300 hover:bg-emerald-400/15",
-                                    )}
-                                  >
-                                    <Check className="h-3.5 w-3.5" />
-                                    Verify
-                                  </button>
-                                ) : null}
-                              </div>
-
-                              {row.notes ? (
-                                <div className="mt-2 max-w-xs text-xs leading-5 text-slate-600">
-                                  {row.notes}
-                                </div>
-                              ) : null}
-                            </td>
-                          </tr>
-                        ),
+                      {activity.student_name && (
+                        <p className="mt-0.5 text-[8px] text-slate-700">
+                          Student: {activity.student_name}
+                        </p>
                       )}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <EmptyState
-                  title="No reconciliations"
-                  description="No cash reconciliation records match the selected filters."
-                />
-              )}
-            </div>
-          </div>
-        ) : null}
+                    </div>
+
+                    <div className="shrink-0 text-left sm:text-right">
+                      {activity.amount !== undefined && (
+                        <p className="text-[10px] font-bold text-white">
+                          AFN {formatMoney(activity.amount)}
+                        </p>
+                      )}
+
+                      <p className="mt-1 text-[8px] text-slate-700">
+                        {formatSolarDate(
+                          activity.performed_at_solar_date ??
+                            activity.solar_date ??
+                            activity.created_at,
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <Pagination
+              page={staffActivityPagination.page}
+              totalPages={staffActivityPagination.totalPages}
+              onPrevious={() =>
+                setStaffActivityPage((page) => Math.max(1, page - 1))
+              }
+              onNext={() => setStaffActivityPage((page) => page + 1)}
+            />
+          </section>
+        </main>
       </div>
+    );
+  }
 
-      {/* ====================================================================
-          EDIT MODAL
-      ==================================================================== */}
+  /* ==========================================================================
+     MAIN RENDER
+  ========================================================================== */
 
-      {editingReconciliation ? (
-        <div className="fixed inset-0 z-[100] grid place-items-center bg-black/70 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-lg rounded-2xl border border-white/[0.08] bg-[#121519] p-5 shadow-[0_30px_100px_rgba(0,0,0,0.5)]">
+  return (
+    <>
+      <div className="space-y-3">
+        {/* HEADER */}
 
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#f2bd19]">
-                  Cash reconciliation
+        <section className="rounded-2xl border border-white/[0.06] bg-[#101317] p-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-base font-bold text-white">Finance</h1>
+
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/15 bg-emerald-400/[0.05] px-2 py-1 text-[7px] font-semibold text-emerald-300">
+                  <ShieldCheck className="h-3 w-3" />
+                  Admin verified
+                </span>
+              </div>
+
+              <p className="mt-1 text-[9px] text-slate-600">
+                Teacher compensation and staff cash reconciliation
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-1 rounded-lg border border-white/[0.06] bg-[#0d1013] p-1">
+                <button
+                  type="button"
+                  onClick={goToPreviousMonth}
+                  className="grid h-7 w-7 place-items-center rounded-md text-slate-600 hover:bg-white/[0.04] hover:text-white"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </button>
+
+                <div className="min-w-[105px] text-center">
+                  <p className="text-[9px] font-semibold text-slate-300">
+                    {monthName(selectedMonth)} {selectedYear}
+                  </p>
                 </div>
 
-                <h3 className="mt-1 text-lg font-bold text-white">
-                  Update handover
-                </h3>
-
-                <p className="mt-1 text-xs text-slate-500">
-                  {editingReconciliation.collector_name} ·{" "}
-                  {editingReconciliation.from_solar_date}{" "}
-                  →{" "}
-                  {editingReconciliation.to_solar_date}
-                </p>
+                <button
+                  type="button"
+                  onClick={goToNextMonth}
+                  className="grid h-7 w-7 place-items-center rounded-md text-slate-600 hover:bg-white/[0.04] hover:text-white"
+                >
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </button>
               </div>
 
               <button
                 type="button"
-                onClick={() =>
-                  setEditingReconciliation(null)
-                }
-                className="grid h-9 w-9 place-items-center rounded-lg border border-white/[0.08] text-slate-500 hover:bg-white/[0.04] hover:text-white"
+                onClick={goToToday}
+                className="flex h-9 items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 text-[9px] text-slate-500 hover:text-white"
               >
-                <XCircle className="h-4 w-4" />
+                <CalendarDays className="h-3.5 w-3.5" />
+                Today
+              </button>
+
+              <button
+                type="button"
+                onClick={refreshFinance}
+                className="grid h-9 w-9 place-items-center rounded-lg border border-white/[0.06] bg-white/[0.02] text-slate-500 hover:text-white"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
               </button>
             </div>
-
-            <div className="mt-5 rounded-xl border border-white/[0.07] bg-[#0f1216] p-3">
-              <div className="grid gap-3 sm:grid-cols-3">
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-600">
-                    Expected
-                  </div>
-
-                  <div className="mt-1 font-bold text-slate-200">
-                    {money(
-                      editingReconciliation.expected_amount,
-                    )}
-                  </div>
-                </div>
-
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-600">
-                    Current handed
-                  </div>
-
-                  <div className="mt-1 font-bold text-slate-200">
-                    {editingReconciliation.handed_over_amount ===
-                    null
-                      ? "—"
-                      : money(
-                          editingReconciliation.handed_over_amount,
-                        )}
-                  </div>
-                </div>
-
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-slate-600">
-                    Current status
-                  </div>
-
-                  <div className="mt-1">
-                    <span
-                      className={`inline-flex rounded-lg border px-2 py-1 text-xs font-semibold ${statusClasses(
-                        editingReconciliation.status,
-                      )}`}
-                    >
-                      {statusLabel(
-                        editingReconciliation.status,
-                      )}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <form
-              onSubmit={saveReconciliationEdit}
-              className="mt-5 space-y-4"
-            >
-              <div>
-                <label className="mb-1.5 block text-xs font-semibold text-slate-500">
-                  Handed-over amount
-                </label>
-
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={
-                    editReconciliationForm.handed_over_amount
-                  }
-                  onChange={(event) =>
-                    setEditReconciliationForm(
-                      (current) => ({
-                        ...current,
-                        handed_over_amount:
-                          event.target.value,
-                      }),
-                    )
-                  }
-                  className={inputClassName()}
-                />
-              </div>
-
-              <div>
-                <label className="mb-1.5 block text-xs font-semibold text-slate-500">
-                  Notes
-                </label>
-
-                <textarea
-                  rows={4}
-                  value={editReconciliationForm.notes}
-                  onChange={(event) =>
-                    setEditReconciliationForm(
-                      (current) => ({
-                        ...current,
-                        notes: event.target.value,
-                      }),
-                    )
-                  }
-                  className={`${inputClassName()} resize-none`}
-                />
-              </div>
-
-              <div className="rounded-xl border border-amber-400/15 bg-amber-400/5 px-3 py-2.5 text-xs leading-5 text-amber-200/80">
-                Changing the handed-over amount automatically
-                recalculates the difference and removes previous
-                verification so the new figures must be verified again.
-              </div>
-
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setEditingReconciliation(null)
-                  }
-                  className={buttonClassName(
-                    "flex-1 border border-white/[0.08] bg-white/[0.03] text-slate-300 hover:bg-white/[0.06]",
-                  )}
-                >
-                  Cancel
-                </button>
-
-                <button
-                  type="submit"
-                  disabled={editSaving}
-                  className={buttonClassName(
-                    "flex-1 bg-[#f2bd19] text-[#0b0d10] hover:bg-[#ffd449]",
-                  )}
-                >
-                  {editSaving ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Save className="h-4 w-4" />
-                  )}
-
-                  Save changes
-                </button>
-              </div>
-            </form>
           </div>
+        </section>
+
+        {/* TABS */}
+
+        <div className="flex items-center gap-5 border-b border-white/[0.06] px-1">
+          <button
+            type="button"
+            onClick={() => setActiveTab("teacher")}
+            className={`relative pb-2.5 text-[10px] font-semibold transition ${
+              activeTab === "teacher"
+                ? "text-[#f2bd19]"
+                : "text-slate-600 hover:text-slate-300"
+            }`}
+          >
+            Teachers
+            {activeTab === "teacher" && (
+              <span className="absolute bottom-0 left-0 right-0 h-px bg-[#f2bd19]" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("staff")}
+            className={`relative pb-2.5 text-[10px] font-semibold transition ${
+              activeTab === "staff"
+                ? "text-[#f2bd19]"
+                : "text-slate-600 hover:text-slate-300"
+            }`}
+          >
+            Staff
+            {activeTab === "staff" && (
+              <span className="absolute bottom-0 left-0 right-0 h-px bg-[#f2bd19]" />
+            )}
+          </button>
         </div>
-      ) : null}
-    </div>
+
+        {activeTab === "teacher" ? renderTeacherTab() : renderStaffTab()}
+      </div>
+
+      {/* FINANCE UNLOCK */}
+
+      <PasswordConfirmModal
+        open={financePasswordOpen}
+        title="Unlock Finance"
+        description="Enter your administrator password to access Finance."
+        endpoint="/finance/verify-admin-password"
+        onCancel={() => setFinancePasswordOpen(false)}
+        onVerified={handleFinancePasswordVerified}
+      />
+
+      {/* ACTION PASSWORD */}
+
+      <PasswordConfirmModal
+        open={actionPasswordOpen}
+        title={
+          actionTarget?.type === "staff_handover"
+            ? "Confirm Cash Handover"
+            : "Confirm Teacher Settlement"
+        }
+        description={
+          actionTarget?.type === "staff_handover"
+            ? `Enter the administrator password to receive ${actionTarget?.rows?.length || 0} selected transaction${
+                actionTarget?.rows?.length === 1 ? "" : "s"
+              } from ${actionTarget?.name || "this staff member"}.`
+            : `Enter the administrator password to settle the selected teacher-share balances for ${actionTarget?.name || "this teacher"}.`
+        }
+        endpoint="/finance/verify-admin-password"
+        onCancel={() => {
+          setActionPasswordOpen(false);
+          setActionTarget(null);
+        }}
+        onVerified={handleActionPasswordVerified}
+      />
+    </>
   );
+}
+
+/* ==========================================================================
+   STAFF HELPERS
+========================================================================== */
+
+function memberReceivedStatus(settlement) {
+  return Boolean(
+    settlement?.received_at ||
+    settlement?.status === "received" ||
+    settlement?.status === "settled",
+  );
+}
+
+function formatPaymentForStaff(payment) {
+  if (!payment) return "—";
+
+  if (Array.isArray(payment.payment_for_months)) {
+    const months = payment.payment_for_months
+      .map((value) => String(value).trim())
+      .filter(Boolean)
+      .map((value) => {
+        const match = value.match(/^(\d{4})[/-](\d{1,2})$/);
+
+        if (!match) return value;
+
+        return `${match[1]}/${pad2(match[2])}`;
+      });
+
+    if (months.length) {
+      return [...new Set(months)].join(", ");
+    }
+  }
+
+  if (payment.payment_for) {
+    const value = String(payment.payment_for).trim();
+
+    const match = value.match(/^(\d{4})[/-](\d{1,2})$/);
+
+    if (match) {
+      return `${match[1]}/${pad2(match[2])}`;
+    }
+
+    return value;
+  }
+
+  if (payment.payment_for_solar_year && payment.payment_for_solar_month) {
+    return `${Number(payment.payment_for_solar_year)}/${pad2(
+      payment.payment_for_solar_month,
+    )}`;
+  }
+
+  if (payment.solar_year && payment.solar_month) {
+    return `${Number(payment.solar_year)}/${pad2(payment.solar_month)}`;
+  }
+
+  if (payment.payment_solar_year && payment.payment_solar_month) {
+    return `${Number(payment.payment_solar_year)}/${pad2(
+      payment.payment_solar_month,
+    )}`;
+  }
+
+  return "—";
+}
+
+function formatActivityAction(activity) {
+  if (!activity) return "Activity";
+
+  if (activity.action_label) {
+    return activity.action_label;
+  }
+
+  if (activity.action) {
+    return String(activity.action)
+      .replaceAll("_", " ")
+      .replace(/\b\w/g, (x) => x.toUpperCase());
+  }
+
+  if (activity.event_type) {
+    return String(activity.event_type)
+      .replaceAll("_", " ")
+      .replace(/\b\w/g, (x) => x.toUpperCase());
+  }
+
+  return "Payment activity";
 }

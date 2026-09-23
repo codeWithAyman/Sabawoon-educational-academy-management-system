@@ -7,6 +7,7 @@ export default function PasswordConfirmModal({
   title = "Confirm your password",
   description = "Enter your password to continue.",
   confirmLabel = "Verify & Continue",
+  endpoint = "/auth/verify-password",
   onVerified,
   onCancel,
 }) {
@@ -73,7 +74,7 @@ export default function PasswordConfirmModal({
     setError("");
 
     try {
-      const response = await api.post("/auth/verify-password", {
+      const response = await api.post(endpoint, {
         password: trimmedPassword,
       });
 
@@ -81,6 +82,18 @@ export default function PasswordConfirmModal({
       setShowPassword(false);
       setLoading(false);
 
+      /*
+        Pass the complete server response to the caller.
+
+        Existing callers continue receiving the response from
+        /auth/verify-password.
+
+        Finance can use the same modal with:
+          endpoint="/finance/verify-admin-password"
+
+        which returns the Finance-specific administrator
+        verification token.
+      */
       onVerified?.(response.data);
     } catch (error) {
       setLoading(false);
@@ -88,7 +101,12 @@ export default function PasswordConfirmModal({
       const status = error?.response?.status;
       const code = error?.response?.data?.code;
 
-      if (status === 401 || code === "PASSWORD_INCORRECT") {
+      if (
+        status === 401 ||
+        status === 403 ||
+        code === "PASSWORD_INCORRECT" ||
+        code === "INVALID_FINANCE_ADMIN_PASSWORD"
+      ) {
         setError("Incorrect password. Please try again.");
       } else {
         setError(

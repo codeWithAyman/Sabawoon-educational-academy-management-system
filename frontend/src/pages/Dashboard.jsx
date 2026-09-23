@@ -1484,12 +1484,7 @@ export default function Dashboard() {
                   SABAWOON ACADEMY
                 </div>
 
-                <h1>
-                  Good morning
-                  <span>
-                    {user?.name ? `, ${user.name.split(" ")[0]}` : ""}
-                  </span>
-                </h1>
+                <h1>Good morning . . .</h1>
 
                 <p>
                   A quiet overview of everything happening across the academy.

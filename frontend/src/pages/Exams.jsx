@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   BookOpen,
-  CalendarDays,
   Edit3,
   FileText,
   Loader2,
@@ -147,7 +146,7 @@ function normalizeClassRow(row) {
   return {
     ...row,
 
-    id: Number(row.id),
+    id: row.id === null || row.id === undefined ? null : Number(row.id),
 
     subject_id:
       row.subject_id === null || row.subject_id === undefined
@@ -195,7 +194,17 @@ function normalizeAssessment(row) {
 
     id: Number(row.id),
 
-    class_slot_id: Number(row.class_slot_id),
+    /*
+     * IMPORTANT:
+     * A permanent assessment can survive deletion of its class.
+     *
+     * The backend changes exams.class_slot_id to NULL when the
+     * class is deleted, so NULL must stay NULL here.
+     */
+    class_slot_id:
+      row.class_slot_id === null || row.class_slot_id === undefined
+        ? null
+        : Number(row.class_slot_id),
 
     total_marks: Number(row.total_marks || 0),
 
@@ -217,6 +226,11 @@ function EmptyState({ message }) {
   );
 }
 
+/*
+|--------------------------------------------------------------------------
+| SCORES MODAL
+|--------------------------------------------------------------------------
+*/
 function ScoresModal({ assessment, row, onClose, onSaved }) {
   const [students, setStudents] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -304,8 +318,8 @@ function ScoresModal({ assessment, row, onClose, onSaved }) {
 
         /*
          * IMPORTANT:
-         * Send marks_obtained because that
-         * is the actual database column.
+         * Send marks_obtained because that is the real
+         * database column.
          */
         marks_obtained:
           student._marksObtained === "" ? null : Number(student._marksObtained),
@@ -630,6 +644,7 @@ function ClassWorkspace({
   onClose,
   onNewAssessment,
   onOpenAssessment,
+  onEditAssessment,
 }) {
   const levelBookText = getLevelBookText(row);
 
@@ -644,6 +659,12 @@ function ClassWorkspace({
               <h2 className="truncate text-sm font-semibold text-white">
                 {row.subject_name}
               </h2>
+
+              {row.is_active === false && (
+                <span className="rounded-md border border-white/[0.07] px-1.5 py-0.5 text-[8px] uppercase tracking-[0.08em] text-gray-600">
+                  Archived
+                </span>
+              )}
             </div>
 
             <div className="mt-2 flex flex-wrap gap-4 text-[10px] text-gray-600">
@@ -692,7 +713,13 @@ function ClassWorkspace({
           <button
             type="button"
             onClick={onNewAssessment}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[#f2bd19] px-3 py-2 text-[10px] font-semibold text-black hover:bg-[#f7c52c]"
+            disabled={row.is_active === false}
+            title={
+              row.is_active === false
+                ? "Archived class: create new assessments from an active class."
+                : "New assessment"
+            }
+            className="inline-flex items-center gap-1.5 rounded-lg bg-[#f2bd19] px-3 py-2 text-[10px] font-semibold text-black hover:bg-[#f7c52c] disabled:cursor-not-allowed disabled:opacity-40"
           >
             <FileText size={11} />
             New Assessment
@@ -732,14 +759,25 @@ function ClassWorkspace({
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => onOpenAssessment(assessment, row)}
-                    className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-white/[0.07] px-3 py-2 text-[9px] text-gray-500 hover:border-[#f2bd19]/25 hover:text-[#f2bd19]"
-                  >
-                    <Edit3 size={10} />
-                    Scores
-                  </button>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => onOpenAssessment(assessment, row)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.07] px-3 py-2 text-[9px] text-gray-500 hover:border-[#f2bd19]/25 hover:text-[#f2bd19]"
+                    >
+                      <Edit3 size={10} />
+                      Scores
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => onEditAssessment(assessment)}
+                      className="rounded-lg border border-white/[0.07] p-2 text-gray-600 hover:border-[#f2bd19]/25 hover:text-[#f2bd19]"
+                      title="Edit assessment"
+                    >
+                      <Edit3 size={11} />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -938,6 +976,190 @@ function NewAssessmentModal({ row, onClose, onCreated }) {
 
 /*
 |--------------------------------------------------------------------------
+| EDIT ASSESSMENT MODAL
+|--------------------------------------------------------------------------
+*/
+function EditAssessmentModal({ assessment, onClose, onSaved }) {
+  const [name, setName] = useState(assessment.name || "");
+
+  const [examDate, setExamDate] = useState(
+    assessment.exam_date
+      ? String(assessment.exam_date).slice(0, 10)
+      : getToday(),
+  );
+
+  const [totalMarks, setTotalMarks] = useState(
+    String(assessment.total_marks || 100),
+  );
+
+  const [saving, setSaving] = useState(false);
+
+  const [error, setError] = useState("");
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+
+    if (saving) return;
+
+    const cleanName = name.trim();
+    const total = Number(totalMarks);
+
+    if (!cleanName) {
+      setError("Assessment name is required.");
+      return;
+    }
+
+    if (!examDate) {
+      setError("Assessment date is required.");
+      return;
+    }
+
+    if (!Number.isFinite(total) || total <= 0) {
+      setError("Total marks must be greater than zero.");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+
+    try {
+      const response = await api.put(`/marks/assessments/${assessment.id}`, {
+        name: cleanName,
+        exam_date: examDate,
+        total_marks: total,
+      });
+
+      onSaved(
+        normalizeAssessment({
+          ...assessment,
+          ...(response?.data || {}),
+          name: cleanName,
+          exam_date: examDate,
+          total_marks: total,
+        }),
+      );
+
+      onClose();
+    } catch (err) {
+      setError(getApiError(err, "Unable to update assessment."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm">
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-lg overflow-hidden rounded-2xl border border-white/10 bg-[#121519]"
+      >
+        <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <Edit3 size={16} className="text-[#f2bd19]" />
+
+              <h2 className="text-sm font-semibold text-white">
+                Edit Assessment
+              </h2>
+            </div>
+
+            <p className="mt-1 text-[10px] text-gray-600">
+              Update the saved assessment record.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            className="rounded-lg p-1.5 text-gray-600 hover:bg-white/[0.05] hover:text-gray-300"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="space-y-4 p-5">
+          <div>
+            <label className="mb-2 block text-[10px] uppercase tracking-[0.1em] text-gray-600">
+              Assessment name
+            </label>
+
+            <input
+              autoFocus
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              className="w-full rounded-xl border border-white/[0.08] bg-[#0b0d10] px-3.5 py-3 text-[12px] text-gray-200 outline-none focus:border-[#f2bd19]/30"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-2 block text-[10px] uppercase tracking-[0.1em] text-gray-600">
+                Date
+              </label>
+
+              <input
+                type="date"
+                value={examDate}
+                onChange={(event) => setExamDate(event.target.value)}
+                className="w-full rounded-xl border border-white/[0.08] bg-[#0b0d10] px-3 py-3 text-[11px] text-gray-300 outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-[10px] uppercase tracking-[0.1em] text-gray-600">
+                Total marks
+              </label>
+
+              <input
+                type="number"
+                min="1"
+                step="0.01"
+                value={totalMarks}
+                onChange={(event) => setTotalMarks(event.target.value)}
+                className="w-full rounded-xl border border-white/[0.08] bg-[#0b0d10] px-3 py-3 text-[11px] text-gray-300 outline-none"
+              />
+            </div>
+          </div>
+
+          {error && (
+            <div className="rounded-lg border border-red-500/10 bg-red-500/[0.04] px-3 py-2 text-[10px] text-red-400">
+              {error}
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-white/[0.06] px-5 py-4">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            className="rounded-lg border border-white/[0.07] px-3.5 py-2 text-[10px] text-gray-500 hover:text-gray-300"
+          >
+            Cancel
+          </button>
+
+          <button
+            type="submit"
+            disabled={saving}
+            className="inline-flex items-center gap-2 rounded-lg bg-[#f2bd19] px-3.5 py-2 text-[10px] font-semibold text-black disabled:opacity-60"
+          >
+            {saving ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Save size={12} />
+            )}
+
+            {saving ? "Saving..." : "Save Changes"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
 | MAIN REPORTS PAGE
 |--------------------------------------------------------------------------
 */
@@ -962,6 +1184,8 @@ export default function Exams() {
 
   const [selectedAssessmentClass, setSelectedAssessmentClass] = useState(null);
 
+  const [editingAssessment, setEditingAssessment] = useState(null);
+
   const loadReports = useCallback(async (showRefresh = false) => {
     if (showRefresh) {
       setRefreshing(true);
@@ -973,8 +1197,9 @@ export default function Exams() {
 
     try {
       /*
-       * EXACTLY like Timetable:
-       * /classes is the source for class data.
+       * /classes is the source for active class data.
+       * /marks/assessments is the source for permanent
+       * assessment records.
        */
       const [classesResponse, assessmentsResponse] = await Promise.all([
         api.get("/classes"),
@@ -989,13 +1214,122 @@ export default function Exams() {
         ? assessmentsResponse.data
         : [];
 
-      setClasses(
-        classData
-          .map(normalizeClassRow)
-          .filter((row) => row.is_active !== false),
+      const normalizedClasses = classData
+        .map(normalizeClassRow)
+        .filter((row) => row.is_active !== false);
+
+      const normalizedAssessments = assessmentData.map(normalizeAssessment);
+
+      const classMap = new Map(
+        normalizedClasses.map((row) => [Number(row.id), row]),
       );
 
-      setAssessments(assessmentData.map(normalizeAssessment));
+      /*
+       * Keep historical assessments visible even when
+       * their original class no longer exists.
+       *
+       * For an existing/deactivated class with an ID,
+       * use that ID.
+       *
+       * For a permanently deleted class, the backend
+       * correctly returns class_slot_id = NULL.
+       * In that case there is no class ID anymore, so
+       * create a stable negative synthetic ID based on
+       * the assessment ID.
+       *
+       * Negative IDs cannot collide with real class IDs.
+       */
+      normalizedAssessments.forEach((assessment) => {
+        const classId = assessment.class_slot_id;
+
+        /*
+         * Assessment still points to a class.
+         */
+        if (classId !== null && classId !== undefined) {
+          const numericClassId = Number(classId);
+
+          if (numericClassId && !classMap.has(numericClassId)) {
+            classMap.set(
+              numericClassId,
+              normalizeClassRow({
+                id: numericClassId,
+
+                subject_id: assessment.subject_id,
+
+                subject_name: assessment.subject_name,
+
+                subject_code: assessment.subject_code,
+
+                teacher_id: assessment.teacher_id,
+
+                teacher_name: assessment.teacher_name,
+
+                start_time: assessment.start_time,
+
+                end_time: assessment.end_time,
+
+                level: assessment.level,
+
+                books: assessment.books,
+
+                student_count: 0,
+
+                is_active: false,
+              }),
+            );
+          }
+
+          return;
+        }
+
+        /*
+         * The class was actually deleted.
+         *
+         * The assessment itself is permanent, so
+         * create a historical class row from its
+         * snapshot metadata.
+         */
+        const historicalClassId = -Math.abs(Number(assessment.id));
+
+        if (!historicalClassId || classMap.has(historicalClassId)) {
+          return;
+        }
+
+        classMap.set(
+          historicalClassId,
+          normalizeClassRow({
+            id: historicalClassId,
+
+            subject_id: assessment.subject_id,
+
+            subject_name: assessment.subject_name || "Historical assessment",
+
+            subject_code: assessment.subject_code,
+
+            teacher_id: assessment.teacher_id,
+
+            teacher_name: assessment.teacher_name,
+
+            start_time: assessment.start_time,
+
+            end_time: assessment.end_time,
+
+            level: assessment.level,
+
+            books: assessment.books,
+
+            student_count: 0,
+
+            is_active: false,
+
+            historical: true,
+          }),
+        );
+      });
+
+      setClasses(Array.from(classMap.values()));
+
+      setAssessments(normalizedAssessments);
     } catch (err) {
       setError(getApiError(err, "Unable to load reports."));
     } finally {
@@ -1012,13 +1346,37 @@ export default function Exams() {
     const map = new Map();
 
     assessments.forEach((assessment) => {
-      const classId = Number(assessment.class_slot_id);
+      /*
+       * Normal class assessment.
+       */
+      if (
+        assessment.class_slot_id !== null &&
+        assessment.class_slot_id !== undefined
+      ) {
+        const classId = Number(assessment.class_slot_id);
 
-      if (!map.has(classId)) {
-        map.set(classId, []);
+        if (!map.has(classId)) {
+          map.set(classId, []);
+        }
+
+        map.get(classId).push(assessment);
+
+        return;
       }
 
-      map.get(classId).push(assessment);
+      /*
+       * Deleted-class assessment.
+       *
+       * It gets the same negative synthetic ID
+       * used when building the historical class row.
+       */
+      const historicalClassId = -Math.abs(Number(assessment.id));
+
+      if (!map.has(historicalClassId)) {
+        map.set(historicalClassId, []);
+      }
+
+      map.get(historicalClassId).push(assessment);
     });
 
     return map;
@@ -1046,6 +1404,10 @@ export default function Exams() {
         .join(" ")
         .toLowerCase();
 
+      /*
+       * Also search historical assessment
+       * metadata through the class row.
+       */
       return text.includes(term);
     });
   }, [classes, search]);
@@ -1095,6 +1457,35 @@ export default function Exams() {
   function handleCreated(assessment) {
     setAssessments((current) => [...current, assessment]);
 
+    loadReports(true);
+  }
+
+  function handleAssessmentUpdated(updatedAssessment) {
+    setAssessments((current) =>
+      current.map((item) =>
+        Number(item.id) === Number(updatedAssessment.id)
+          ? {
+              ...item,
+              ...updatedAssessment,
+            }
+          : item,
+      ),
+    );
+
+    setSelectedAssessment((current) =>
+      current && Number(current.id) === Number(updatedAssessment.id)
+        ? {
+            ...current,
+            ...updatedAssessment,
+          }
+        : current,
+    );
+
+    /*
+     * Keep the current historical class
+     * metadata intact when editing an
+     * assessment.
+     */
     loadReports(true);
   }
 
@@ -1158,7 +1549,7 @@ export default function Exams() {
           </div>
         </div>
       ) : subjects.length === 0 ? (
-        <EmptyState message="No active classes found." />
+        <EmptyState message="No classes or historical assessments found." />
       ) : (
         <div className="space-y-4">
           {subjectPairs.map((pair, pairIndex) => (
@@ -1189,6 +1580,7 @@ export default function Exams() {
           onClose={() => setSelectedClass(null)}
           onNewAssessment={() => setNewAssessmentClass(selectedClass)}
           onOpenAssessment={openAssessment}
+          onEditAssessment={setEditingAssessment}
         />
       )}
 
@@ -1198,6 +1590,15 @@ export default function Exams() {
           row={newAssessmentClass}
           onClose={() => setNewAssessmentClass(null)}
           onCreated={handleCreated}
+        />
+      )}
+
+      {/* EDIT ASSESSMENT */}
+      {editingAssessment && (
+        <EditAssessmentModal
+          assessment={editingAssessment}
+          onClose={() => setEditingAssessment(null)}
+          onSaved={handleAssessmentUpdated}
         />
       )}
 
