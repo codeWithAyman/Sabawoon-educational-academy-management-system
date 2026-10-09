@@ -13,6 +13,31 @@ function isValidPositiveInteger(value) {
 }
 
 /* =========================================================
+   Age is stored instead of date of birth, so it must be a
+   whole number of years.
+========================================================= */
+
+const MAX_STUDENT_AGE = 120;
+
+function normalizeAge(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const age = Number(value);
+
+  if (!Number.isInteger(age) || age < 0 || age > MAX_STUDENT_AGE) {
+    return Number.NaN;
+  }
+
+  return age;
+}
+
+function isValidAge(value) {
+  return !Number.isNaN(normalizeAge(value));
+}
+
+/* =========================================================
    GET /api/students
    Get all ACTIVE students + active class enrollments
 
@@ -32,7 +57,7 @@ router.get("/", authRequired, async (req, res, next) => {
           s.full_name,
           s.phone,
           s.roll_number,
-          s.dob,
+          s.age,
           s.gender,
           s.blood_group,
           s.address,
@@ -136,7 +161,7 @@ router.get("/:id([0-9]+)", authRequired, async (req, res, next) => {
           s.full_name,
           s.phone,
           s.roll_number,
-          s.dob,
+          s.age,
           s.gender,
           s.blood_group,
           s.address,
@@ -264,7 +289,7 @@ router.post(
         full_name,
         phone,
         roll_number,
-        dob,
+        age,
         gender,
         blood_group,
         address,
@@ -277,6 +302,12 @@ router.post(
       if (!full_name || !String(full_name).trim()) {
         return res.status(400).json({
           error: "Student full name is required",
+        });
+      }
+
+      if (!isValidAge(age)) {
+        return res.status(400).json({
+          error: `Student age must be a whole number between 0 and ${MAX_STUDENT_AGE}`,
         });
       }
 
@@ -357,7 +388,7 @@ router.post(
               full_name,
               phone,
               roll_number,
-              dob,
+              age,
               gender,
               blood_group,
               address,
@@ -375,7 +406,7 @@ router.post(
             String(full_name).trim(),
             phone ? String(phone).trim() : null,
             roll_number ? String(roll_number).trim() : null,
-            dob || null,
+            normalizeAge(age),
             gender || null,
             blood_group || null,
             address ? String(address).trim() : null,
@@ -466,7 +497,7 @@ router.post(
         full_name,
         phone,
         roll_number,
-        dob,
+        age,
         gender,
         blood_group,
         address,
@@ -482,13 +513,19 @@ router.post(
         });
       }
 
+      if (!isValidAge(age)) {
+        return res.status(400).json({
+          error: `Student age must be a whole number between 0 and ${MAX_STUDENT_AGE}`,
+        });
+      }
+
       const result = await query(
         `
         INSERT INTO students (
           full_name,
           phone,
           roll_number,
-          dob,
+          age,
           gender,
           blood_group,
           address,
@@ -506,7 +543,7 @@ router.post(
           String(full_name).trim(),
           phone ? String(phone).trim() : null,
           roll_number ? String(roll_number).trim() : null,
-          dob || null,
+          normalizeAge(age),
           gender || null,
           blood_group || null,
           address ? String(address).trim() : null,
@@ -544,7 +581,7 @@ router.put(
         full_name,
         phone,
         roll_number,
-        dob,
+        age,
         gender,
         blood_group,
         address,
@@ -560,6 +597,12 @@ router.put(
         });
       }
 
+      if (!isValidAge(age)) {
+        return res.status(400).json({
+          error: `Student age must be a whole number between 0 and ${MAX_STUDENT_AGE}`,
+        });
+      }
+
       const result = await query(
         `
         UPDATE students
@@ -567,7 +610,7 @@ router.put(
           full_name = $1,
           phone = $2,
           roll_number = $3,
-          dob = $4,
+          age = $4,
           gender = $5,
           blood_group = $6,
           address = $7,
@@ -582,7 +625,7 @@ router.put(
           String(full_name).trim(),
           phone ? String(phone).trim() : null,
           roll_number ? String(roll_number).trim() : null,
-          dob || null,
+          normalizeAge(age),
           gender || null,
           blood_group || null,
           address ? String(address).trim() : null,

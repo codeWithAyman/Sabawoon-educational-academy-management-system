@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS students (
 
   roll_number VARCHAR(50) UNIQUE NOT NULL,
 
-  dob DATE,
+  age INTEGER,
   gender VARCHAR(10),
   blood_group VARCHAR(10),
 
@@ -84,6 +84,43 @@ CREATE TABLE IF NOT EXISTS students (
 
   admission_date DATE DEFAULT CURRENT_DATE
 );
+
+
+-- ============================================================
+-- STUDENTS — AGE REPLACES DATE OF BIRTH
+--
+-- CREATE TABLE IF NOT EXISTS is a no-op on databases that already
+-- have a `students` table, so the age column is also added here for
+-- existing installs. Ages are backfilled from the old `dob` values
+-- before that column is dropped.
+-- ============================================================
+
+ALTER TABLE students
+  ADD COLUMN IF NOT EXISTS age INTEGER;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'students'
+      AND column_name = 'dob'
+  ) THEN
+    EXECUTE $backfill$
+      UPDATE students
+      SET age = GREATEST(
+        0,
+        (EXTRACT(YEAR FROM age(CURRENT_DATE, dob))::INTEGER)
+      )
+      WHERE dob IS NOT NULL
+        AND age IS NULL
+    $backfill$;
+
+    EXECUTE 'ALTER TABLE students DROP COLUMN dob';
+  END IF;
+END
+$$;
 
 
 -- ============================================================
@@ -147,6 +184,72 @@ CREATE TABLE IF NOT EXISTS class_slots (
 
   CHECK (end_time > start_time)
 );
+
+
+-- ============================================================
+-- CLASS SLOTS — DEADLINE
+--
+-- CREATE TABLE IF NOT EXISTS is a no-op on databases that already
+-- have a `class_slots` table, so the deadline column is also added
+-- here for existing installs.
+--
+-- The deadline is stored as a plain Gregorian DATE, exactly like
+-- admission dates. The interface converts it to Solar Hijri.
+-- ============================================================
+
+ALTER TABLE class_slots
+  ADD COLUMN IF NOT EXISTS deadline DATE;
+
+
+-- ============================================================
+-- CLASS TYPES
+--
+-- A class time slot belongs to a type such as Male, Female, Kids
+-- or Mixed.
+--
+-- The list lives in the database so the interface always reads
+-- the available types from the API instead of hardcoding them.
+-- The INSERT is idempotent, so it is safe on every migration run
+-- and never overwrites an administrator's changes.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS class_types (
+  id SERIAL PRIMARY KEY,
+
+  name VARCHAR(50) NOT NULL UNIQUE,
+
+  sort_order INTEGER NOT NULL DEFAULT 0,
+
+  is_active BOOLEAN DEFAULT TRUE,
+
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+
+INSERT INTO class_types (name, sort_order)
+VALUES
+  ('Male', 1),
+  ('Female', 2),
+  ('Kids', 3),
+  ('Mixed', 4)
+ON CONFLICT (name) DO NOTHING;
+
+
+-- ============================================================
+-- CLASS SLOTS — CLASS TYPE
+--
+-- Nullable on purpose: classes created before this feature keep
+-- working without a type, and deleting a type only clears the
+-- reference instead of removing classes.
+-- ============================================================
+
+ALTER TABLE class_slots
+  ADD COLUMN IF NOT EXISTS class_type_id INTEGER
+    REFERENCES class_types(id) ON DELETE SET NULL;
+
+
+CREATE INDEX IF NOT EXISTS idx_class_slots_class_type
+  ON class_slots(class_type_id);
 
 
 -- ============================================================
@@ -228,8 +331,10 @@ CREATE TABLE IF NOT EXISTS exams (
 
   name VARCHAR(150) NOT NULL,
 
-  class_slot_id INTEGER NOT NULL
-    REFERENCES class_slots(id) ON DELETE CASCADE,
+  -- Reports are academic records, so removing a class only detaches
+  -- the report. It must never delete it.
+  class_slot_id INTEGER
+    REFERENCES class_slots(id) ON DELETE SET NULL,
 
   exam_date DATE NOT NULL,
 
@@ -242,8 +347,98 @@ CREATE TABLE IF NOT EXISTS exams (
 
   is_published BOOLEAN DEFAULT FALSE,
 
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+
+  -- Snapshot of the class at the moment the report was created, so
+  -- the report stays readable even after the class is gone.
+  subject_id_snapshot INTEGER,
+  subject_name_snapshot TEXT,
+  subject_code_snapshot TEXT,
+
+  teacher_id_snapshot INTEGER,
+  teacher_name_snapshot TEXT,
+
+  start_time_snapshot TIME,
+  end_time_snapshot TIME,
+
+  level_snapshot TEXT,
+  books_snapshot JSONB,
+
+  class_slot_id_snapshot INTEGER,
+  class_type_snapshot VARCHAR(50),
+  deadline_snapshot DATE
 );
+
+
+-- ============================================================
+-- EXAMS — ARCHIVE SAFETY ON EXISTING DATABASES
+--
+-- CREATE TABLE IF NOT EXISTS is a no-op when the table already
+-- exists, so older databases that were created with
+-- ON DELETE CASCADE are corrected here instead of silently
+-- deleting reports along with their class.
+-- ============================================================
+
+ALTER TABLE exams
+  ALTER COLUMN class_slot_id DROP NOT NULL;
+
+DO $$
+DECLARE
+  cascade_constraint TEXT;
+BEGIN
+  SELECT c.conname
+  INTO cascade_constraint
+  FROM pg_constraint c
+  JOIN pg_class t ON t.oid = c.conrelid
+  JOIN pg_namespace n ON n.oid = t.relnamespace
+  WHERE n.nspname = current_schema()
+    AND t.relname = 'exams'
+    AND c.contype = 'f'
+    AND c.confrelid = 'class_slots'::regclass
+    AND c.confdeltype = 'c';
+
+  IF cascade_constraint IS NOT NULL THEN
+    EXECUTE format(
+      'ALTER TABLE exams DROP CONSTRAINT %I',
+      cascade_constraint
+    );
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE n.nspname = current_schema()
+      AND t.relname = 'exams'
+      AND c.contype = 'f'
+      AND c.confrelid = 'class_slots'::regclass
+      AND c.confdeltype = 'n'
+  ) THEN
+    ALTER TABLE exams
+      ADD CONSTRAINT exams_class_slot_id_history_fkey
+      FOREIGN KEY (class_slot_id)
+      REFERENCES class_slots(id)
+      ON DELETE SET NULL;
+  END IF;
+END
+$$;
+
+ALTER TABLE exams ADD COLUMN IF NOT EXISTS subject_id_snapshot INTEGER;
+ALTER TABLE exams ADD COLUMN IF NOT EXISTS subject_name_snapshot TEXT;
+ALTER TABLE exams ADD COLUMN IF NOT EXISTS subject_code_snapshot TEXT;
+ALTER TABLE exams ADD COLUMN IF NOT EXISTS teacher_id_snapshot INTEGER;
+ALTER TABLE exams ADD COLUMN IF NOT EXISTS teacher_name_snapshot TEXT;
+ALTER TABLE exams ADD COLUMN IF NOT EXISTS start_time_snapshot TIME;
+ALTER TABLE exams ADD COLUMN IF NOT EXISTS end_time_snapshot TIME;
+ALTER TABLE exams ADD COLUMN IF NOT EXISTS level_snapshot TEXT;
+ALTER TABLE exams ADD COLUMN IF NOT EXISTS books_snapshot JSONB;
+ALTER TABLE exams ADD COLUMN IF NOT EXISTS class_slot_id_snapshot INTEGER;
+ALTER TABLE exams ADD COLUMN IF NOT EXISTS class_type_snapshot VARCHAR(50);
+ALTER TABLE exams ADD COLUMN IF NOT EXISTS deadline_snapshot DATE;
+
+CREATE INDEX IF NOT EXISTS idx_exams_exam_date
+  ON exams(exam_date DESC);
 
 
 -- ============================================================

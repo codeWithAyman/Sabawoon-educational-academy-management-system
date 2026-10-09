@@ -117,6 +117,7 @@ app.use("/api/fees", require("./routes/fees"));
   Admin-only financial calculations and cash reconciliation.
 */
 app.use("/api/finance", require("./routes/finance"));
+app.use("/api/inventory", require("./routes/inventory"));
 
 app.use("/api/assignments", require("./routes/assignments"));
 

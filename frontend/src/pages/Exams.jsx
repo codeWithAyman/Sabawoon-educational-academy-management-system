@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
+  Archive,
   BookOpen,
   Edit3,
   FileText,
+  History,
   Loader2,
   RefreshCw,
   Save,
@@ -13,6 +15,10 @@ import {
 } from "lucide-react";
 
 import api from "../lib/api";
+import {
+  gregorianToSolarInput,
+  toIsoDate,
+} from "../components/SolarDateField";
 
 const SUBJECT_COLORS = [
   {
@@ -1163,6 +1169,229 @@ function EditAssessmentModal({ assessment, onClose, onSaved }) {
 | MAIN REPORTS PAGE
 |--------------------------------------------------------------------------
 */
+/*
+|--------------------------------------------------------------------------
+| REPORTS HISTORY
+|--------------------------------------------------------------------------
+|
+| A permanent record. Reports are grouped by year and stay listed
+| even when the class they belong to has been archived or deleted,
+| because the archive reads the class details the report kept.
+|
+*/
+
+const CLASS_STATE_LABELS = {
+  active: { label: "Active class", className: "text-emerald-400" },
+  archived: { label: "Class archived", className: "text-amber-400" },
+  removed: { label: "Class removed", className: "text-red-400" },
+};
+
+function HistoryRow({ row }) {
+  const state = CLASS_STATE_LABELS[row.class_state] || CLASS_STATE_LABELS.active;
+
+  const iso = toIsoDate(row.exam_date);
+
+  const solar = iso ? gregorianToSolarInput(iso) : "—";
+
+  const bookNames = (row.books || [])
+    .map((book) => book?.name)
+    .filter(Boolean)
+    .join(", ");
+
+  return (
+    <div className="grid min-w-0 grid-cols-[minmax(0,1.6fr)_minmax(0,1.2fr)_minmax(0,1.1fr)_minmax(96px,0.8fr)_minmax(72px,0.6fr)_minmax(72px,0.6fr)] items-center gap-3 border-t border-white/[0.055] px-4 py-2.5">
+      <div className="min-w-0">
+        <div className="truncate text-[11px] font-medium text-gray-200">
+          {row.name}
+        </div>
+
+        <div className="mt-0.5 flex items-center gap-1.5">
+          <span className={["text-[9px]", state.className].join(" ")}>
+            {state.label}
+          </span>
+
+          {row.is_published && (
+            <span className="rounded border border-white/[0.08] px-1 py-px text-[8px] uppercase tracking-[0.08em] text-gray-500">
+              Published
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="min-w-0">
+        <div className="truncate text-[10px] text-gray-400">
+          {row.subject_name || "—"}
+        </div>
+
+        <div className="mt-0.5 truncate text-[9px] text-gray-700">
+          {row.teacher_name || "No teacher recorded"}
+        </div>
+      </div>
+
+      <div className="min-w-0">
+        <div className="truncate text-[10px] text-gray-400">
+          {row.class_type || "—"}
+        </div>
+
+        <div className="mt-0.5 truncate text-[9px] text-gray-700">
+          {bookNames || row.level || "No level / book"}
+        </div>
+      </div>
+
+      <div className="min-w-0">
+        <div className="truncate text-[10px] tabular-nums text-gray-400">
+          {solar}
+        </div>
+
+        <div className="mt-0.5 truncate text-[9px] text-gray-700">Exam date</div>
+      </div>
+
+      <div className="min-w-0 text-right">
+        <div className="truncate text-[10px] tabular-nums text-gray-400">
+          {row.average_mark === null || row.average_mark === undefined
+            ? "—"
+            : `${row.average_mark} / ${row.total_marks}`}
+        </div>
+
+        <div className="mt-0.5 truncate text-[9px] text-gray-700">
+          {row.score_count} scored
+        </div>
+      </div>
+
+      <div className="min-w-0 text-right">
+        <div className="truncate text-[10px] tabular-nums text-gray-400">
+          {row.score_count > 0
+            ? `${row.lowest_mark} – ${row.highest_mark}`
+            : "—"}
+        </div>
+
+        <div className="mt-0.5 truncate text-[9px] text-gray-700">
+          Low – high
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HistoryPanel({
+  history,
+  groups,
+  search,
+  onSearchChange,
+  loading,
+  error,
+}) {
+  return (
+    <div>
+      <div className="mb-4 rounded-xl border border-white/[0.06] bg-[#121519] px-4 py-3">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#f2bd19]/10 text-[#f2bd19]">
+            <Archive size={16} />
+          </div>
+
+          <div className="min-w-0">
+            <p className="text-[11px] font-medium text-gray-300">
+              Permanent archive
+            </p>
+
+            <p className="mt-0.5 text-[10px] leading-relaxed text-gray-600">
+              Every report ever created is kept here, including reports
+              whose class has since been archived or removed. Removing a
+              class never removes its reports.
+            </p>
+          </div>
+
+          <div className="ml-auto shrink-0 text-right">
+            <div className="text-[13px] font-semibold text-gray-200">
+              {history.length}
+            </div>
+
+            <div className="text-[9px] uppercase tracking-[0.08em] text-gray-700">
+              Reports kept
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="mb-4">
+        <div className="relative max-w-md">
+          <Search
+            size={13}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-700"
+          />
+
+          <input
+            value={search}
+            onChange={(event) => onSearchChange(event.target.value)}
+            placeholder="Search report, subject, teacher, year..."
+            className="w-full rounded-lg border border-white/[0.07] bg-[#121519] py-2.5 pl-9 pr-3 text-[10px] text-gray-300 outline-none placeholder:text-gray-700"
+          />
+        </div>
+      </div>
+
+      {error && (
+        <div className="mb-4 rounded-xl border border-red-500/10 bg-red-500/[0.04] px-4 py-3 text-[10px] text-red-400">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex min-h-[200px] items-center justify-center rounded-xl border border-white/[0.06] bg-[#121519]">
+          <div className="flex items-center gap-2 text-[11px] text-gray-600">
+            <Loader2 size={15} className="animate-spin" />
+            Loading report history...
+          </div>
+        </div>
+      ) : groups.length === 0 ? (
+        <EmptyState
+          message={
+            search.trim()
+              ? "No reports match your search."
+              : "No reports have been created yet."
+          }
+        />
+      ) : (
+        <div className="space-y-4">
+          {groups.map((group) => (
+            <div
+              key={group.label}
+              className="overflow-hidden rounded-xl border border-white/[0.06] bg-[#121519]"
+            >
+              <div className="flex items-center justify-between gap-3 border-b border-white/[0.055] px-4 py-2.5">
+                <div className="flex items-center gap-2">
+                  <History size={12} className="text-gray-600" />
+
+                  <span className="text-[11px] font-semibold text-gray-300">
+                    {group.label}
+                  </span>
+                </div>
+
+                <span className="text-[9px] text-gray-600">
+                  {group.rows.length}{" "}
+                  {group.rows.length === 1 ? "report" : "reports"}
+                </span>
+              </div>
+
+              <div className="grid min-w-0 grid-cols-[minmax(0,1.6fr)_minmax(0,1.2fr)_minmax(0,1.1fr)_minmax(96px,0.8fr)_minmax(72px,0.6fr)_minmax(72px,0.6fr)] items-center gap-3 px-4 py-2 text-[8px] font-semibold uppercase tracking-[0.11em] text-gray-700">
+                <span>Report</span>
+                <span>Subject / Teacher</span>
+                <span>Type / Book</span>
+                <span>Date</span>
+                <span className="text-right">Average</span>
+                <span className="text-right">Range</span>
+              </div>
+
+              {group.rows.map((row) => (
+                <HistoryRow key={row.id} row={row} />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Exams() {
   const [classes, setClasses] = useState([]);
 
@@ -1185,6 +1414,19 @@ export default function Exams() {
   const [selectedAssessmentClass, setSelectedAssessmentClass] = useState(null);
 
   const [editingAssessment, setEditingAssessment] = useState(null);
+
+  /*
+    Reports History.
+
+    A permanent archive of every report ever created, including the
+    ones whose class has since been archived or removed entirely.
+  */
+  const [tab, setTab] = useState("reports");
+
+  const [history, setHistory] = useState([]);
+  const [historySearch, setHistorySearch] = useState("");
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
 
   const loadReports = useCallback(async (showRefresh = false) => {
     if (showRefresh) {
@@ -1341,6 +1583,79 @@ export default function Exams() {
   useEffect(() => {
     loadReports();
   }, [loadReports]);
+
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+
+    setHistoryError("");
+
+    try {
+      const response = await api.get("/marks/assessments/history");
+
+      setHistory(Array.isArray(response.data) ? response.data : []);
+    } catch (err) {
+      setHistoryError(getApiError(err, "Unable to load report history."));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab !== "history") return;
+
+    loadHistory();
+  }, [tab, loadHistory]);
+
+  /*
+    Group the archive by year so old reports stay easy to find.
+
+    The academic year wins when the report has one, otherwise the
+    year is taken from the report date itself.
+  */
+  const historyGroups = useMemo(() => {
+    const term = historySearch.trim().toLowerCase();
+
+    const filtered = term
+      ? history.filter((row) => {
+          const haystack = [
+            row.name,
+            row.subject_name,
+            row.subject_code,
+            row.teacher_name,
+            row.level,
+            row.class_type,
+            row.academic_year,
+            ...(row.books || []).map((book) => book?.name),
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+
+          return haystack.includes(term);
+        })
+      : history;
+
+    const groups = new Map();
+
+    for (const row of filtered) {
+      const iso = toIsoDate(row.exam_date);
+
+      const key =
+        (row.academic_year && String(row.academic_year).trim()) ||
+        (iso ? iso.slice(0, 4) : "Undated");
+
+      if (!groups.has(key)) {
+        groups.set(key, []);
+      }
+
+      groups.get(key).push(row);
+    }
+
+    return Array.from(groups.entries()).map(([label, rows]) => ({
+      label,
+      rows,
+    }));
+  }, [history, historySearch]);
 
   const assessmentsByClass = useMemo(() => {
     const map = new Map();
@@ -1507,15 +1822,75 @@ export default function Exams() {
 
         <button
           type="button"
-          onClick={() => loadReports(true)}
-          disabled={loading || refreshing}
+          onClick={() => (tab === "history" ? loadHistory() : loadReports(true))}
+          disabled={
+            tab === "history"
+              ? historyLoading
+              : loading || refreshing
+          }
           className="inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.025] px-3 py-2 text-[10px] text-gray-500 hover:text-gray-300 disabled:opacity-50"
         >
-          <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
+          <RefreshCw
+            size={12}
+            className={
+              tab === "history"
+                ? historyLoading
+                  ? "animate-spin"
+                  : ""
+                : refreshing
+                  ? "animate-spin"
+                  : ""
+            }
+          />
           Refresh
         </button>
       </div>
 
+      {/* TABS */}
+      <div className="mb-5 flex items-center gap-1 rounded-lg border border-white/[0.06] bg-[#121519] p-1">
+        {[
+          { key: "reports", label: "Active Reports", icon: FileText },
+          { key: "history", label: "Reports History", icon: History },
+        ].map((item) => {
+          const Icon = item.icon;
+
+          const active = tab === item.key;
+
+          return (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => setTab(item.key)}
+              className={[
+                "inline-flex flex-1 items-center justify-center gap-2 rounded-md px-3 py-2 text-[10px] font-medium transition",
+                active
+                  ? "bg-white/[0.06] text-gray-200"
+                  : "text-gray-600 hover:text-gray-300",
+              ].join(" ")}
+            >
+              <Icon size={12} />
+
+              {item.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* HISTORY TAB */}
+
+      {tab === "history" && (
+        <HistoryPanel
+          history={history}
+          groups={historyGroups}
+          search={historySearch}
+          onSearchChange={setHistorySearch}
+          loading={historyLoading}
+          error={historyError}
+        />
+      )}
+
+      {tab === "reports" && (
+        <>
       {/* SEARCH */}
       <div className="mb-5">
         <div className="relative max-w-md">
@@ -1614,6 +1989,8 @@ export default function Exams() {
           }}
           onSaved={() => loadReports(true)}
         />
+      )}
+        </>
       )}
     </div>
   );

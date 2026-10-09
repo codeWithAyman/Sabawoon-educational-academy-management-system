@@ -45,3 +45,5 @@ coverage/
 # pem / secrets — never commit
 *.pem
 *.key
+
+.vercel

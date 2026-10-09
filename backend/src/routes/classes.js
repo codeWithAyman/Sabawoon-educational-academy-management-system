@@ -14,6 +14,100 @@ function normalizeOptionalText(value) {
 }
 
 /* =========================================================
+   DEADLINE
+
+   Deadlines are optional. When present they must be a real
+   Gregorian calendar date such as "2026-09-21". They are stored
+   as-is and rendered as Solar Hijri by the interface.
+
+   Returns the normalized date, or null when cleared. Sets
+   `error` when the value cannot be used.
+========================================================= */
+
+const DEADLINE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/* =========================================================
+   CLASS TYPE
+
+   The class type is optional. When present it must reference an
+   existing active class type.
+========================================================= */
+
+function normalizeClassTypeId(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const id = Number(value);
+
+  if (!Number.isInteger(id) || id <= 0) {
+    return Number.NaN;
+  }
+
+  return id;
+}
+
+async function validateClassTypeId(client, classTypeId) {
+  if (classTypeId === null) {
+    return;
+  }
+
+  const result = await client.query(
+    `
+      SELECT id
+      FROM class_types
+      WHERE id = $1
+        AND is_active = TRUE
+    `,
+    [classTypeId],
+  );
+
+  if (!result.rows.length) {
+    const error = new Error("Selected class type was not found");
+
+    error.status = 400;
+    error.code = "INVALID_CLASS_TYPE";
+
+    throw error;
+  }
+}
+
+function normalizeDeadline(value) {
+  if (value === undefined || value === null) {
+    return { value: null, error: null };
+  }
+
+  if (typeof value === "object") {
+    return { value: null, error: null };
+  }
+
+  const text = String(value).trim();
+
+  if (!text) {
+    return { value: null, error: null };
+  }
+
+  if (!DEADLINE_PATTERN.test(text)) {
+    return { value: null, error: "Deadline must be a valid date" };
+  }
+
+  const [year, month, day] = text.split("-").map(Number);
+
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+
+  const isRealDate =
+    parsed.getUTCFullYear() === year &&
+    parsed.getUTCMonth() === month - 1 &&
+    parsed.getUTCDate() === day;
+
+  if (!isRealDate) {
+    return { value: null, error: "Deadline must be a valid date" };
+  }
+
+  return { value: text, error: null };
+}
+
+/* =========================================================
    ACTIVE CLASSES
 ========================================================= */
 
@@ -33,6 +127,9 @@ router.get(
         cs.end_time,
         cs.academic_year,
         cs.level,
+        cs.deadline,
+        cs.class_type_id,
+        ct.name AS class_type,
         cs.is_active,
         cs.created_at,
 
@@ -65,6 +162,8 @@ router.get(
         ON s.id = cs.subject_id
       INNER JOIN teachers t
         ON t.id = cs.teacher_id
+      LEFT JOIN class_types ct
+        ON ct.id = cs.class_type_id
 
       WHERE cs.is_active = TRUE
 
@@ -72,6 +171,42 @@ router.get(
         s.name,
         cs.start_time,
         t.full_name
+    `);
+
+    res.json(r.rows);
+  }),
+);
+
+/* =========================================================
+   CLASS TYPES
+   The options come from the database so the interface never
+   has to hardcode them.
+========================================================= */
+
+router.get(
+  "/types",
+  authRequired,
+  asyncH(async (req, res) => {
+    const r = await query(`
+      SELECT
+        ct.id,
+        ct.name,
+        ct.sort_order,
+
+        (
+          SELECT COUNT(*)::int
+          FROM class_slots cs
+          WHERE cs.class_type_id = ct.id
+            AND cs.is_active = TRUE
+        ) AS class_count
+
+      FROM class_types ct
+
+      WHERE ct.is_active = TRUE
+
+      ORDER BY
+        ct.sort_order,
+        ct.name
     `);
 
     res.json(r.rows);
@@ -461,6 +596,9 @@ router.get(
           cs.end_time,
           cs.academic_year,
           cs.level,
+          cs.deadline,
+          cs.class_type_id,
+          ct.name AS class_type,
           cs.is_active,
           cs.created_at,
 
@@ -486,6 +624,8 @@ router.get(
           ON s.id = cs.subject_id
         INNER JOIN teachers t
           ON t.id = cs.teacher_id
+        LEFT JOIN class_types ct
+          ON ct.id = cs.class_type_id
 
         WHERE cs.id = $1
       `,
@@ -592,6 +732,8 @@ router.post(
       book_ids,
       academic_year,
       level,
+      deadline,
+      class_type_id,
     } = req.body;
 
     if (!subject_id || !teacher_id || !start_time || !end_time) {
@@ -617,6 +759,23 @@ router.post(
     const normalizedAcademicYear = normalizeOptionalText(academic_year);
 
     const normalizedLevel = normalizeOptionalText(level);
+
+    const { value: normalizedDeadline, error: deadlineError } =
+      normalizeDeadline(deadline);
+
+    if (deadlineError) {
+      return res.status(400).json({
+        error: deadlineError,
+      });
+    }
+
+    const normalizedClassTypeId = normalizeClassTypeId(class_type_id);
+
+    if (Number.isNaN(normalizedClassTypeId)) {
+      return res.status(400).json({
+        error: "class_type_id must be a valid class type ID",
+      });
+    }
 
     const client = await pool.connect();
 
@@ -663,6 +822,8 @@ router.post(
         normalizedBookIds || [],
       );
 
+      await validateClassTypeId(client, normalizedClassTypeId);
+
       const classResult = await client.query(
         `
           INSERT INTO class_slots(
@@ -672,9 +833,11 @@ router.post(
             end_time,
             academic_year,
             level,
+            deadline,
+            class_type_id,
             is_active
           )
-          VALUES($1, $2, $3, $4, $5, $6, TRUE)
+          VALUES($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
           RETURNING *
         `,
         [
@@ -684,6 +847,8 @@ router.post(
           end_time,
           normalizedAcademicYear,
           normalizedLevel,
+          normalizedDeadline,
+          normalizedClassTypeId,
         ],
       );
 
@@ -706,6 +871,9 @@ router.post(
             cs.end_time,
             cs.academic_year,
             cs.level,
+            cs.deadline,
+            cs.class_type_id,
+            ct.name AS class_type,
             cs.is_active,
             cs.created_at,
 
@@ -731,6 +899,8 @@ router.post(
             ON s.id = cs.subject_id
           INNER JOIN teachers t
             ON t.id = cs.teacher_id
+          LEFT JOIN class_types ct
+            ON ct.id = cs.class_type_id
 
           WHERE cs.id = $1
         `,
@@ -767,8 +937,27 @@ router.put(
       book_ids,
       academic_year,
       level,
+      deadline,
+      class_type_id,
       is_active,
     } = req.body;
+
+    const { value: normalizedDeadline, error: deadlineError } =
+      normalizeDeadline(deadline);
+
+    if (deadlineError) {
+      return res.status(400).json({
+        error: deadlineError,
+      });
+    }
+
+    const normalizedClassTypeId = normalizeClassTypeId(class_type_id);
+
+    if (Number.isNaN(normalizedClassTypeId)) {
+      return res.status(400).json({
+        error: "class_type_id must be a valid class type ID",
+      });
+    }
 
     const normalizedBookIds = normalizeBookIds(book_ids);
 
@@ -793,6 +982,8 @@ router.put(
             end_time,
             academic_year,
             level,
+            deadline,
+            class_type_id,
             is_active
           FROM class_slots
           WHERE id = $1
@@ -843,6 +1034,17 @@ router.put(
       const finalLevel =
         level !== undefined ? normalizeOptionalText(level) : current.level;
 
+      // The deadline is deliberately not part of identityChanged:
+      // a deadline can be corrected at any time, even for a class
+      // that already has assessments.
+      const finalDeadline =
+        deadline !== undefined ? normalizedDeadline : current.deadline;
+
+      const finalClassTypeId =
+        class_type_id !== undefined
+          ? normalizedClassTypeId
+          : current.class_type_id;
+
       let currentBookIds = [];
 
       if (book_ids !== undefined) {
@@ -867,6 +1069,7 @@ router.put(
         String(finalAcademicYear || "") !==
           String(current.academic_year || "") ||
         String(finalLevel || "") !== String(current.level || "") ||
+        Number(finalClassTypeId || 0) !== Number(current.class_type_id || 0) ||
         (book_ids !== undefined &&
           JSON.stringify(
             [...(normalizedBookIds || [])].sort((a, b) => a - b),
@@ -877,7 +1080,7 @@ router.put(
 
         return res.status(409).json({
           error:
-            "This class has assessments and its historical identity is locked. Archive this class and create a new class for a different teacher, subject, time, level, academic year, or book.",
+            "This class has assessments and its historical identity is locked. Archive this class and create a new class for a different teacher, subject, time, level, class type, academic year, or book.",
           code: "CLASS_HISTORY_LOCKED",
         });
       }
@@ -932,6 +1135,8 @@ router.put(
         );
       }
 
+      await validateClassTypeId(client, finalClassTypeId);
+
       await client.query(
         `
           UPDATE class_slots
@@ -942,8 +1147,10 @@ router.put(
             end_time = $4,
             academic_year = $5,
             level = $6,
-            is_active = COALESCE($7, is_active)
-          WHERE id = $8
+            deadline = $7,
+            class_type_id = $8,
+            is_active = COALESCE($9, is_active)
+          WHERE id = $10
         `,
         [
           finalSubjectId,
@@ -952,6 +1159,8 @@ router.put(
           finalEndTime,
           finalAcademicYear,
           finalLevel,
+          finalDeadline ? String(finalDeadline).slice(0, 10) : null,
+          finalClassTypeId ?? null,
           is_active ?? null,
           req.params.id,
         ],
@@ -984,6 +1193,9 @@ router.put(
             cs.end_time,
             cs.academic_year,
             cs.level,
+            cs.deadline,
+            cs.class_type_id,
+            ct.name AS class_type,
             cs.is_active,
             cs.created_at,
 
@@ -1009,6 +1221,8 @@ router.put(
             ON s.id = cs.subject_id
           INNER JOIN teachers t
             ON t.id = cs.teacher_id
+          LEFT JOIN class_types ct
+            ON ct.id = cs.class_type_id
 
           WHERE cs.id = $1
         `,
@@ -1070,7 +1284,10 @@ router.get(
         SELECT
           se.id AS enrollment_id,
           st.id AS student_id,
+          st.full_name,
           st.roll_number,
+          st.age,
+          st.phone,
           st.guardian_name,
           st.guardian_phone,
           se.enrolled_on,
@@ -1085,7 +1302,8 @@ router.get(
           AND se.is_active = TRUE
 
         ORDER BY
-          st.roll_number,
+          st.roll_number NULLS LAST,
+          st.full_name NULLS LAST,
           st.id
       `,
       [req.params.id],

@@ -2025,7 +2025,10 @@ router.post(
                receipt_number,
                fee_period_id,
                comment,
-               recorded_by
+               recorded_by,
+               collected_by_staff_id,
+               collected_by_name_snapshot,
+               collected_by_role_snapshot
              )
              VALUES
              (
@@ -2035,7 +2038,10 @@ router.post(
                $4,
                $5,
                $6,
-               $7
+               $7,
+               $8,
+               $9,
+               $10
              )
              RETURNING *`,
           [
@@ -2046,6 +2052,9 @@ router.post(
             feePeriod.id,
             initial_payment_comment || null,
             req.user.id,
+            verifiedActor?.role === "staff" ? verifiedActor.id : null,
+            verifiedActor?.name || null,
+            verifiedActor?.role || null,
           ],
         );
 
@@ -2542,7 +2551,10 @@ router.post(
              receipt_number,
              fee_period_id,
              comment,
-             recorded_by
+             recorded_by,
+             collected_by_staff_id,
+             collected_by_name_snapshot,
+             collected_by_role_snapshot
            )
            VALUES
            (
@@ -2552,7 +2564,10 @@ router.post(
              $4,
              $5,
              $6,
-             $7
+             $7,
+             $8,
+             $9,
+             $10
            )
            RETURNING *`,
         [
@@ -2563,6 +2578,9 @@ router.post(
           feePeriodId,
           comment || null,
           req.user.id,
+          verifiedActor?.role === "staff" ? verifiedActor.id : null,
+          verifiedActor?.name || null,
+          verifiedActor?.role || null,
         ],
       );
 

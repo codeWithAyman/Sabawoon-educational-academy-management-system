@@ -46,11 +46,12 @@ async function getOrCreateSubject(name, code) {
 
 async function getOrCreateStudent(
   rollNumber,
-  dob,
+  age,
   gender,
   address,
   guardianName,
   guardianPhone,
+  fullName,
 ) {
   const found = await pool.query(
     "SELECT id FROM students WHERE roll_number=$1",
@@ -63,10 +64,10 @@ async function getOrCreateStudent(
 
   const result = await pool.query(
     `INSERT INTO students
-      (roll_number, dob, gender, address, guardian_name, guardian_phone)
-     VALUES ($1,$2,$3,$4,$5,$6)
+      (roll_number, age, gender, address, guardian_name, guardian_phone, full_name, phone)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
      RETURNING id`,
-    [rollNumber, dob, gender, address, guardianName, guardianPhone],
+    [rollNumber, age, gender, address, guardianName, guardianPhone, fullName, guardianPhone],
   );
 
   return result.rows[0].id;
@@ -88,7 +89,7 @@ async function getOrCreateClassSlot(
        AND teacher_id=$2
        AND start_time=$3
        AND end_time=$4
-       AND days=$5
+       AND comments=$5
        AND academic_year=$6`,
     [subjectId, teacherId, startTime, endTime, days, academicYear],
   );
@@ -104,13 +105,12 @@ async function getOrCreateClassSlot(
         teacher_id,
         start_time,
         end_time,
-        days,
-        room,
+        comments,
         academic_year
       )
-     VALUES ($1,$2,$3,$4,$5,$6,$7)
+     VALUES ($1,$2,$3,$4,$5,$6)
      RETURNING id`,
-    [subjectId, teacherId, startTime, endTime, days, room, academicYear],
+    [subjectId, teacherId, startTime, endTime, days, academicYear],
   );
 
   return result.rows[0].id;
@@ -132,7 +132,7 @@ async function createFee(
   totalAmount,
   paidAmount,
   academicYear,
-  description
+  description,
 ) {
   const total = Number(totalAmount);
   const paid = Number(paidAmount);
@@ -184,7 +184,7 @@ async function createFee(
       null,
       academicYear,
       description,
-    ]
+    ],
   );
 }
 
@@ -197,9 +197,7 @@ async function createFee(
     // ============================================================
 
     const adminEmail = process.env.ADMIN_EMAIL || "admin@sabawoon.local";
-
     const adminPassword = process.env.ADMIN_PASSWORD || "Admin@12345";
-
     const adminName = process.env.ADMIN_NAME || "System Administrator";
 
     const adminId = await getOrCreateUser(
@@ -243,48 +241,81 @@ async function createFee(
     await pool.query(
       `INSERT INTO teachers
         (
-          user_id,
           employee_id,
           qualification,
           specialization,
-          salary
+          salary,
+          full_name,
+          email,
+          phone
         )
-       VALUES ($1,$2,$3,$4,$5)
-       ON CONFLICT (user_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (employee_id)
        DO NOTHING`,
-      [teacher1Id, "EMP001", "B.Sc", "Computer Science", 50000],
+      ["EMP001", "B.Sc", "Computer Science", 50000, "Ahmad Teacher", "teacher@sabawoon.local", "+93700000003"],
     );
 
     await pool.query(
       `INSERT INTO teachers
         (
-          user_id,
           employee_id,
           qualification,
           specialization,
-          salary
+          salary,
+          full_name,
+          email,
+          phone
         )
-       VALUES ($1,$2,$3,$4,$5)
-       ON CONFLICT (user_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (employee_id)
        DO NOTHING`,
-      [teacher2Id, "EMP002", "B.A", "English", 45000],
+      ["EMP002", "B.A", "English", 45000, "Mohammad Teacher", "teacher2@sabawoon.local", "+93700000004"],
     );
+
+    // Get teacher record IDs
+    const teacher1Rec = await pool.query("SELECT id FROM teachers WHERE employee_id='EMP001';");
+    const teacher1RecId = teacher1Rec.rows[0]?.id || teacher1Id;
+
+    const teacher2Rec = await pool.query("SELECT id FROM teachers WHERE employee_id='EMP002';");
+    const teacher2RecId = teacher2Rec.rows[0]?.id || teacher2Id;
+
+    // If teacher records don't exist, create them linked to users
+    if (!teacher1Rec.rows[0]) {
+      const t1 = await pool.query(
+        `INSERT INTO teachers (employee_id, qualification, specialization, salary, full_name, email, phone)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         RETURNING id`,
+        ["EMP001", "B.Sc", "Computer Science", 50000, "Ahmad Teacher", "teacher@sabawoon.local", "+93700000003"]
+      );
+      // Use the user ID as teacher record ID if not linked
+    }
+
+    if (!teacher2Rec.rows[0]) {
+      const t2 = await pool.query(
+        `INSERT INTO teachers (employee_id, qualification, specialization, salary, full_name, email, phone)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         RETURNING id`,
+        ["EMP002", "B.A", "English", 45000, "Mohammad Teacher", "teacher2@sabawoon.local", "+93700000004"]
+      );
+    }
+
+    // Re-fetch teacher record IDs
+    const t1Final = await pool.query("SELECT id FROM teachers WHERE employee_id='EMP001';");
+    const t2Final = await pool.query("SELECT id FROM teachers WHERE employee_id='EMP002';");
+    const finalTeacher1RecId = t1Final.rows[0]?.id || teacher1Id;
+    const finalTeacher2RecId = t2Final.rows[0]?.id || teacher2Id;
 
     // ============================================================
     // SUBJECTS
     // ============================================================
 
     const englishId = await getOrCreateSubject("English", "ENG");
-
     const quranId = await getOrCreateSubject("Quran", "QUR");
-
     const computerId = await getOrCreateSubject("Computer", "CMP");
-
     const mathematicsId = await getOrCreateSubject("Mathematics", "MAT");
 
     // ============================================================
     // CLASS SLOTS
-    //
     // Subject → Time → Teacher
     // ============================================================
 
@@ -292,41 +323,37 @@ async function createFee(
 
     const englishSlot = await getOrCreateClassSlot(
       englishId,
-      teacher2Id,
+      finalTeacher2RecId,
       "14:00",
       "15:00",
       "Monday,Wednesday,Friday",
-      "Room 101",
       academicYear,
     );
 
     const quranSlot = await getOrCreateClassSlot(
       quranId,
-      teacher1Id,
+      finalTeacher1RecId,
       "15:00",
       "16:00",
       "Monday,Wednesday,Friday",
-      "Room 101",
       academicYear,
     );
 
     const computerSlot = await getOrCreateClassSlot(
       computerId,
-      teacher1Id,
+      finalTeacher1RecId,
       "16:00",
       "17:00",
       "Monday,Wednesday,Friday",
-      "Computer Lab",
       academicYear,
     );
 
     const mathematicsSlot = await getOrCreateClassSlot(
       mathematicsId,
-      teacher2Id,
+      finalTeacher2RecId,
       "17:00",
       "18:00",
       "Tuesday,Thursday",
-      "Room 102",
       academicYear,
     );
 
@@ -339,55 +366,60 @@ async function createFee(
     students.push(
       await getOrCreateStudent(
         "STU001",
-        "2008-01-15",
+        18,
         "male",
         "Kabul, Afghanistan",
         "Student One Guardian",
         "+93701000001",
+        "Student One",
       ),
     );
 
     students.push(
       await getOrCreateStudent(
         "STU002",
-        "2008-04-20",
+        18,
         "male",
         "Kabul, Afghanistan",
         "Student Two Guardian",
         "+93701000002",
+        "Student Two",
       ),
     );
 
     students.push(
       await getOrCreateStudent(
         "STU003",
-        "2009-02-10",
+        17,
         "female",
         "Kabul, Afghanistan",
         "Student Three Guardian",
         "+93701000003",
+        "Student Three",
       ),
     );
 
     students.push(
       await getOrCreateStudent(
         "STU004",
-        "2009-07-05",
+        17,
         "male",
         "Kabul, Afghanistan",
         "Student Four Guardian",
         "+93701000004",
+        "Student Four",
       ),
     );
 
     students.push(
       await getOrCreateStudent(
         "STU005",
-        "2008-11-12",
+        17,
         "female",
         "Kabul, Afghanistan",
         "Student Five Guardian",
         "+93701000005",
+        "Student Five",
       ),
     );
 

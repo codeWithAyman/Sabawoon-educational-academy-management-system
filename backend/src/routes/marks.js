@@ -52,6 +52,9 @@ async function getClassSlot(classSlotId, activeOnly = false) {
 
         cs.academic_year,
         cs.level,
+        cs.deadline,
+        cs.class_type_id,
+        ct.name AS class_type,
         cs.is_active,
         cs.created_at,
 
@@ -86,6 +89,9 @@ async function getClassSlot(classSlotId, activeOnly = false) {
 
       LEFT JOIN teachers t
         ON t.id = cs.teacher_id
+
+      LEFT JOIN class_types ct
+        ON ct.id = cs.class_type_id
 
       WHERE cs.id = $1
       ${activeOnly ? "AND cs.is_active = TRUE" : ""}
@@ -458,6 +464,220 @@ router.get(
 
 /*
 |--------------------------------------------------------------------------
+| REPORT HISTORY
+|--------------------------------------------------------------------------
+|
+| Every report ever created, newest first.
+|
+| Unlike the class based views, this endpoint never filters on the
+| class. A report stays listed whether its class is active, archived
+| or permanently removed, because the class details are read from
+| the report's own snapshot when the class no longer exists.
+|
+| Optional query parameters:
+|
+|   ?search=         matches report, subject, teacher, level or type
+|   ?class_slot_id=  restricts to one class, active or removed
+|
+|--------------------------------------------------------------------------
+*/
+
+router.get(
+  "/assessments/history",
+  authRequired,
+  requireRoles("admin"),
+  asyncH(async (req, res) => {
+    const conditions = [];
+    const params = [];
+
+    const search =
+      typeof req.query.search === "string" ? req.query.search.trim() : "";
+
+    if (search) {
+      params.push(`%${search}%`);
+
+      const placeholder = `$${params.length}`;
+
+      conditions.push(`(
+        e.name ILIKE ${placeholder}
+        OR COALESCE(e.subject_name_snapshot, s.name) ILIKE ${placeholder}
+        OR COALESCE(e.subject_code_snapshot, s.code) ILIKE ${placeholder}
+        OR COALESCE(e.teacher_name_snapshot, t.full_name) ILIKE ${placeholder}
+        OR COALESCE(e.level_snapshot, cs.level) ILIKE ${placeholder}
+        OR COALESCE(e.class_type_snapshot, ct.name) ILIKE ${placeholder}
+        OR e.academic_year ILIKE ${placeholder}
+      )`);
+    }
+
+    const classSlotId = req.query.class_slot_id
+      ? normalizeId(req.query.class_slot_id)
+      : null;
+
+    if (classSlotId !== null) {
+      params.push(classSlotId);
+
+      conditions.push(
+        `COALESCE(e.class_slot_id, e.class_slot_id_snapshot) = $${params.length}`,
+      );
+    }
+
+    const whereClause = conditions.length
+      ? `WHERE ${conditions.join(" AND ")}`
+      : "";
+
+    const result = await query(
+      `
+        SELECT
+          e.id,
+          e.name,
+          e.exam_date,
+          e.total_marks,
+          e.academic_year,
+          e.is_published,
+          e.created_at,
+
+          COALESCE(e.class_slot_id, e.class_slot_id_snapshot) AS class_slot_id,
+
+          COALESCE(e.subject_id_snapshot, cs.subject_id) AS subject_id,
+          COALESCE(e.subject_name_snapshot, s.name) AS subject_name,
+          COALESCE(e.subject_code_snapshot, s.code) AS subject_code,
+
+          COALESCE(e.teacher_id_snapshot, cs.teacher_id) AS teacher_id,
+          COALESCE(e.teacher_name_snapshot, t.full_name) AS teacher_name,
+
+          COALESCE(e.start_time_snapshot, cs.start_time) AS start_time,
+          COALESCE(e.end_time_snapshot, cs.end_time) AS end_time,
+          COALESCE(e.level_snapshot, cs.level) AS level,
+          COALESCE(e.class_type_snapshot, ct.name) AS class_type,
+          COALESCE(e.deadline_snapshot, cs.deadline) AS deadline,
+
+          COALESCE(
+            (
+              SELECT json_agg(
+                json_build_object('id', sb.id, 'name', sb.name)
+                ORDER BY sb.name
+              )
+              FROM class_slot_books csb
+              JOIN subject_books sb
+                ON sb.id = csb.book_id
+              WHERE csb.class_slot_id = cs.id
+            ),
+            e.books_snapshot,
+            '[]'::json
+          ) AS books,
+
+          u.full_name AS created_by_name,
+
+          /*
+            The class state travels with the report so the history
+            can say plainly whether the class is still around.
+          */
+          CASE
+            WHEN cs.id IS NULL THEN 'removed'
+            WHEN cs.is_active = TRUE THEN 'active'
+            ELSE 'archived'
+          END AS class_state,
+
+          (
+            SELECT COUNT(*)
+            FROM marks m
+            WHERE m.exam_id = e.id
+          )::INTEGER AS score_count,
+
+          (
+            SELECT ROUND(AVG(m.marks_obtained), 2)
+            FROM marks m
+            WHERE m.exam_id = e.id
+          ) AS average_mark,
+
+          (
+            SELECT MAX(m.marks_obtained)
+            FROM marks m
+            WHERE m.exam_id = e.id
+          ) AS highest_mark,
+
+          (
+            SELECT MIN(m.marks_obtained)
+            FROM marks m
+            WHERE m.exam_id = e.id
+          ) AS lowest_mark
+
+        FROM exams e
+
+        LEFT JOIN class_slots cs
+          ON cs.id = e.class_slot_id
+
+        LEFT JOIN subjects s
+          ON s.id = cs.subject_id
+
+        LEFT JOIN teachers t
+          ON t.id = cs.teacher_id
+
+        LEFT JOIN class_types ct
+          ON ct.id = cs.class_type_id
+
+        LEFT JOIN users u
+          ON u.id = e.created_by
+
+        ${whereClause}
+
+        ORDER BY
+          e.exam_date DESC,
+          e.id DESC
+      `,
+      params,
+    );
+
+    res.json(
+      result.rows.map((row) => ({
+        ...row,
+
+        id: Number(row.id),
+
+        class_slot_id:
+          row.class_slot_id === null || row.class_slot_id === undefined
+            ? null
+            : Number(row.class_slot_id),
+
+        subject_id:
+          row.subject_id === null || row.subject_id === undefined
+            ? null
+            : Number(row.subject_id),
+
+        teacher_id:
+          row.teacher_id === null || row.teacher_id === undefined
+            ? null
+            : Number(row.teacher_id),
+
+        total_marks: Number(row.total_marks || 0),
+
+        score_count: Number(row.score_count || 0),
+
+        average_mark:
+          row.average_mark === null || row.average_mark === undefined
+            ? null
+            : Number(row.average_mark),
+
+        highest_mark:
+          row.highest_mark === null || row.highest_mark === undefined
+            ? null
+            : Number(row.highest_mark),
+
+        lowest_mark:
+          row.lowest_mark === null || row.lowest_mark === undefined
+            ? null
+            : Number(row.lowest_mark),
+
+        is_published: Boolean(row.is_published),
+
+        books: normalizeBooks(row.books),
+      })),
+    );
+  }),
+);
+
+/*
+|--------------------------------------------------------------------------
 | CREATE ASSESSMENT
 |--------------------------------------------------------------------------
 */
@@ -539,7 +759,9 @@ router.post(
           start_time_snapshot,
           end_time_snapshot,
           level_snapshot,
-          books_snapshot
+          books_snapshot,
+          class_type_snapshot,
+          deadline_snapshot
         )
         VALUES (
           $1,
@@ -560,7 +782,10 @@ router.post(
           $12,
           $13,
           $14,
-          $15
+          $15,
+
+          $16,
+          $17
         )
         RETURNING
           id,
@@ -583,7 +808,9 @@ router.post(
           start_time_snapshot,
           end_time_snapshot,
           level_snapshot,
-          books_snapshot
+          books_snapshot,
+          class_type_snapshot,
+          deadline_snapshot
       `,
       [
         cleanName,
@@ -604,6 +831,9 @@ router.post(
         classSlot.end_time,
         classSlot.level,
         JSON.stringify(classSlot.books || []),
+
+        classSlot.class_type ?? null,
+        classSlot.deadline ?? null,
       ],
     );
 

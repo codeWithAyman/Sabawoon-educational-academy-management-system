@@ -3,7 +3,8 @@ import api from "../lib/api";
 import PasswordConfirmModal from "../components/PasswordConfirmModal";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../components/Toast";
-import { toJalaali, toGregorian, isValidJalaaliDate } from "jalaali-js";
+import { toJalaali } from "jalaali-js";
+import SolarDateField, { toIsoDate } from "../components/SolarDateField";
 import {
   Plus,
   Search,
@@ -28,7 +29,7 @@ const EMPTY_STUDENT = {
   full_name: "",
   father_name: "",
   phone: "",
-  dob: "",
+  age: "",
   gender: "",
   admission_date: "",
   guardian_name: "",
@@ -114,6 +115,16 @@ function formatDate(value) {
   } catch {
     return String(value);
   }
+}
+
+function formatAge(value) {
+  if (value === null || value === undefined || value === "") return "—";
+
+  const age = Number(value);
+
+  if (!Number.isFinite(age)) return "—";
+
+  return `${age} yr`;
 }
 
 function getSubjectId(value) {
@@ -694,7 +705,7 @@ export default function Students() {
                   </th>
 
                   <th className="px-4 py-2.5 text-left text-[8px] font-semibold uppercase tracking-[0.14em] text-slate-700">
-                    DOB
+                    Age
                   </th>
 
                   <th className="px-4 py-2.5 text-right text-[8px] font-semibold uppercase tracking-[0.14em] text-slate-700">
@@ -962,11 +973,11 @@ function StudentTableRow({
         </div>
       </td>
 
-      {/* DOB */}
+      {/* AGE */}
 
       <td className="px-4 py-3.5">
         <span className="text-[10px] text-slate-500">
-          {formatDate(student.dob)}
+          {formatAge(student.age)}
         </span>
       </td>
 
@@ -1079,9 +1090,9 @@ function MobileStudentRow({
               </div>
 
               <span className="text-[8px] text-slate-700">
-                DOB:{" "}
+                Age:{" "}
                 <span className="text-slate-500">
-                  {formatDate(student.dob)}
+                  {formatAge(student.age)}
                 </span>
               </span>
             </div>
@@ -1317,163 +1328,6 @@ function SummaryCard({ icon: Icon, label, value, detail }) {
    STUDENT MODAL
 ============================================================ */
 
-function gregorianToSolarInput(value) {
-  if (!value) return "";
-
-  const raw = String(value).slice(0, 10);
-
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-    return "";
-  }
-
-  const [gy, gm, gd] = raw.split("-").map(Number);
-
-  try {
-    const result = toJalaali(gy, gm, gd);
-
-    return `${String(result.jy).padStart(4, "0")}/${String(result.jm).padStart(
-      2,
-      "0",
-    )}/${String(result.jd).padStart(2, "0")}`;
-  } catch {
-    return "";
-  }
-}
-
-function solarInputToGregorian(value) {
-  const cleaned = String(value || "")
-    .trim()
-    .replace(/-/g, "/");
-
-  const match = cleaned.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
-
-  if (!match) {
-    return null;
-  }
-
-  const jy = Number(match[1]);
-  const jm = Number(match[2]);
-  const jd = Number(match[3]);
-
-  if (!isValidJalaaliDate(jy, jm, jd)) {
-    return null;
-  }
-
-  try {
-    const result = toGregorian(jy, jm, jd);
-
-    return `${String(result.gy).padStart(4, "0")}-${String(result.gm).padStart(
-      2,
-      "0",
-    )}-${String(result.gd).padStart(2, "0")}`;
-  } catch {
-    return null;
-  }
-}
-
-function SolarDateField({ label, value, onChange, required = false }) {
-  const [displayValue, setDisplayValue] = useState(
-    gregorianToSolarInput(value),
-  );
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    setDisplayValue(gregorianToSolarInput(value));
-  }, [value]);
-
-  function handleChange(event) {
-    const nextValue = event.target.value;
-
-    setDisplayValue(nextValue);
-    setError("");
-
-    if (!nextValue.trim()) {
-      onChange("");
-      return;
-    }
-
-    const normalized = nextValue.replace(/-/g, "/");
-
-    // While the user is typing, don't show an error prematurely.
-    if (!/^\d{4}\/\d{1,2}\/\d{1,2}$/.test(normalized)) {
-      return;
-    }
-
-    const gregorianValue = solarInputToGregorian(normalized);
-
-    if (!gregorianValue) {
-      setError("Invalid Solar Hijri date.");
-      return;
-    }
-
-    onChange(gregorianValue);
-  }
-
-  function handleBlur() {
-    if (!displayValue.trim()) {
-      setError("");
-      onChange("");
-      return;
-    }
-
-    const normalized = displayValue.replace(/-/g, "/");
-    const gregorianValue = solarInputToGregorian(normalized);
-
-    if (!gregorianValue) {
-      setError("Use a valid date such as 1405/06/30.");
-      return;
-    }
-
-    setError("");
-
-    const [jy, jm, jd] = normalized.split("/").map(Number);
-
-    setDisplayValue(
-      `${String(jy).padStart(4, "0")}/${String(jm).padStart(
-        2,
-        "0",
-      )}/${String(jd).padStart(2, "0")}`,
-    );
-
-    onChange(gregorianValue);
-  }
-
-  return (
-    <div>
-      <label className="block text-[10px] font-medium text-slate-500 mb-1.5">
-        {label}
-
-        {required && <span className="text-[#f2bd19] ml-1">*</span>}
-      </label>
-
-      <div className="relative">
-        <input
-          type="text"
-          inputMode="numeric"
-          value={displayValue}
-          onChange={handleChange}
-          onBlur={handleBlur}
-          placeholder="YYYY/MM/DD"
-          maxLength={10}
-          className={`w-full h-10 px-3 rounded-lg bg-[#0b0d10] border text-sm text-slate-300 outline-none focus:bg-[#0c0f12] placeholder:text-slate-700 transition ${
-            error
-              ? "border-red-500/40 focus:border-red-500/60"
-              : "border-white/10 focus:border-[#f2bd19]/50"
-          }`}
-        />
-      </div>
-
-      {error ? (
-        <p className="mt-1.5 text-[9px] text-red-400">{error}</p>
-      ) : (
-        <p className="mt-1.5 text-[8px] text-slate-700">
-          Solar Hijri date • YYYY/MM/DD
-        </p>
-      )}
-    </div>
-  );
-}
-
 function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
   const editing = Boolean(student);
 
@@ -1481,11 +1335,12 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
     full_name: student?.full_name || "",
     father_name: student?.father_name || student?.guardian_name || "",
     phone: student?.phone || "",
-    dob: student?.dob ? String(student.dob).slice(0, 10) : "",
+    age:
+      student?.age !== null && student?.age !== undefined
+        ? String(student.age)
+        : "",
     gender: student?.gender || "",
-    admission_date: student?.admission_date
-      ? String(student.admission_date).slice(0, 10)
-      : today(),
+    admission_date: toIsoDate(student?.admission_date) || today(),
     guardian_name: student?.guardian_name || "",
     guardian_phone: student?.guardian_phone || "",
     address: student?.address || "",
@@ -1607,6 +1462,15 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
       return;
     }
 
+    if (form.age !== "" && form.age !== null && form.age !== undefined) {
+      const age = Number(form.age);
+
+      if (!Number.isInteger(age) || age < 0 || age > 120) {
+        toast.error("Please enter a valid age between 0 and 120.");
+        return;
+      }
+    }
+
     if (!editing && selectedClasses.length === 0) {
       toast.error("Please select at least one class.");
       return;
@@ -1625,7 +1489,7 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
         full_name: form.full_name.trim(),
         guardian_name: form.father_name.trim(),
         phone: form.phone?.trim() || null,
-        dob: form.dob || null,
+        age: form.age === "" ? null : Number(form.age),
         gender: form.gender || null,
         admission_date: form.admission_date || today(),
         guardian_phone: form.guardian_phone?.trim() || null,
@@ -1725,10 +1589,13 @@ function StudentModal({ student, classes, subjects, toast, onClose, onSaved }) {
               />
 
               <Field
-                label="Date of Birth"
-                type="date"
-                value={form.dob}
-                onChange={(value) => updateField("dob", value)}
+                label="Age"
+                type="number"
+                min={0}
+                max={120}
+                value={form.age}
+                onChange={(value) => updateField("age", value)}
+                placeholder="Enter age in years"
               />
 
               <SelectField

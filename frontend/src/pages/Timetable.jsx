@@ -10,11 +10,16 @@ import {
   MessageSquareText,
   RefreshCw,
   Save,
+  UserRound,
   Users,
   X,
 } from "lucide-react";
 
 import api from "../lib/api";
+import {
+  gregorianToSolarInput,
+  toIsoDate,
+} from "../components/SolarDateField";
 
 const SUBJECT_COLORS = [
   {
@@ -102,6 +107,9 @@ function normalizeClassRow(row) {
     student_count: Number(row.student_count || 0),
     comments: typeof row.comments === "string" ? row.comments.trim() : "",
     books: Array.isArray(row.books) ? row.books : [],
+    deadline: toIsoDate(row.deadline),
+    class_type:
+      typeof row.class_type === "string" ? row.class_type.trim() : "",
   };
 }
 
@@ -210,6 +218,9 @@ function mergeClassAndTimetable(classes, timetable) {
           comments: classRow.comments,
           books: classRow.books || [],
           student_count: classRow.student_count || 0,
+          deadline: classRow.deadline,
+          class_type_id: classRow.class_type_id,
+          class_type: classRow.class_type,
         }),
       );
     });
@@ -232,7 +243,7 @@ function ClassItem({ row, onComment }) {
     <div
       className="
         grid min-w-0
-        grid-cols-[minmax(0,1.1fr)_minmax(88px,0.9fr)_minmax(0,1.05fr)_minmax(48px,0.45fr)_minmax(0,1.4fr)]
+        grid-cols-[minmax(0,1.05fr)_minmax(84px,0.85fr)_minmax(0,1fr)_minmax(56px,0.5fr)_minmax(44px,0.4fr)_minmax(78px,0.72fr)_minmax(0,1.4fr)]
         items-center
         gap-3
         border-t border-white/[0.055]
@@ -281,6 +292,21 @@ function ClassItem({ row, onComment }) {
         </div>
       </div>
 
+      {/* CLASS TYPE */}
+      <div className="flex min-w-0 items-center gap-1.5">
+        <UserRound size={13} className="shrink-0 text-gray-600" />
+
+        <span
+          className={[
+            "truncate text-[10px]",
+            row.class_type ? "text-gray-400" : "text-gray-700",
+          ].join(" ")}
+          title={row.class_type || "No class type"}
+        >
+          {row.class_type || "—"}
+        </span>
+      </div>
+
       {/* STUDENTS */}
       <div className="flex min-w-0 items-center gap-1.5">
         <Users size={13} className="shrink-0 text-gray-600" />
@@ -288,6 +314,23 @@ function ClassItem({ row, onComment }) {
         <span className="truncate text-[11px] text-gray-400">
           {row.student_count}
         </span>
+      </div>
+
+      {/* DEADLINE */}
+      <div className="min-w-0">
+        <div
+          className={[
+            "truncate text-[10px] tabular-nums",
+            row.deadline ? "text-gray-400" : "text-gray-700",
+          ].join(" ")}
+          title={row.deadline || "No deadline"}
+        >
+          {row.deadline ? gregorianToSolarInput(row.deadline) : "—"}
+        </div>
+
+        <div className="mt-0.5 truncate text-[9px] uppercase tracking-[0.08em] text-gray-700">
+          Deadline
+        </div>
       </div>
 
       {/* COMMENTS */}
@@ -392,7 +435,7 @@ function SubjectColumn({ subject, rows, color, onComment }) {
       <div
         className="
           grid min-w-0
-          grid-cols-[minmax(0,1.1fr)_minmax(88px,0.9fr)_minmax(0,1.05fr)_minmax(48px,0.45fr)_minmax(0,1.4fr)]
+          grid-cols-[minmax(0,1.05fr)_minmax(84px,0.85fr)_minmax(0,1fr)_minmax(56px,0.5fr)_minmax(44px,0.4fr)_minmax(78px,0.72fr)_minmax(0,1.4fr)]
           items-center
           gap-3
           px-4 py-2
@@ -406,7 +449,9 @@ function SubjectColumn({ subject, rows, color, onComment }) {
         <span>Teacher</span>
         <span>Time</span>
         <span>Level / Book</span>
+        <span>Class Type</span>
         <span>Students</span>
+        <span>Deadline</span>
         <span>Comments</span>
       </div>
 

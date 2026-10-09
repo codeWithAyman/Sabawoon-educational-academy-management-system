@@ -32,6 +32,10 @@ async function getTimetableRows(classSlotId = null) {
         cs.start_time AS class_start_time,
         cs.end_time AS class_end_time,
 
+        cs.deadline,
+        cs.class_type_id,
+        ct.name AS class_type,
+
         cs.comments,
 
         tt.id AS timetable_id,
@@ -87,6 +91,9 @@ async function getTimetableRows(classSlotId = null) {
 
       LEFT JOIN timetable tt
         ON tt.class_slot_id = cs.id
+
+      LEFT JOIN class_types ct
+        ON ct.id = cs.class_type_id
 
       ${where}
 

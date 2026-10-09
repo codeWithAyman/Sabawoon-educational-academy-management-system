@@ -19,7 +19,7 @@ export default function Login() {
   const toast = useToast();
   const nav = useNavigate();
 
-  const [email, setEmail] = useState("admin@hmsms.local");
+  const [email, setEmail] = useState("Sabawoon.edu.academy1@gmail.com");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
 

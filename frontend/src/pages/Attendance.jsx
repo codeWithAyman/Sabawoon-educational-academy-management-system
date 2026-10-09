@@ -8,6 +8,7 @@ import React, {
 
 import {
   CalendarDays,
+  CalendarOff,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -23,6 +24,8 @@ import {
 } from "lucide-react";
 
 import api from "../lib/api";
+import LeaveCommentDialog from "../components/LeaveCommentDialog";
+import SummaryTooltip from "../components/SummaryTooltip";
 
 const SOLAR_MONTH_NAMES = {
   1: "Hamal",
@@ -42,7 +45,32 @@ const SOLAR_MONTH_NAMES = {
 const STATUS = {
   PRESENT: "present",
   ABSENT: "absent",
+  LEAVE: "leave",
 };
+
+/*
+  Attendance cycle applied on every click:
+
+    unmarked -> Present -> Absent -> Leave -> Present -> ...
+
+  'leave' must cycle forward to 'present' so the user is never stuck on it.
+*/
+const STATUS_CYCLE = [STATUS.PRESENT, STATUS.ABSENT, STATUS.LEAVE];
+
+/*
+  A leave cell waits this long before cycling back to present, so a
+  fast double click can be treated as "ask for the leave reason"
+  instead of two ordinary clicks.
+*/
+const DOUBLE_CLICK_DELAY = 260;
+
+function getNextStatus(current) {
+  const index = STATUS_CYCLE.indexOf(current);
+
+  if (index === -1) return STATUS.PRESENT;
+
+  return STATUS_CYCLE[(index + 1) % STATUS_CYCLE.length];
+}
 
 function formatNumber(value) {
   const number = Number(value);
@@ -288,7 +316,13 @@ function getPaymentData(student) {
   };
 }
 
-function AttendanceStatusButton({ status, onClick, disabled }) {
+function AttendanceStatusButton({
+  status,
+  onClick,
+  onDoubleClick,
+  hasComment,
+  disabled,
+}) {
   if (status === STATUS.PRESENT) {
     return (
       <button
@@ -315,7 +349,7 @@ function AttendanceStatusButton({ status, onClick, disabled }) {
         type="button"
         onClick={onClick}
         disabled={disabled}
-        title="Absent — click to clear"
+        title="Absent — click to change"
         className="
           flex h-7 w-7 items-center justify-center rounded-md
           border border-red-500/25 bg-red-500/10
@@ -325,6 +359,35 @@ function AttendanceStatusButton({ status, onClick, disabled }) {
         "
       >
         <X size={13} strokeWidth={2.5} />
+      </button>
+    );
+  }
+
+  if (status === STATUS.LEAVE) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        onDoubleClick={onDoubleClick}
+        disabled={disabled}
+        title={
+          hasComment
+            ? "Leave — click to change, double click to edit the reason"
+            : "Leave — click to change, double click to add a reason"
+        }
+        className="
+          relative flex h-7 w-7 items-center justify-center rounded-md
+          border border-amber-500/25 bg-amber-500/10
+          text-amber-400 transition
+          hover:bg-amber-500/15
+          disabled:cursor-not-allowed disabled:opacity-50
+        "
+      >
+        <CalendarOff size={13} strokeWidth={2.5} />
+
+        {hasComment && (
+          <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-amber-300" />
+        )}
       </button>
     );
   }
@@ -349,6 +412,126 @@ function AttendanceStatusButton({ status, onClick, disabled }) {
   );
 }
 
+/* ============================================================
+   MONTHLY SUMMARY
+
+   Three tiny counters for the month: how many days the student
+   was present, absent and on leave. Hovering the cell opens the
+   detailed breakdown for that student.
+============================================================ */
+
+function SummaryCell({ summary }) {
+  if (!summary) {
+    return <span className="text-[8px] text-slate-700">—</span>;
+  }
+
+  const items = [
+    { key: "present", value: summary.present, className: "text-emerald-400" },
+    { key: "absent", value: summary.absent, className: "text-red-400" },
+    { key: "leave", value: summary.leave, className: "text-amber-400" },
+  ];
+
+  return (
+    <div className="flex items-center justify-center gap-1">
+      {items.map((item) => (
+        <span
+          key={item.key}
+          className={`
+            min-w-[13px] rounded px-1 py-0.5 text-[7px] font-semibold leading-none
+            ${item.className}
+            ${item.value > 0 ? "bg-white/[0.04]" : "text-slate-700"}
+          `}
+        >
+          {item.value}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function SummaryTooltipContent({ student, summary }) {
+  return (
+    <>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-[11px] font-semibold text-slate-200">
+            {student?.full_name || "Student"}
+          </p>
+
+          <p className="truncate text-[9px] text-slate-600">
+            {student?.roll_number || "—"} ·{" "}
+            {student?.father_name || student?.guardian_name || "—"}
+          </p>
+        </div>
+
+        {summary?.rate !== null && summary?.rate !== undefined && (
+          <span className="shrink-0 rounded-md border border-white/[0.07] bg-white/[0.025] px-1.5 py-0.5 text-[8px] font-semibold text-slate-400">
+            {summary.rate}%
+          </span>
+        )}
+      </div>
+
+      <div className="mt-3 grid grid-cols-4 gap-1.5 text-center">
+        {[
+          { label: "P", value: summary?.present ?? 0, className: "text-emerald-400" },
+          { label: "A", value: summary?.absent ?? 0, className: "text-red-400" },
+          { label: "L", value: summary?.leave ?? 0, className: "text-amber-400" },
+          { label: "—", value: summary?.unmarked ?? 0, className: "text-slate-600" },
+        ].map((item) => (
+          <div
+            key={item.label}
+            className="rounded-md border border-white/[0.055] bg-white/[0.02] py-1"
+          >
+            <div className={`text-[11px] font-semibold ${item.className}`}>
+              {item.value}
+            </div>
+
+            <div className="text-[7px] uppercase tracking-wide text-slate-600">
+              {item.label}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <p className="mt-2 text-[9px] text-slate-600">
+        {formatNumber(summary?.marked ?? 0)} of{" "}
+        {formatNumber(summary?.total ?? 0)} school days marked
+      </p>
+
+      <div className="mt-2 border-t border-white/[0.06] pt-2">
+        <p className="text-[8px] font-semibold uppercase tracking-wide text-slate-600">
+          Leave reasons
+        </p>
+
+        {!summary?.leaveDays?.length ? (
+          <p className="mt-1 text-[9px] text-slate-700">
+            No leave recorded this month.
+          </p>
+        ) : (
+          <ul className="mt-1 space-y-1">
+            {summary.leaveDays.map((entry) => (
+              <li key={entry.day} className="flex gap-2 text-[9px]">
+                <span className="shrink-0 text-slate-600">
+                  {getWeekdayLabel({ weekday: entry.weekday }) || "DAY"}{" "}
+                  {formatNumber(entry.day)}
+                </span>
+
+                <span
+                  className={
+                    entry.remark ? "text-slate-400" : "text-slate-700 italic"
+                  }
+                >
+                  {entry.remark || "No reason given"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
+  );
+}
+
 export default function Attendance() {
   const [classes, setClasses] = useState([]);
   const [classId, setClassId] = useState("");
@@ -358,6 +541,27 @@ export default function Attendance() {
 
   const [sheet, setSheet] = useState(null);
   const [marks, setMarks] = useState({});
+
+  /*
+    Leave comments.
+
+    Keyed by `${studentId}:${day}` exactly like changedCells, so a
+    comment can be attached to a single day of a single student.
+  */
+  const [comments, setComments] = useState({});
+  const [commentDialog, setCommentDialog] = useState(null);
+  const [commentText, setCommentText] = useState("");
+  const [summaryHover, setSummaryHover] = useState(null);
+  const [summaryHoverVisible, setSummaryHoverVisible] = useState(false);
+
+  /*
+    A single click on a leave cell would cycle it back to present.
+
+    To let a fast double click open the comment dialog instead, the
+    cycle is deferred briefly. A second click inside that window
+    cancels the pending cycle and opens the dialog.
+  */
+  const pendingCycleRef = useRef(null);
   const [changedCells, setChangedCells] = useState({});
 
   const [loadingClasses, setLoadingClasses] = useState(true);
@@ -376,6 +580,67 @@ export default function Attendance() {
 
   const initialLoadDone = useRef(false);
   const requestIdRef = useRef(0);
+
+  /*
+    Hover timing.
+
+    A short delay before showing keeps the panel from flickering as the
+    pointer crosses the column, and a slightly longer delay before
+    hiding lets it fade out cleanly instead of vanishing. Re-entering
+    a row during either delay simply restarts the intent.
+  */
+  const summaryHoverTimer = useRef(null);
+
+  const clearSummaryHoverTimer = useCallback(() => {
+    if (summaryHoverTimer.current) {
+      clearTimeout(summaryHoverTimer.current);
+      summaryHoverTimer.current = null;
+    }
+  }, []);
+
+  const openSummaryHover = useCallback(
+    (studentId, student, event) => {
+      if (locked || saving) return;
+
+      clearSummaryHoverTimer();
+
+      const cell = event?.currentTarget?.getBoundingClientRect?.();
+
+      setSummaryHover({
+        studentId,
+        student,
+        rect: cell
+          ? {
+              top: cell.top,
+              left: cell.left,
+              right: cell.right,
+              height: cell.height,
+            }
+          : null,
+      });
+
+      summaryHoverTimer.current = setTimeout(() => {
+        setSummaryHoverVisible(true);
+        summaryHoverTimer.current = null;
+      }, 90);
+    },
+    [clearSummaryHoverTimer, locked, saving],
+  );
+
+  const closeSummaryHover = useCallback(() => {
+    clearSummaryHoverTimer();
+
+    setSummaryHoverVisible(false);
+
+    summaryHoverTimer.current = setTimeout(() => {
+      setSummaryHover(null);
+      summaryHoverTimer.current = null;
+    }, 180);
+  }, [clearSummaryHoverTimer]);
+
+  useEffect(() => {
+    return () => clearSummaryHoverTimer();
+  }, [clearSummaryHoverTimer]);
 
   const currentUser = useMemo(() => {
     try {
@@ -518,6 +783,42 @@ export default function Attendance() {
     return nextMarks;
   }, []);
 
+  const initializeComments = useCallback((students) => {
+    const nextComments = {};
+
+    for (const student of students || []) {
+      const studentId = Number(student.student_id);
+
+      if (!Number.isInteger(studentId) || studentId <= 0) {
+        continue;
+      }
+
+      const attendance =
+        student.attendance && typeof student.attendance === "object"
+          ? student.attendance
+          : {};
+
+      for (const rawDay of Object.keys(attendance)) {
+        const dayNumber = Number(rawDay);
+
+        if (!Number.isInteger(dayNumber) || dayNumber <= 0) {
+          continue;
+        }
+
+        const value = attendance[rawDay];
+
+        const remark =
+          value && typeof value === "object" ? value.remarks : null;
+
+        if (remark !== null && remark !== undefined && String(remark).trim()) {
+          nextComments[`${studentId}:${dayNumber}`] = String(remark);
+        }
+      }
+    }
+
+    return nextComments;
+  }, []);
+
   const loadSheet = useCallback(
     async ({ preserveMessages = false } = {}) => {
       const numericClassId = Number(classId);
@@ -573,6 +874,8 @@ export default function Attendance() {
 
         setMarks(initializeMarks(normalizedStudents));
 
+        setComments(initializeComments(normalizedStudents));
+
         setChangedCells({});
         setDirty(false);
 
@@ -595,7 +898,13 @@ export default function Attendance() {
         }
       }
     },
-    [classId, solarYear, solarMonth, initializeMarks],
+    [
+      classId,
+      solarYear,
+      solarMonth,
+      initializeMarks,
+      initializeComments,
+    ],
   );
 
   useEffect(() => {
@@ -614,6 +923,29 @@ export default function Attendance() {
     loadSheet,
   ]);
 
+  const applyCycle = useCallback((studentId, dayNumber) => {
+    setMarks((previous) => {
+      const current = previous[studentId]?.[dayNumber] ?? null;
+
+      const next = getNextStatus(current);
+
+      return {
+        ...previous,
+        [studentId]: {
+          ...(previous[studentId] || {}),
+          [dayNumber]: next,
+        },
+      };
+    });
+
+    setChangedCells((previous) => ({
+      ...previous,
+      [`${studentId}:${dayNumber}`]: true,
+    }));
+
+    setDirty(true);
+  }, []);
+
   const cycleAttendance = useCallback(
     (studentId, dayNumber) => {
       if (locked || saving) return;
@@ -621,37 +953,188 @@ export default function Attendance() {
       setSuccess("");
       setError("");
 
-      setMarks((previous) => {
-        const current = previous[studentId]?.[dayNumber] ?? null;
+      const status = marks[studentId]?.[dayNumber] ?? null;
 
-        let next;
+      /*
+        Only a leave cell needs the deferred behaviour. Every other
+        status cycles immediately so the register stays as fast as
+        before.
+      */
+      if (status !== STATUS.LEAVE) {
+        applyCycle(studentId, dayNumber);
+        return;
+      }
 
-        if (current === null) {
-          next = STATUS.PRESENT;
-        } else if (current === STATUS.PRESENT) {
-          next = STATUS.ABSENT;
-        } else {
-          next = null;
-        }
+      if (pendingCycleRef.current) {
+        clearTimeout(pendingCycleRef.current.timer);
+        pendingCycleRef.current = null;
+      }
 
-        return {
-          ...previous,
-          [studentId]: {
-            ...(previous[studentId] || {}),
-            [dayNumber]: next,
-          },
-        };
+      pendingCycleRef.current = {
+        studentId,
+        dayNumber,
+        timer: setTimeout(() => {
+          applyCycle(studentId, dayNumber);
+          pendingCycleRef.current = null;
+        }, DOUBLE_CLICK_DELAY),
+      };
+    },
+    [locked, saving, marks, applyCycle],
+  );
+
+  /*
+    A fast double click on a leave cell cancels the pending cycle and
+    asks why the student was absent instead.
+  */
+  const requestLeaveComment = useCallback(
+    (studentId, dayNumber, event) => {
+      if (locked || saving) return;
+
+      if (pendingCycleRef.current) {
+        clearTimeout(pendingCycleRef.current.timer);
+        pendingCycleRef.current = null;
+      }
+
+      const key = `${studentId}:${dayNumber}`;
+
+      /*
+        Remember where the cell sits on screen so the dialog can open
+        next to it instead of in the middle of the register.
+      */
+      const cell = event?.currentTarget?.getBoundingClientRect?.();
+
+      setCommentDialog({
+        studentId,
+        day: dayNumber,
+        key,
+        rect: cell
+          ? {
+              top: cell.top,
+              bottom: cell.bottom,
+              left: cell.left,
+              width: cell.width,
+            }
+          : null,
+        studentName:
+          sheet?.students?.find(
+            (student) => Number(student.student_id) === Number(studentId),
+          )?.full_name || "Student",
       });
 
-      setChangedCells((previous) => ({
-        ...previous,
-        [`${studentId}:${dayNumber}`]: true,
-      }));
-
-      setDirty(true);
+      setCommentText(comments[key] || "");
     },
-    [locked, saving],
+    [locked, saving, comments, sheet],
   );
+
+  const saveLeaveComment = useCallback(() => {
+    if (!commentDialog) return;
+
+    const { studentId, dayNumber, key } = commentDialog;
+
+    const trimmed = commentText.trim();
+
+    setComments((previous) => {
+      const next = { ...previous };
+
+      if (!trimmed) {
+        delete next[key];
+      } else {
+        next[key] = trimmed;
+      }
+
+      return next;
+    });
+
+    setChangedCells((previous) => ({
+      ...previous,
+      [key]: true,
+    }));
+
+    setDirty(true);
+
+    setCommentDialog(null);
+    setCommentText("");
+  }, [commentDialog, commentText]);
+
+  const removeLeaveComment = useCallback(() => {
+    if (!commentDialog) return;
+
+    setCommentText("");
+    saveLeaveComment();
+  }, [commentDialog, saveLeaveComment]);
+
+  const cancelLeaveComment = useCallback(() => {
+    setCommentDialog(null);
+    setCommentText("");
+  }, []);
+
+  /*
+    Monthly totals per student.
+
+    Counted from the live marks so the summary reacts to clicks
+    immediately, before the register is saved. Friday is a holiday
+    and never counts towards anything.
+  */
+  const summaryByStudent = useMemo(() => {
+    const result = new Map();
+
+    const days = Array.isArray(sheet?.days) ? sheet.days : [];
+
+    const openDays = days
+      .map(normalizeDay)
+      .filter((day) => !day.is_friday && !isFridayDay(day));
+
+    for (const student of sheet?.students || []) {
+      const studentId = Number(student.student_id);
+
+      if (!Number.isInteger(studentId) || studentId <= 0) continue;
+
+      let present = 0;
+      let absent = 0;
+      let leave = 0;
+      let unmarked = 0;
+
+      const leaveDays = [];
+
+      for (const day of openDays) {
+        const status = marks[studentId]?.[day.day] ?? null;
+
+        if (status === STATUS.PRESENT) {
+          present += 1;
+        } else if (status === STATUS.ABSENT) {
+          absent += 1;
+        } else if (status === STATUS.LEAVE) {
+          leave += 1;
+
+          const remark = comments[`${studentId}:${day.day}`];
+
+          leaveDays.push({
+            day: day.day,
+            weekday: day.weekday,
+            remark: remark ? String(remark) : null,
+          });
+        } else {
+          unmarked += 1;
+        }
+      }
+
+      result.set(studentId, {
+        present,
+        absent,
+        leave,
+        unmarked,
+        marked: present + absent + leave,
+        total: openDays.length,
+        rate:
+          present + absent + leave > 0
+            ? Math.round((present / (present + absent + leave)) * 100)
+            : null,
+        leaveDays,
+      });
+    }
+
+    return result;
+  }, [sheet, marks, comments]);
 
   const saveAttendance = useCallback(async () => {
     if (locked) {
@@ -726,6 +1209,7 @@ export default function Attendance() {
           student_id: studentId,
           day: dayNumber,
           status: marks[studentId]?.[dayNumber] ?? null,
+          remarks: comments[`${studentId}:${dayNumber}`] ?? null,
         });
       }
 
@@ -853,15 +1337,18 @@ export default function Attendance() {
   const summary = useMemo(() => {
     let present = 0;
     let absent = 0;
+    let leave = 0;
     let marked = 0;
 
     for (const student of sheet?.students || []) {
       const studentId = Number(student.student_id);
 
       for (const rawDay of sheet?.days || []) {
-        const dayNumber = Number(
-          typeof rawDay === "object" ? rawDay.day : rawDay,
-        );
+        const day = normalizeDay(rawDay);
+
+        if (isFridayDay(day) || day.is_friday) continue;
+
+        const dayNumber = Number(day.day);
 
         const status = marks[studentId]?.[dayNumber] ?? null;
 
@@ -871,6 +1358,9 @@ export default function Attendance() {
         } else if (status === STATUS.ABSENT) {
           absent += 1;
           marked += 1;
+        } else if (status === STATUS.LEAVE) {
+          leave += 1;
+          marked += 1;
         }
       }
     }
@@ -878,6 +1368,7 @@ export default function Attendance() {
     return {
       present,
       absent,
+      leave,
       marked,
     };
   }, [sheet, marks]);
@@ -1311,7 +1802,7 @@ export default function Attendance() {
 
         {/* SUMMARY */}
         {sheet && (
-          <section className="mb-4 grid gap-px overflow-hidden rounded-lg border border-white/10 bg-white/10 sm:grid-cols-2 xl:grid-cols-5">
+          <section className="mb-4 grid gap-px overflow-hidden rounded-lg border border-white/10 bg-white/10 sm:grid-cols-2 xl:grid-cols-6">
             <div className="bg-[#111419] px-4 py-3">
               <p className="text-[10px] uppercase tracking-wider text-slate-600">
                 Students
@@ -1336,6 +1827,15 @@ export default function Attendance() {
               </p>
               <p className="mt-1 text-xl font-semibold text-red-400">
                 {formatNumber(summary.absent)}
+              </p>
+            </div>
+
+            <div className="bg-[#111419] px-4 py-3">
+              <p className="text-[10px] uppercase tracking-wider text-slate-600">
+                Leave
+              </p>
+              <p className="mt-1 text-xl font-semibold text-amber-400">
+                {formatNumber(summary.leave)}
               </p>
             </div>
 
@@ -1382,6 +1882,19 @@ export default function Attendance() {
               </span>
               Absent
             </div>
+
+            <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
+              <span className="flex h-6 w-6 items-center justify-center rounded-md border border-amber-500/25 bg-amber-500/10 text-amber-400">
+                <CalendarOff size={12} />
+              </span>
+              Leave
+            </div>
+
+            <span className="text-slate-700">·</span>
+
+            <span className="text-[11px] text-slate-500">
+              Click cycles Present → Absent → Leave → Present
+            </span>
 
             <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
               <span className="flex h-6 w-6 items-center justify-center rounded-md border border-white/10 bg-white/[0.025] text-slate-600">
@@ -1472,12 +1985,13 @@ export default function Attendance() {
                     <col style={{ width: "6%" }} />
                     <col style={{ width: "14%" }} />
                     <col style={{ width: "8%" }} />
+                    <col style={{ width: "11%" }} />
 
                     {calendarDays.map((rawDay) => (
                       <col
                         key={`col-${normalizeDay(rawDay).day}`}
                         style={{
-                          width: `${72 / Math.max(calendarDays.length, 1)}%`,
+                          width: `${61 / Math.max(calendarDays.length, 1)}%`,
                         }}
                       />
                     ))}
@@ -1495,6 +2009,10 @@ export default function Attendance() {
 
                       <th className="sticky left-[20%] z-20 border-b border-r border-white/10 bg-[#0e1115] px-1 py-2 text-center text-[8px] font-semibold uppercase tracking-wider text-slate-600">
                         Pay
+                      </th>
+
+                      <th className="sticky left-[28%] z-20 border-b border-r border-white/10 bg-[#0e1115] px-1 py-2 text-center text-[8px] font-semibold uppercase tracking-wider text-slate-600">
+                        Summary
                       </th>
 
                       {calendarDays.map((rawDay) => {
@@ -1580,6 +2098,8 @@ export default function Attendance() {
 
                       const payment = getPaymentData(student);
 
+                      const summary = summaryByStudent.get(studentId);
+
                       return (
                         <tr
                           key={studentId || student.id || index}
@@ -1621,16 +2141,21 @@ export default function Attendance() {
                                 `}
                             >
                               <span className="truncate">{payment.label}</span>
-                            </span>
-
-                            {payment.amount && (
-                              <div
-                                className="mt-0.5 truncate text-[6px] text-amber-400/70"
-                                title={payment.amount}
-                              >
+                            </span>{payment.amount && (
+                              <div className="mt-0.5 truncate text-[6px] text-amber-400/70" title={payment.amount}>
                                 {payment.amount}
                               </div>
                             )}
+                          </td>
+
+                          <td
+                            className="sticky left-[28%] z-10 border-r border-white/[0.055] bg-[#111419] px-1 py-1.5 text-center group-hover:bg-[#15191e]"
+                            onMouseEnter={(event) =>
+                              openSummaryHover(studentId, student, event)
+                            }
+                            onMouseLeave={closeSummaryHover}
+                          >
+                            <SummaryCell summary={summaryByStudent.get(studentId)} />
                           </td>
 
                           {calendarDays.map((rawDay) => {
@@ -1675,8 +2200,18 @@ export default function Attendance() {
                                     <AttendanceStatusButton
                                       status={status}
                                       disabled={locked || saving}
+                                      hasComment={Boolean(
+                                        comments[`${studentId}:${day.day}`],
+                                      )}
                                       onClick={() =>
                                         cycleAttendance(studentId, day.day)
+                                      }
+                                      onDoubleClick={(event) =>
+                                        requestLeaveComment(
+                                          studentId,
+                                          day.day,
+                                          event,
+                                        )
                                       }
                                     />
                                   </div>
@@ -1754,6 +2289,31 @@ export default function Attendance() {
             </div>
           )}
       </div>
+
+      {summaryHover && (
+        <SummaryTooltip
+          hover={{
+            ...summaryHover,
+            summary: summaryByStudent.get(Number(summaryHover.studentId)),
+          }}
+          visible={summaryHoverVisible}
+        >
+          <SummaryTooltipContent
+            student={summaryHover.student}
+            summary={summaryByStudent.get(Number(summaryHover.studentId))}
+          />
+        </SummaryTooltip>
+      )}
+
+      <LeaveCommentDialog
+        dialog={commentDialog}
+        text={commentText}
+        onChange={setCommentText}
+        onSave={saveLeaveComment}
+        onRemove={removeLeaveComment}
+        onCancel={cancelLeaveComment}
+        disabled={locked || saving}
+      />
     </div>
   );
 }

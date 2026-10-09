@@ -14,6 +14,7 @@ import {
   Loader2,
   Lock,
   RefreshCw,
+  Scale,
   Search,
   ShieldCheck,
   UserRound,
@@ -26,6 +27,7 @@ import api from "../lib/api";
 import PasswordConfirmModal from "../components/PasswordConfirmModal";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../components/Toast";
+import FinanceBooksMaterials from "../components/FinanceBooksMaterials";
 
 /* ==========================================================================
    SOLAR HIJRI
@@ -47,7 +49,7 @@ const SOLAR_MONTHS = [
 ];
 
 const STAFF_HANDOVER_ENDPOINT = "/finance/staff-transactions/handover";
-const TEACHER_STUDENT_SETTLE_ENDPOINT = "/finance/teacher-students/settle";
+const RECONCILIATION_ENDPOINT = "/finance/reconciliation";
 
 const PAGE_SIZE = 25;
 
@@ -244,6 +246,7 @@ function getStaffTransactionStatus(transaction) {
 }
 
 function isStaffTransactionHandedOver(transaction) {
+  if (transaction?.handed_over === true || transaction?.settled_at) return true;
   return [
     "handed_over",
     "received",
@@ -294,6 +297,48 @@ function StatusBadge({ status }) {
     label: String(status || "Pending")
       .replaceAll("_", " ")
       .replace(/\b\w/g, (x) => x.toUpperCase()),
+    dot: "bg-slate-500",
+    className: "border-white/[0.06] bg-white/[0.02] text-slate-400",
+  };
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[8px] font-semibold ${meta.className}`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${meta.dot}`} />
+      {meta.label}
+    </span>
+  );
+}
+
+function ReconciliationBadge({ status }) {
+  const config = {
+    Pending: {
+      label: "Pending",
+      dot: "bg-amber-400",
+      className:
+        "border-amber-400/15 bg-amber-400/[0.06] text-amber-300",
+    },
+    Matched: {
+      label: "Matched",
+      dot: "bg-emerald-400",
+      className:
+        "border-emerald-400/15 bg-emerald-400/[0.06] text-emerald-300",
+    },
+    Short: {
+      label: "Short",
+      dot: "bg-red-400",
+      className: "border-red-400/15 bg-red-400/[0.06] text-red-300",
+    },
+    Over: {
+      label: "Over",
+      dot: "bg-sky-400",
+      className: "border-sky-400/15 bg-sky-400/[0.06] text-sky-300",
+    },
+  };
+
+  const meta = config[String(status || "")] || {
+    label: "Pending",
     dot: "bg-slate-500",
     className: "border-white/[0.06] bg-white/[0.02] text-slate-400",
   };
@@ -527,6 +572,24 @@ export default function Finance() {
   });
 
   /* ==========================================================================
+     RECONCILIATION
+
+     Expected money versus money that was actually handed over.
+     Every amount is read back from real collected payments, never
+     invented here.
+  ========================================================================== */
+
+  const [reconciliation, setReconciliation] = useState(null);
+  const [reconciliationLoading, setReconciliationLoading] =
+    useState(false);
+  const [reconciliationCollectorId, setReconciliationCollectorId] =
+    useState("");
+  const [reconciliationVerifyOpen, setReconciliationVerifyOpen] =
+    useState(false);
+  const [reconciliationVerifying, setReconciliationVerifying] =
+    useState(false);
+
+  /* ==========================================================================
      SECURITY
   ========================================================================== */
 
@@ -745,7 +808,7 @@ export default function Finance() {
 
       if (selectedStaffId === null && list.length > 0) {
         setSelectedStaffId(
-          Number(list[0].staff_user_id ?? list[0].user_id ?? list[0].id),
+          Number(list[0].collector_staff_id ?? list[0].id),
         );
       }
     } catch (error) {
@@ -783,7 +846,7 @@ export default function Finance() {
 
       const match = list.find(
         (item) =>
-          Number(item.staff_user_id ?? item.user_id ?? item.id) ===
+          Number(item.collector_staff_id ?? item.id) ===
           Number(selectedStaffId),
       );
 
@@ -809,7 +872,7 @@ export default function Finance() {
     try {
       const params = new URLSearchParams();
 
-      params.set("collector_user_id", String(selectedStaffId));
+      params.set("collector_staff_id", String(selectedStaffId));
       params.set(
         "from_solar_date",
         solarMonthStart(selectedYear, selectedMonth),
@@ -890,7 +953,7 @@ export default function Finance() {
     try {
       const params = new URLSearchParams();
 
-      params.set("user_id", String(selectedStaffId));
+      params.set("staff_id", String(selectedStaffId));
       params.set("page", String(staffActivityPage));
       params.set("limit", String(PAGE_SIZE));
 
@@ -921,6 +984,99 @@ export default function Finance() {
       setStaffActivityLoading(false);
     }
   }, [financeUnlocked, selectedStaffId, staffActivityPage, toast]);
+
+  /* ==========================================================================
+     RECONCILIATION
+  ========================================================================== */
+
+  const loadReconciliation = useCallback(async () => {
+    if (!financeUnlocked) {
+      return;
+    }
+
+    setReconciliationLoading(true);
+
+    try {
+      const params = new URLSearchParams();
+
+      if (reconciliationCollectorId) {
+        params.set("collector_staff_id", String(reconciliationCollectorId));
+      }
+
+      params.set(
+        "from_solar_date",
+        solarMonthStart(selectedYear, selectedMonth),
+      );
+      params.set("to_solar_date", solarMonthEnd(selectedYear, selectedMonth));
+
+      const { data } = await api.get(
+        `${RECONCILIATION_ENDPOINT}?${params.toString()}`,
+      );
+
+      setReconciliation(data || null);
+    } catch (error) {
+      if (error?.response?.status === 401 || error?.response?.status === 403) {
+        setFinanceUnlocked(false);
+        setFinanceVerificationToken("");
+        setFinancePasswordOpen(true);
+      } else {
+        toast.error(
+          error?.response?.data?.error ||
+            error?.message ||
+            "Failed to load reconciliation.",
+        );
+      }
+    } finally {
+      setReconciliationLoading(false);
+    }
+  }, [
+    financeUnlocked,
+    reconciliationCollectorId,
+    selectedYear,
+    selectedMonth,
+    toast,
+  ]);
+
+  /*
+   * Confirming a reconciliation only records that an administrator checked
+   * it. The amounts themselves are always recomputed from the real
+   * payments on every read.
+  */
+  async function verifyReconciliation(verification) {
+    const token = verification?.verification_token;
+
+    if (!token) {
+      toast.error("Administrator verification token was not returned.");
+      return;
+    }
+
+    setReconciliationVerifying(true);
+
+    try {
+      await api.post(`${RECONCILIATION_ENDPOINT}/verify`, {
+        collector_staff_id: reconciliationCollectorId
+          ? Number(reconciliationCollectorId)
+          : null,
+        from_solar_date: solarMonthStart(selectedYear, selectedMonth),
+        to_solar_date: solarMonthEnd(selectedYear, selectedMonth),
+        verification_token: token,
+      });
+
+      toast.success("Reconciliation recorded for this period.");
+
+      setReconciliationVerifyOpen(false);
+
+      await loadReconciliation();
+    } catch (error) {
+      toast.error(
+        error?.response?.data?.error ||
+          error?.message ||
+          "Failed to record the reconciliation.",
+      );
+    } finally {
+      setReconciliationVerifying(false);
+    }
+  }
 
   /* ==========================================================================
      EFFECTS
@@ -960,6 +1116,20 @@ export default function Finance() {
     selectedMonth,
     staffPage,
     staffActivityPage,
+  ]);
+
+  useEffect(() => {
+    if (!financeUnlocked) return;
+
+    if (activeTab !== "reconciliation") return;
+
+    loadReconciliation();
+  }, [
+    financeUnlocked,
+    activeTab,
+    reconciliationCollectorId,
+    selectedYear,
+    selectedMonth,
   ]);
 
   /* ==========================================================================
@@ -1006,7 +1176,7 @@ export default function Finance() {
     () =>
       staff.find(
         (member) =>
-          Number(member.staff_user_id ?? member.user_id ?? member.id) ===
+          Number(member.collector_staff_id ?? member.id) ===
           Number(selectedStaffId),
       ) ||
       staffSummary ||
@@ -1031,7 +1201,9 @@ export default function Finance() {
      * enrollment as settled, it disappears from this
      * pending queue.
      */
-    const pending = list.filter((student) => !isTeacherStudentSettled(student));
+    const pending = list.filter(
+      (student) => Number(student.teacher_share_amount || 0) > 0,
+    );
 
     /*
      * Protect the UI from duplicated enrollment rows.
@@ -1050,33 +1222,29 @@ export default function Finance() {
   }, [teacherMonthly]);
 
   const selectedTeacherStudentRows = useMemo(
-    () =>
-      teacherStudents.filter((student) =>
-        selectedTeacherStudents.has(teacherStudentKey(student)),
-      ),
+    () => teacherStudents.filter((student) =>
+      selectedTeacherStudents.has(teacherStudentKey(student)),
+    ),
     [teacherStudents, selectedTeacherStudents],
   );
 
-  const allTeacherStudentsSelected =
-    teacherStudents.length > 0 &&
-    teacherStudents.every((student) =>
-      selectedTeacherStudents.has(teacherStudentKey(student)),
-    );
+  const selectedTeacherAmount = useMemo(
+    () => selectedTeacherStudentRows.reduce(
+      (total, student) => total + Number(student.teacher_share_amount || 0),
+      0,
+    ),
+    [selectedTeacherStudentRows],
+  );
 
-  const someTeacherStudentsSelected = selectedTeacherStudents.size > 0;
+  const allTeacherStudentsSelected = teacherStudents.length > 0 &&
+    teacherStudents.every((student) => selectedTeacherStudents.has(teacherStudentKey(student)));
 
   function toggleTeacherStudent(student) {
     const key = teacherStudentKey(student);
-
     setSelectedTeacherStudents((current) => {
       const next = new Set(current);
-
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
   }
@@ -1084,27 +1252,10 @@ export default function Finance() {
   function toggleAllTeacherStudents() {
     if (allTeacherStudentsSelected) {
       setSelectedTeacherStudents(new Set());
-      return;
+    } else {
+      setSelectedTeacherStudents(new Set(teacherStudents.map(teacherStudentKey)));
     }
-
-    setSelectedTeacherStudents(new Set(teacherStudents.map(teacherStudentKey)));
   }
-
-  const selectedTeacherAmount = useMemo(
-    () =>
-      selectedTeacherStudentRows.reduce(
-        (sum, student) =>
-          sum +
-          Number(
-            student.teacher_share_amount ??
-              student.share_amount ??
-              student.owed_teacher_share ??
-              0,
-          ),
-        0,
-      ),
-    [selectedTeacherStudentRows],
-  );
 
   /* ==========================================================================
      STAFF TRANSACTIONS
@@ -1227,14 +1378,16 @@ export default function Finance() {
   ========================================================================== */
 
   function requestTeacherStudentSettlement() {
-    if (selectedTeacherStudentRows.length === 0) {
-      toast.error("Select at least one student first.");
+    const settlement = teacherMonthly?.settlement;
+    if (selectedTeacherStudentRows.length === 0 || !settlement?.id || selectedTeacherAmount <= 0) {
+      toast.error("Select at least one outstanding teacher share first.");
       return;
     }
 
     setActionTarget({
-      type: "teacher_students",
-      rows: selectedTeacherStudentRows,
+      type: "teacher_share",
+      settlementId: Number(settlement.id),
+      allocationIds: selectedTeacherStudentRows.flatMap((student) => student.allocation_ids || []).map(Number),
       name: selectedTeacher?.teacher_name || "this teacher",
       amount: selectedTeacherAmount,
     });
@@ -1250,44 +1403,20 @@ export default function Finance() {
       return;
     }
 
-    if (!actionTarget || actionTarget.type !== "teacher_students") {
+    if (!actionTarget || actionTarget.type !== "teacher_share") {
       return;
     }
 
     setTeacherSettlementLoading(true);
 
     try {
-      /*
-       * Individual enrollment IDs are sent rather than
-       * student IDs because one student can have multiple
-       * class enrollments.
-       */
-      const enrollmentIds = actionTarget.rows
-        .map((student) =>
-          Number(student.enrollment_id ?? student.student_enrollment_id),
-        )
-        .filter((id) => Number.isInteger(id) && id > 0);
-
-      if (enrollmentIds.length === 0) {
-        toast.error(
-          "The selected students do not contain valid enrollment records.",
-        );
-        return;
-      }
-
-      await api.post(TEACHER_STUDENT_SETTLE_ENDPOINT, {
-        teacher_id: Number(selectedTeacherId),
-        solar_year: Number(selectedYear),
-        solar_month: Number(selectedMonth),
-        enrollment_ids: enrollmentIds,
+      await api.put(`/finance/teacher-settlements/${actionTarget.settlementId}/pay`, {
+        expected_amount: actionTarget.amount,
+        allocation_ids: actionTarget.allocationIds,
         verification_token: token,
       });
 
-      toast.success(
-        `${enrollmentIds.length} teacher student balance${
-          enrollmentIds.length === 1 ? "" : "s"
-        } settled.`,
-      );
+      toast.success(`AFN ${formatMoney(actionTarget.amount)} teacher share paid.`);
 
       setActionPasswordOpen(false);
       setActionTarget(null);
@@ -1355,7 +1484,7 @@ export default function Finance() {
 
       await api.put(STAFF_HANDOVER_ENDPOINT, {
         payment_ids: paymentIds,
-        collector_user_id: Number(selectedStaffId),
+        collector_staff_id: Number(selectedStaffId),
         solar_year: Number(selectedYear),
         solar_month: Number(selectedMonth),
         verification_token: token,
@@ -1389,7 +1518,7 @@ export default function Finance() {
   async function handleActionPasswordVerified(verification) {
     if (!actionTarget) return;
 
-    if (actionTarget.type === "teacher_students") {
+    if (actionTarget.type === "teacher_share") {
       await settleSelectedTeacherStudents(verification);
       return;
     }
@@ -1460,6 +1589,8 @@ export default function Finance() {
         loadTeacherHistory(),
         loadShareRate(),
       ]);
+    } else if (activeTab === "reconciliation") {
+      await loadReconciliation();
     } else {
       await Promise.all([
         loadStaff(),
@@ -1535,6 +1666,347 @@ export default function Finance() {
   }
 
   /* ==========================================================================
+     RECONCILIATION TAB
+  ========================================================================== */
+
+  function renderReconciliationTab() {
+    const totals = reconciliation?.totals || {};
+    const collectors = Array.isArray(reconciliation?.collectors)
+      ? reconciliation.collectors
+      : [];
+    const outstanding = Array.isArray(reconciliation?.outstanding_payments)
+      ? reconciliation.outstanding_payments
+      : [];
+    const history = Array.isArray(reconciliation?.history)
+      ? reconciliation.history
+      : [];
+
+    const outstandingTotal = outstanding.reduce(
+      (sum, payment) => sum + Number(payment.amount || 0),
+      0,
+    );
+
+    return (
+      <div className="grid gap-3">
+        {/* PERIOD FILTER */}
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/[0.06] bg-[#121519] p-3">
+          <div className="flex items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5">
+            <CalendarDays className="h-3.5 w-3.5 text-slate-600" />
+
+            <span className="text-[9px] text-slate-400">
+              {monthLabel(selectedYear, selectedMonth)}
+            </span>
+          </div>
+
+          <select
+            value={reconciliationCollectorId}
+            onChange={(event) =>
+              setReconciliationCollectorId(event.target.value)
+            }
+            className="h-8 rounded-lg border border-white/[0.06] bg-[#0f1216] px-2.5 text-[9px] text-slate-300 outline-none focus:border-[#f2bd19]/30"
+          >
+            <option value="">All collectors</option>
+
+            {staff.map((member) => (
+              <option
+                key={`rec-collector-${member.collector_staff_id ?? member.id}`}
+                value={member.collector_staff_id ?? member.id}
+              >
+                {member.staff_name ||
+                  member.full_name ||
+                  member.collector_name ||
+                  "Collector"}
+              </option>
+            ))}
+          </select>
+
+          <div className="flex-1" />
+
+          <button
+            type="button"
+            onClick={() => setReconciliationVerifyOpen(true)}
+            disabled={reconciliationVerifying}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#f2bd19] px-3 text-[9px] font-bold text-black transition hover:bg-[#ffd34d] disabled:opacity-50"
+          >
+            {reconciliationVerifying ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <ShieldCheck className="h-3.5 w-3.5" />
+            )}
+            Verify Reconciliation
+          </button>
+        </div>
+
+        {/* TOTALS */}
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard
+            icon={Wallet}
+            label="Expected (Collected)"
+            value={formatMoney(totals.expected_amount)}
+            sublabel={`${Number(totals.payment_count || 0)} real payment${
+              Number(totals.payment_count || 0) === 1 ? "" : "s"
+            }`}
+          />
+
+          <StatCard
+            icon={CheckCircle2}
+            label="Handed Over"
+            value={formatMoney(totals.handed_over_amount)}
+            sublabel={`${Number(totals.handed_over_count || 0)} settled payment${
+              Number(totals.handed_over_count || 0) === 1 ? "" : "s"
+            }`}
+          />
+
+          <StatCard
+            icon={Scale}
+            label="Difference"
+            value={formatMoney(totals.difference)}
+            sublabel="Handed over minus collected"
+          />
+
+          <div className="rounded-xl border border-white/[0.06] bg-[#121519] p-3">
+            <p className="text-[8px] uppercase tracking-[0.15em] text-slate-600">
+              Status
+            </p>
+
+            <div className="mt-2">
+              <ReconciliationBadge status={totals.status} />
+            </div>
+
+            <p className="mt-2 text-[8px] text-slate-600">
+              {Number(totals.outstanding_count || 0)} payment(s) still not
+              handed over
+            </p>
+          </div>
+        </div>
+
+        {/* COLLECTOR BREAKDOWN */}
+        <div className="rounded-xl border border-white/[0.06] bg-[#121519]">
+          <div className="flex items-center justify-between border-b border-white/[0.05] px-3 py-2.5">
+            <p className="text-[9px] font-semibold text-slate-300">
+              Collector reconciliation
+            </p>
+
+            {reconciliationLoading && (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-600" />
+            )}
+          </div>
+
+          {collectors.length === 0 ? (
+            <EmptyState
+              icon={Scale}
+              title="No money was collected in this period"
+              description="Reconciliation is built entirely from real collected payments in the Payments module, so it stays empty until real payments exist for this month."
+            />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px]">
+                <thead>
+                  <tr className="border-b border-white/[0.05] text-left text-[8px] uppercase tracking-[0.12em] text-slate-600">
+                    <th className="px-3 py-2 font-semibold">Collector</th>
+                    <th className="px-3 py-2 font-semibold">Expected</th>
+                    <th className="px-3 py-2 font-semibold">Handed Over</th>
+                    <th className="px-3 py-2 font-semibold">Difference</th>
+                    <th className="px-3 py-2 font-semibold">Payments</th>
+                    <th className="px-3 py-2 font-semibold">Outstanding</th>
+                    <th className="px-3 py-2 font-semibold">Status</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {collectors.map((row) => (
+                    <tr
+                      key={`rec-row-${row.collector_staff_id ?? "none"}-${row.collector_name}`}
+                      className="border-b border-white/[0.04] last:border-0"
+                    >
+                      <td className="px-3 py-2.5 text-[10px] text-slate-300">
+                        {row.collector_name}
+                      </td>
+
+                      <td className="px-3 py-2.5 text-[10px] text-white">
+                        {formatMoney(row.expected_amount)}
+                      </td>
+
+                      <td className="px-3 py-2.5 text-[10px] text-slate-300">
+                        {formatMoney(row.handed_over_amount)}
+                      </td>
+
+                      <td
+                        className={`px-3 py-2.5 text-[10px] font-semibold ${
+                          Number(row.difference) === 0
+                            ? "text-slate-400"
+                            : Number(row.difference) > 0
+                              ? "text-sky-300"
+                              : "text-red-300"
+                        }`}
+                      >
+                        {formatMoney(row.difference)}
+                      </td>
+
+                      <td className="px-3 py-2.5 text-[10px] text-slate-400">
+                        {Number(row.payment_count || 0)} total /{" "}
+                        {Number(row.handed_over_count || 0)} handed over
+                      </td>
+
+                      <td className="px-3 py-2.5 text-[10px] text-slate-400">
+                        {Number(row.outstanding_count || 0)}
+                      </td>
+
+                      <td className="px-3 py-2.5">
+                        <ReconciliationBadge status={row.status} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* OUTSTANDING PAYMENTS */}
+        <div className="rounded-xl border border-white/[0.06] bg-[#121519]">
+          <div className="flex items-center justify-between border-b border-white/[0.05] px-3 py-2.5">
+            <p className="text-[9px] font-semibold text-slate-300">
+              Still to be handed over
+            </p>
+
+            <span className="text-[9px] font-semibold text-amber-300">
+              {formatMoney(outstandingTotal)}
+            </span>
+          </div>
+
+          {outstanding.length === 0 ? (
+            <EmptyState
+              icon={CheckCircle2}
+              title="Everything collected has been handed over"
+              description="These are the real Payments records that have not been marked as handed over yet."
+            />
+          ) : (
+            <div className="max-h-[320px] overflow-y-auto scrollbar">
+              <table className="w-full min-w-[620px]">
+                <thead className="sticky top-0 bg-[#121519]">
+                  <tr className="border-b border-white/[0.05] text-left text-[8px] uppercase tracking-[0.12em] text-slate-600">
+                    <th className="px-3 py-2 font-semibold">Receipt</th>
+                    <th className="px-3 py-2 font-semibold">Date</th>
+                    <th className="px-3 py-2 font-semibold">Student</th>
+                    <th className="px-3 py-2 font-semibold">Collector</th>
+                    <th className="px-3 py-2 font-semibold">Amount</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {outstanding.map((payment) => (
+                    <tr
+                      key={`rec-outstanding-${payment.payment_id}`}
+                      className="border-b border-white/[0.04] last:border-0"
+                    >
+                      <td className="px-3 py-2 text-[9px] text-slate-400">
+                        {payment.receipt_number || `#${payment.payment_id}`}
+                      </td>
+
+                      <td className="px-3 py-2 text-[9px] text-slate-400">
+                        {formatSolarDate(payment.payment_date)}
+                      </td>
+
+                      <td className="px-3 py-2 text-[9px] text-slate-300">
+                        {payment.student_name || "Unknown student"}
+                        {payment.student_roll_number && (
+                          <span className="ml-1 text-slate-600">
+                            #{payment.student_roll_number}
+                          </span>
+                        )}
+                      </td>
+
+                      <td className="px-3 py-2 text-[9px] text-slate-400">
+                        {payment.collector_name}
+                      </td>
+
+                      <td className="px-3 py-2 text-[9px] font-semibold text-white">
+                        {formatMoney(payment.amount)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* RECONCILIATION HISTORY */}
+        <div className="rounded-xl border border-white/[0.06] bg-[#121519]">
+          <div className="border-b border-white/[0.05] px-3 py-2.5">
+            <p className="text-[9px] font-semibold text-slate-300">
+              Verification history
+            </p>
+          </div>
+
+          {history.length === 0 ? (
+            <EmptyState
+              icon={History}
+              title="No reconciliation has been verified yet"
+              description="Verifying records that an administrator checked the collected money against the handed over money for a period."
+            />
+          ) : (
+            <div className="max-h-[320px] overflow-y-auto scrollbar">
+              <table className="w-full min-w-[760px]">
+                <thead className="sticky top-0 bg-[#121519]">
+                  <tr className="border-b border-white/[0.05] text-left text-[8px] uppercase tracking-[0.12em] text-slate-600">
+                    <th className="px-3 py-2 font-semibold">Period</th>
+                    <th className="px-3 py-2 font-semibold">Collector</th>
+                    <th className="px-3 py-2 font-semibold">Expected</th>
+                    <th className="px-3 py-2 font-semibold">Handed Over</th>
+                    <th className="px-3 py-2 font-semibold">Difference</th>
+                    <th className="px-3 py-2 font-semibold">Status</th>
+                    <th className="px-3 py-2 font-semibold">Verified By</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {history.map((entry) => (
+                    <tr
+                      key={`rec-history-${entry.id}`}
+                      className="border-b border-white/[0.04] last:border-0"
+                    >
+                      <td className="px-3 py-2 text-[9px] text-slate-400">
+                        {formatSolarDate(entry.from_date)} →{" "}
+                        {formatSolarDate(entry.to_date)}
+                      </td>
+
+                      <td className="px-3 py-2 text-[9px] text-slate-300">
+                        {entry.collector_name}
+                      </td>
+
+                      <td className="px-3 py-2 text-[9px] text-white">
+                        {formatMoney(entry.expected_amount)}
+                      </td>
+
+                      <td className="px-3 py-2 text-[9px] text-slate-300">
+                        {formatMoney(entry.handed_over_amount)}
+                      </td>
+
+                      <td className="px-3 py-2 text-[9px] text-slate-400">
+                        {formatMoney(entry.difference)}
+                      </td>
+
+                      <td className="px-3 py-2">
+                        <ReconciliationBadge status={entry.status} />
+                      </td>
+
+                      <td className="px-3 py-2 text-[9px] text-slate-400">
+                        {entry.verified_by_name || "Administrator"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  /* ==========================================================================
      TEACHER TAB
   ========================================================================== */
 
@@ -1547,10 +2019,12 @@ export default function Finance() {
       summary.teacher_share_amount ?? summary.share_amount ?? 0,
     );
 
-    const settlementPaid = Boolean(
-      settlement.paid_at ||
-      settlement.status === "paid" ||
-      settlement.status === "settled",
+    const teacherSharePaid = settlement.status === "paid"
+      ? Number(settlement.expected_amount || 0)
+      : 0;
+    const teacherShareDue = Number(settlement.amount_due ?? Math.max(teacherShare - teacherSharePaid, 0));
+    const settlementPaid = teacherShareDue <= 0 && Boolean(
+      settlement.paid_at || settlement.status === "paid" || settlement.status === "settled",
     );
 
     const teacherPagination = normalizePage(teacherMonthly, teacherPage);
@@ -1862,7 +2336,9 @@ export default function Finance() {
                   </p>
                 ) : (
                   <p className="mt-1 text-[8px] text-amber-300">
-                    Waiting for Admin settlement
+                    {teacherSharePaid > 0
+                      ? `AFN ${formatMoney(teacherSharePaid)} already paid · AFN ${formatMoney(teacherShareDue)} additional due`
+                      : "Waiting for Admin settlement"}
                   </p>
                 )}
               </div>
@@ -1873,12 +2349,41 @@ export default function Finance() {
                   Settled
                 </span>
               ) : (
-                <span className="inline-flex w-fit items-center gap-1.5 rounded-lg border border-amber-400/15 bg-amber-400/[0.05] px-3 py-2 text-[9px] font-semibold text-amber-300">
-                  <Clock3 className="h-3.5 w-3.5" />
-                  Pending
-                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={toggleAllTeacherStudents}
+                    disabled={teacherStudents.length === 0 || teacherShareDue <= 0}
+                    className={`rounded-lg border px-3 py-2 text-[9px] font-semibold disabled:opacity-30 ${allTeacherStudentsSelected ? "border-[#f2bd19]/30 bg-[#f2bd19]/10 text-[#f2bd19]" : "border-white/[0.06] text-slate-400"}`}
+                  >
+                    {allTeacherStudentsSelected ? "Unselect all" : "Select all"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={requestTeacherStudentSettlement}
+                    disabled={selectedTeacherStudentRows.length === 0 || teacherSettlementLoading || selectedTeacherAmount <= 0}
+                    className="rounded-lg bg-[#f2bd19] px-3 py-2 text-[9px] font-bold text-black disabled:opacity-30"
+                  >
+                    {teacherSettlementLoading ? "Processing…" : `${selectedTeacherStudentRows.length} selected · AFN ${formatMoney(selectedTeacherAmount)}`}
+                  </button>
+                </div>
               )}
             </div>
+            {Array.isArray(settlement.payout_history) && settlement.payout_history.length > 0 && (
+              <div className="mt-3 border-t border-white/[0.05] pt-3">
+                <p className="mb-2 text-[8px] font-semibold uppercase tracking-wider text-slate-600">Verified payout history</p>
+                <div className="space-y-1.5">
+                  {settlement.payout_history.map((payment) => (
+                    <div key={payment.id} className="flex items-center justify-between gap-3 text-[8px]">
+                      <span className="text-slate-500">
+                        {formatSolarDate(payment.paid_at_solar_date || payment.paid_at)} · {payment.paid_by_name || "Administrator"} · {payment.calculation?.allocations?.length || 0} allocation(s)
+                      </span>
+                      <span className="font-semibold text-emerald-300">AFN {formatMoney(payment.amount)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
 
           {/* STUDENT PAYMENT STATUS */}
@@ -1891,47 +2396,10 @@ export default function Finance() {
                 </p>
 
                 <p className="mt-1 text-[9px] text-slate-600">
-                  Only teacher-share balances that have not yet been settled by
-                  Admin remain here.
+                  Payment allocations used to calculate this month's teacher share.
                 </p>
               </div>
 
-              <div className="flex items-center gap-2">
-                {someTeacherStudentsSelected && (
-                  <span className="text-[8px] text-slate-600">
-                    {selectedTeacherStudents.size} selected
-                    {selectedTeacherAmount > 0
-                      ? ` · AFN ${formatMoney(selectedTeacherAmount)}`
-                      : ""}
-                  </span>
-                )}
-
-                <button
-                  type="button"
-                  onClick={toggleAllTeacherStudents}
-                  disabled={teacherStudents.length === 0}
-                  className="h-8 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 text-[8px] font-semibold text-slate-500 transition hover:text-white disabled:opacity-30"
-                >
-                  {allTeacherStudentsSelected ? "Unselect all" : "Select all"}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={requestTeacherStudentSettlement}
-                  disabled={
-                    selectedTeacherStudents.size === 0 ||
-                    teacherSettlementLoading
-                  }
-                  className="flex h-8 items-center gap-1.5 rounded-lg bg-[#f2bd19] px-3 text-[8px] font-bold text-black transition hover:bg-[#ffd34d] disabled:cursor-not-allowed disabled:opacity-30"
-                >
-                  {teacherSettlementLoading ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Check className="h-3.5 w-3.5" />
-                  )}
-                  Clear selected
-                </button>
-              </div>
             </div>
 
             {teacherLoading && !teacherMonthly ? (
@@ -1942,7 +2410,7 @@ export default function Finance() {
               <EmptyState
                 icon={CheckCircle2}
                 title="No pending teacher balances"
-                description="Every teacher-share balance returned by the backend for this period has already been settled."
+                  description="There are no enrolled students or fee allocations for this teacher and period."
               />
             ) : (
               <div className="overflow-x-auto">
@@ -1952,10 +2420,7 @@ export default function Finance() {
                       <th className="w-10 px-3 py-2.5 text-left">
                         <Checkbox
                           checked={allTeacherStudentsSelected}
-                          indeterminate={
-                            someTeacherStudentsSelected &&
-                            !allTeacherStudentsSelected
-                          }
+                          indeterminate={selectedTeacherStudentRows.length > 0 && !allTeacherStudentsSelected}
                           onChange={toggleAllTeacherStudents}
                         />
                       </th>
@@ -1993,7 +2458,6 @@ export default function Finance() {
                   <tbody>
                     {teacherStudents.map((student) => {
                       const key = teacherStudentKey(student);
-
                       const selected = selectedTeacherStudents.has(key);
 
                       const expected = Number(
@@ -2019,27 +2483,13 @@ export default function Finance() {
                         student.class ??
                         "—";
 
-                      const teacherShareAmount = Number(
-                        student.teacher_share_amount ??
-                          student.share_amount ??
-                          student.owed_teacher_share ??
-                          0,
-                      );
-
                       return (
                         <tr
                           key={key}
-                          className={`border-b border-white/[0.035] transition last:border-0 ${
-                            selected
-                              ? "bg-[#f2bd19]/[0.035]"
-                              : "hover:bg-white/[0.015]"
-                          }`}
+                          className="border-b border-white/[0.035] transition last:border-0 hover:bg-white/[0.015]"
                         >
                           <td className="px-3 py-3">
-                            <Checkbox
-                              checked={selected}
-                              onChange={() => toggleTeacherStudent(student)}
-                            />
+                            <Checkbox checked={selected} onChange={() => toggleTeacherStudent(student)} />
                           </td>
 
                           <td className="px-3 py-3">
@@ -2050,10 +2500,6 @@ export default function Finance() {
                                   "Unnamed student"}
                               </p>
 
-                              <p className="mt-0.5 text-[8px] text-slate-700">
-                                Teacher share: AFN{" "}
-                                {formatMoney(teacherShareAmount)}
-                              </p>
                             </div>
                           </td>
 
@@ -2259,15 +2705,6 @@ export default function Finance() {
   ========================================================================== */
 
   function renderStaffTab() {
-    const staffSettlement =
-      staffSummary?.settlement || staffSummary?.staff_settlement || {};
-
-    const received = Boolean(
-      staffSettlement.received_at ||
-      staffSettlement.status === "received" ||
-      staffSettlement.status === "settled",
-    );
-
     const totalCollected = Number(
       staffSummary?.total_amount ?? staffSummary?.collected_amount ?? 0,
     );
@@ -2276,14 +2713,12 @@ export default function Finance() {
       staffSummary?.payment_count ?? staffSummary?.transaction_count ?? 0,
     );
 
-    const handedOverAmount =
-      staffSummary?.handed_over_amount !== undefined
-        ? Number(staffSummary.handed_over_amount)
-        : received
-          ? totalCollected
-          : 0;
-
-    const pendingAmount = Math.max(totalCollected - handedOverAmount, 0);
+    const handedOverAmount = Number(staffSummary?.handed_over_amount ?? 0);
+    const pendingAmount = Number(
+      staffSummary?.pending_amount ??
+        Math.max(totalCollected - handedOverAmount, 0),
+    );
+    const received = totalCollected > 0 && pendingAmount === 0;
 
     return (
       <div className="grid gap-3 xl:grid-cols-[245px_minmax(0,1fr)]">
@@ -2314,9 +2749,7 @@ export default function Finance() {
               </div>
             ) : (
               filteredStaff.map((member) => {
-                const id = Number(
-                  member.staff_user_id ?? member.user_id ?? member.id,
-                );
+                const id = Number(member.collector_staff_id ?? member.id);
 
                 const selected = id === Number(selectedStaffId);
 
@@ -2324,13 +2757,8 @@ export default function Finance() {
                   member.total_amount ?? member.collected_amount ?? 0,
                 );
 
-                const memberSettlement =
-                  member.settlement || member.staff_settlement || {};
-
-                const memberReceived = Boolean(
-                  member.handover_status === "handed_over" ||
-                  memberReceivedStatus(memberSettlement),
-                );
+                const memberReceived = Number(member.total_amount || 0) > 0 &&
+                  Number(member.pending_amount || 0) === 0;
 
                 return (
                   <button
@@ -2766,7 +3194,7 @@ export default function Finance() {
                   </p>
 
                   <p className="mt-0.5 text-[8px] text-slate-700">
-                    Actions performed by this staff member.
+                    Payments collected by this staff member.
                   </p>
                 </div>
               </div>
@@ -2792,7 +3220,7 @@ export default function Finance() {
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="text-[10px] font-semibold text-white">
-                          {formatActivityAction(activity)}
+                        Payment collected
                         </span>
 
                         <span className="rounded-full border border-white/[0.05] bg-white/[0.02] px-1.5 py-0.5 text-[7px] text-slate-600">
@@ -2874,11 +3302,13 @@ export default function Finance() {
               </div>
 
               <p className="mt-1 text-[9px] text-slate-600">
-                Teacher compensation and staff cash reconciliation
+                {activeTab === "books-materials"
+                  ? "What we have right now and what is running low"
+                  : "Teacher compensation and staff cash reconciliation"}
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            <div className={activeTab === "books-materials" ? "hidden" : "flex flex-wrap items-center gap-2"}>
               <div className="flex items-center gap-1 rounded-lg border border-white/[0.06] bg-[#0d1013] p-1">
                 <button
                   type="button"
@@ -2955,9 +3385,43 @@ export default function Finance() {
               <span className="absolute bottom-0 left-0 right-0 h-px bg-[#f2bd19]" />
             )}
           </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("reconciliation")}
+            className={`relative pb-2.5 text-[10px] font-semibold transition ${
+              activeTab === "reconciliation"
+                ? "text-[#f2bd19]"
+                : "text-slate-600 hover:text-slate-300"
+            }`}
+          >
+            Reconciliation
+            {activeTab === "reconciliation" && (
+              <span className="absolute bottom-0 left-0 right-0 h-px bg-[#f2bd19]" />
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("books-materials")}
+            className={`relative pb-2.5 text-[10px] font-semibold transition ${
+              activeTab === "books-materials"
+                ? "text-[#f2bd19]"
+                : "text-slate-600 hover:text-slate-300"
+            }`}
+          >
+            Books &amp; Materials
+            {activeTab === "books-materials" && (
+              <span className="absolute bottom-0 left-0 right-0 h-px bg-[#f2bd19]" />
+            )}
+          </button>
         </div>
 
-        {activeTab === "teacher" ? renderTeacherTab() : renderStaffTab()}
+        {activeTab === "teacher" && renderTeacherTab()}
+
+        {activeTab === "staff" && renderStaffTab()}
+
+        {activeTab === "reconciliation" && renderReconciliationTab()}
+        {activeTab === "books-materials" && <FinanceBooksMaterials />}
       </div>
 
       {/* FINANCE UNLOCK */}
@@ -2985,7 +3449,7 @@ export default function Finance() {
             ? `Enter the administrator password to receive ${actionTarget?.rows?.length || 0} selected transaction${
                 actionTarget?.rows?.length === 1 ? "" : "s"
               } from ${actionTarget?.name || "this staff member"}.`
-            : `Enter the administrator password to settle the selected teacher-share balances for ${actionTarget?.name || "this teacher"}.`
+            : `Enter the administrator password to pay AFN ${formatMoney(actionTarget?.amount)} to ${actionTarget?.name || "this teacher"}.`
         }
         endpoint="/finance/verify-admin-password"
         onCancel={() => {
@@ -2993,6 +3457,28 @@ export default function Finance() {
           setActionTarget(null);
         }}
         onVerified={handleActionPasswordVerified}
+      />
+
+      {/* RECONCILIATION VERIFICATION */}
+
+      <PasswordConfirmModal
+        open={reconciliationVerifyOpen}
+        title="Verify Reconciliation"
+        description={`Enter the administrator password to record a verified reconciliation for ${monthLabel(
+          selectedYear,
+          selectedMonth,
+        )}${
+          reconciliationCollectorId
+            ? ` for ${
+                selectedStaff?.staff_name ||
+                selectedStaff?.full_name ||
+                "this collector"
+              }`
+            : ""
+        }.`}
+        endpoint="/finance/verify-admin-password"
+        onCancel={() => setReconciliationVerifyOpen(false)}
+        onVerified={verifyReconciliation}
       />
     </>
   );

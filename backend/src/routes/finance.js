@@ -2,7 +2,7 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-const { query } = require("../db/pool");
+const { query, pool } = require("../db/pool");
 const { authRequired, requireRoles } = require("../middleware/auth");
 const { asyncH } = require("../utils/helpers");
 
@@ -10,6 +10,8 @@ const {
   parseSolarDate,
   dateToJalaali,
   formatSolarDate,
+  jalaaliToDate,
+  getJalaaliMonthDays,
 } = require("../utils/solarDate");
 
 const router = express.Router();
@@ -19,6 +21,16 @@ const router = express.Router();
 ========================================================================== */
 
 const DEFAULT_SHARE_PERCENT = 30;
+
+function cleanOptionalText(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  const text = String(value).trim();
+
+  return text || null;
+}
 
 function roundMoney(value) {
   return Number(Number(value || 0).toFixed(2));
@@ -155,6 +167,40 @@ function solarMonthDays(year, month) {
   if (m <= 11) return 30;
 
   return 29;
+}
+
+/*
+  Gregorian [from, to] range covering one whole Solar Hijri month.
+
+  Used to attribute a real payment to the Solar month it was actually
+  paid in, instead of guessing from fee allocation coverage.
+*/
+function solarMonthGregorianRange(solarYear, solarMonth) {
+  const year = Number(solarYear);
+  const month = Number(solarMonth);
+
+  if (!Number.isInteger(year) || !Number.isInteger(month)) return null;
+  if (month < 1 || month > 12) return null;
+
+  let days;
+
+  try {
+    days = getJalaaliMonthDays(year, month);
+  } catch {
+    days = solarMonthDays(year, month);
+  }
+
+  try {
+    const from = jalaaliToDate(year, month, 1);
+    const to = jalaaliToDate(year, month, days);
+
+    return {
+      from: from.toISOString().slice(0, 10),
+      to: to.toISOString().slice(0, 10),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /* ==========================================================================
@@ -801,13 +847,11 @@ router.get(
 
           INNER JOIN student_enrollments se
             ON se.class_slot_id = cs.id
-           AND se.is_active = TRUE
 
           INNER JOIN students s
             ON s.id = se.student_id
 
           WHERE cs.teacher_id = $1
-            AND cs.is_active = TRUE
         ) x
       `,
       [teacherId],
@@ -851,6 +895,16 @@ router.get(
             0
           ) AS payment_count,
 
+          COALESCE(
+            month_finance.teacher_share_amount,
+            0
+          ) AS teacher_share_amount,
+
+          COALESCE(
+            month_finance.allocation_ids,
+            ARRAY[]::integer[]
+          ) AS allocation_ids,
+
           month_finance.last_payment_date,
 
           month_finance.fee_period_id,
@@ -864,7 +918,6 @@ router.get(
 
         INNER JOIN student_enrollments se
           ON se.class_slot_id = cs.id
-         AND se.is_active = TRUE
 
         INNER JOIN students s
           ON s.id = se.student_id
@@ -897,6 +950,27 @@ router.get(
               )
             ) AS payment_count,
 
+            SUM(COALESCE(payment_totals.teacher_share_amount, 0)) AS teacher_share_amount,
+
+            COALESCE(
+              (
+                SELECT array_agg(DISTINCT fpa_allocation.id)
+
+                FROM fee_payment_allocations fpa_allocation
+
+                INNER JOIN fee_period_months fpm_allocation
+                  ON fpm_allocation.id = fpa_allocation.fee_period_month_id
+
+                INNER JOIN fee_periods fp_allocation
+                  ON fp_allocation.id = fpm_allocation.fee_period_id
+
+                WHERE fp_allocation.enrollment_id = se.id
+                  AND fpm_allocation.solar_year = $2
+                  AND fpm_allocation.solar_month = $3
+              ),
+              ARRAY[]::integer[]
+            ) AS allocation_ids,
+
             MAX(payment_totals.last_payment_date)
               AS last_payment_date,
 
@@ -918,12 +992,22 @@ router.get(
               SUM(fpa.allocated_amount) AS paid_amount,
               COUNT(DISTINCT fpa.fee_payment_id)::int
                 AS payment_count,
-              MAX(fpmt.payment_date) AS last_payment_date
+              MAX(fpmt.payment_date) AS last_payment_date,
+              SUM(ROUND(fpa.allocated_amount * COALESCE(rate.percentage, $4) / 100, 2)) AS teacher_share_amount,
+              ARRAY_AGG(fpa.id)::integer[] AS allocation_ids
 
             FROM fee_payment_allocations fpa
 
             INNER JOIN fee_payments fpmt
               ON fpmt.id = fpa.fee_payment_id
+
+            LEFT JOIN LATERAL (
+              SELECT fsr.percentage
+              FROM finance_share_rates fsr
+              WHERE fsr.effective_at <= fpmt.created_at
+              ORDER BY fsr.effective_at DESC, fsr.id DESC
+              LIMIT 1
+            ) rate ON TRUE
 
             WHERE fpa.fee_period_month_id = fpm.id
           ) payment_totals
@@ -936,17 +1020,16 @@ router.get(
           ON TRUE
 
         WHERE cs.teacher_id = $1
-          AND cs.is_active = TRUE
 
         ORDER BY
           s.full_name,
           s.id,
           cs.id
 
-        LIMIT $4
-        OFFSET $5
+        LIMIT $5
+        OFFSET $6
       `,
-      [teacherId, solarYear, solarMonth, pagination.limit, pagination.offset],
+      [teacherId, solarYear, solarMonth, DEFAULT_SHARE_PERCENT, pagination.limit, pagination.offset],
     );
 
     const students = result.rows.map((row) => {
@@ -1009,6 +1092,12 @@ router.get(
 
         payment_count: Number(row.payment_count || 0),
 
+        teacher_share_amount: roundMoney(row.teacher_share_amount),
+
+        allocation_ids: Array.isArray(row.allocation_ids)
+          ? row.allocation_ids.map(Number)
+          : [],
+
         last_payment_date: row.last_payment_date || null,
 
         last_payment_solar_date: toSolarDateValue(row.last_payment_date),
@@ -1044,7 +1133,6 @@ router.get(
 
           INNER JOIN student_enrollments se
             ON se.class_slot_id = cs.id
-           AND se.is_active = TRUE
 
           INNER JOIN fee_periods fp
             ON fp.enrollment_id = se.id
@@ -1066,7 +1154,6 @@ router.get(
             ON TRUE
 
           WHERE cs.teacher_id = $1
-            AND cs.is_active = TRUE
 
           GROUP BY se.id
         )
@@ -1115,62 +1202,35 @@ router.get(
 
     const outstandingTotal = Math.max(roundMoney(expectedTotal - paidTotal), 0);
 
-    /*
-      Historical teacher share rate is determined from actual payment
-      creation timestamps for the selected Solar month.
-    */
-    const rateResult = await query(
+    /* Apply the rate effective at each payment's creation time. */
+    const shareResult = await query(
       `
         SELECT
-          fsr.id,
-          fsr.percentage,
-          fsr.effective_at
-        FROM finance_share_rates fsr
-        WHERE fsr.effective_at <= COALESCE(
-          (
-            SELECT MAX(fpmt.created_at)
-            FROM fee_payment_allocations fpa
-
-            INNER JOIN fee_payments fpmt
-              ON fpmt.id = fpa.fee_payment_id
-
-            INNER JOIN fee_period_months fpm
-              ON fpm.id = fpa.fee_period_month_id
-
-            INNER JOIN fee_periods fp
-              ON fp.id = fpm.fee_period_id
-
-            INNER JOIN student_enrollments se
-              ON se.id = fp.enrollment_id
-
-            INNER JOIN class_slots cs
-              ON cs.id = se.class_slot_id
-
-            WHERE cs.teacher_id = $1
-              AND fpm.solar_year = $2
-              AND fpm.solar_month = $3
-          ),
-          NOW()
-        )
-
-        ORDER BY
-          fsr.effective_at DESC,
-          fsr.id DESC
-
-        LIMIT 1
+          COALESCE(SUM(fpa.allocated_amount), 0) AS allocated_amount,
+          COALESCE(SUM(ROUND(fpa.allocated_amount * COALESCE(rate.percentage, $4) / 100, 2)), 0) AS share_amount
+        FROM fee_payment_allocations fpa
+        INNER JOIN fee_payments fp ON fp.id = fpa.fee_payment_id
+        INNER JOIN fee_period_months fpm ON fpm.id = fpa.fee_period_month_id
+        INNER JOIN fee_periods fper ON fper.id = fpm.fee_period_id
+        INNER JOIN student_enrollments se ON se.id = fper.enrollment_id
+        INNER JOIN class_slots cs ON cs.id = se.class_slot_id
+        LEFT JOIN LATERAL (
+          SELECT fsr.percentage
+          FROM finance_share_rates fsr
+          WHERE fsr.effective_at <= fp.created_at
+          ORDER BY fsr.effective_at DESC, fsr.id DESC
+          LIMIT 1
+        ) rate ON TRUE
+        WHERE cs.teacher_id = $1
+          AND fpm.solar_year = $2
+          AND fpm.solar_month = $3
       `,
-      [teacherId, solarYear, solarMonth],
+      [teacherId, solarYear, solarMonth, DEFAULT_SHARE_PERCENT],
     );
-
-    const sharePercent = Number(
-      rateResult.rows[0]?.percentage ?? DEFAULT_SHARE_PERCENT,
-    );
-
-    /*
-      The actual teacher amount is based on paid allocated money,
-      not expected/unpaid money.
-    */
-    const teacherShareAmount = roundMoney((paidTotal * sharePercent) / 100);
+    const sharePercent = Number(shareResult.rows[0]?.allocated_amount || 0) > 0
+      ? roundMoney(Number(shareResult.rows[0].share_amount) * 100 / Number(shareResult.rows[0].allocated_amount))
+      : DEFAULT_SHARE_PERCENT;
+    const teacherShareAmount = roundMoney(shareResult.rows[0]?.share_amount || 0);
 
     /*
       Ensure a persistent settlement exists for this teacher/month.
@@ -1201,7 +1261,11 @@ router.get(
           solar_month
         )
         DO UPDATE SET
-          expected_amount = EXCLUDED.expected_amount,
+          expected_amount = CASE
+            WHEN finance_teacher_settlements.status = 'pending'
+            THEN EXCLUDED.expected_amount
+            ELSE finance_teacher_settlements.expected_amount
+          END,
           updated_at = NOW()
 
         RETURNING
@@ -1220,6 +1284,125 @@ router.get(
     );
 
     const settlement = settlementResult.rows[0];
+
+    const payoutHistoryResult = await query(
+      `SELECT id, amount, share_calculation_snapshot, paid_by_user_id,
+              paid_by_name_snapshot, paid_at, created_at
+       FROM finance_teacher_settlement_payments
+       WHERE teacher_settlement_id = $1
+       ORDER BY paid_at DESC, id DESC`,
+      [settlement.id],
+    );
+
+    /*
+      Only the teacher share that is still awaiting payment may be
+      selected for settlement.
+
+      This walks the teacher's allocations for the month in the exact
+      same order that PUT /teacher-settlements/:id/pay settles them and
+      excludes anything already recorded as paid (including a legacy
+      settlement that was paid before payout history existed). That way
+      the amount shown in the Finance selection equals the amount that
+      will actually be processed when Admin confirms the payment.
+    */
+    const allocationResult = await query(
+      `
+        SELECT
+          fpa.id AS allocation_id,
+          ROUND(fpa.allocated_amount * COALESCE(rate.percentage, $4) / 100, 2)
+            AS share_amount
+
+        FROM fee_payment_allocations fpa
+
+        INNER JOIN fee_payments fp
+          ON fp.id = fpa.fee_payment_id
+
+        INNER JOIN fee_period_months fpm
+          ON fpm.id = fpa.fee_period_month_id
+
+        INNER JOIN fee_periods fper
+          ON fper.id = fpm.fee_period_id
+
+        INNER JOIN student_enrollments se
+          ON se.id = fper.enrollment_id
+
+        INNER JOIN class_slots cs
+          ON cs.id = se.class_slot_id
+
+        LEFT JOIN LATERAL
+        (
+          SELECT fsr.percentage
+          FROM finance_share_rates fsr
+          WHERE fsr.effective_at <= fp.created_at
+          ORDER BY fsr.effective_at DESC, fsr.id DESC
+          LIMIT 1
+        ) rate
+          ON TRUE
+
+        WHERE cs.teacher_id = $1
+          AND fpm.solar_year = $2
+          AND fpm.solar_month = $3
+
+        ORDER BY fp.created_at, fp.id, fpa.id
+      `,
+      [teacherId, solarYear, solarMonth, DEFAULT_SHARE_PERCENT],
+    );
+
+    const paidAllocationIds = new Set(
+      payoutHistoryResult.rows
+        .flatMap(
+          (payment) => payment.share_calculation_snapshot?.allocations || [],
+        )
+        .map((allocation) => Number(allocation.allocation_id)),
+    );
+
+    let pendingCredit =
+      payoutHistoryResult.rows.length === 0 && settlement.status === "paid"
+        ? roundMoney(settlement.expected_amount)
+        : 0;
+
+    const pendingShareByAllocation = new Map();
+
+    for (const allocationRow of allocationResult.rows) {
+      const allocationId = Number(allocationRow.allocation_id);
+      const shareAmount = roundMoney(allocationRow.share_amount);
+
+      if (paidAllocationIds.has(allocationId)) {
+        pendingShareByAllocation.set(allocationId, 0);
+        continue;
+      }
+
+      if (pendingCredit >= shareAmount) {
+        pendingCredit = roundMoney(pendingCredit - shareAmount);
+        pendingShareByAllocation.set(allocationId, 0);
+        continue;
+      }
+
+      const pendingShare = roundMoney(shareAmount - pendingCredit);
+      pendingCredit = 0;
+      pendingShareByAllocation.set(allocationId, pendingShare);
+    }
+
+    for (const student of students) {
+      const studentAllocationIds = Array.isArray(student.allocation_ids)
+        ? student.allocation_ids
+        : [];
+
+      const pendingAllocationIds = studentAllocationIds.filter(
+        (allocationId) =>
+          (pendingShareByAllocation.get(Number(allocationId)) || 0) > 0,
+      );
+
+      student.teacher_share_amount = roundMoney(
+        pendingAllocationIds.reduce(
+          (sum, allocationId) =>
+            sum + (pendingShareByAllocation.get(Number(allocationId)) || 0),
+          0,
+        ),
+      );
+
+      student.allocation_ids = pendingAllocationIds;
+    }
 
     let paidBy = null;
 
@@ -1290,6 +1473,19 @@ router.get(
 
         created_at: settlement.created_at,
         updated_at: settlement.updated_at,
+        amount_due: roundMoney(Math.max(
+          teacherShareAmount - (settlement.status === "paid" ? Number(settlement.expected_amount) : 0),
+          0,
+        )),
+        payout_history: payoutHistoryResult.rows.map((payment) => ({
+          id: Number(payment.id),
+          amount: roundMoney(payment.amount),
+          paid_by_user_id: payment.paid_by_user_id ? Number(payment.paid_by_user_id) : null,
+          paid_by_name: payment.paid_by_name_snapshot,
+          paid_at: payment.paid_at,
+          paid_at_solar_date: toSolarDateValue(payment.paid_at),
+          calculation: payment.share_calculation_snapshot,
+        })),
       },
 
       students,
@@ -1354,13 +1550,12 @@ router.get(
 
           COALESCE(
             SUM(
-              fpa.allocated_amount
-              *
-              COALESCE(
-                share_rate.percentage,
-                $3
+              ROUND(
+                fpa.allocated_amount
+                * COALESCE(share_rate.percentage, $3)
+                / 100,
+                2
               )
-              / 100
             ),
             0
           ) AS teacher_share_amount,
@@ -1465,6 +1660,16 @@ router.get(
       );
 
       const settlement = settlementResult.rows[0] || null;
+      const payoutHistoryResult = settlement
+        ? await query(
+            `SELECT id, amount, share_calculation_snapshot, paid_by_user_id,
+                    paid_by_name_snapshot, paid_at
+             FROM finance_teacher_settlement_payments
+             WHERE teacher_settlement_id = $1
+             ORDER BY paid_at DESC, id DESC`,
+            [settlement.id],
+          )
+        : { rows: [] };
 
       months.push({
         solar_year: year,
@@ -1506,6 +1711,15 @@ router.get(
 
               created_at: settlement.created_at,
               updated_at: settlement.updated_at,
+              payout_history: payoutHistoryResult.rows.map((payment) => ({
+                id: Number(payment.id),
+                amount: roundMoney(payment.amount),
+                paid_by_user_id: payment.paid_by_user_id ? Number(payment.paid_by_user_id) : null,
+                paid_by_name: payment.paid_by_name_snapshot,
+                paid_at: payment.paid_at,
+                paid_at_solar_date: toSolarDateValue(payment.paid_at),
+                calculation: payment.share_calculation_snapshot,
+              })),
             }
           : {
               id: null,
@@ -1551,6 +1765,16 @@ router.put(
     }
 
     const verificationToken = req.body?.verification_token;
+    const rawAllocationIds = req.body?.allocation_ids;
+    const allocationIds = rawAllocationIds === undefined
+      ? null
+      : Array.isArray(rawAllocationIds)
+        ? [...new Set(rawAllocationIds.map(Number))]
+        : [];
+
+    if (allocationIds && (allocationIds.length === 0 || allocationIds.some((id) => !Number.isInteger(id) || id < 1))) {
+      return res.status(400).json({ error: "Valid teacher allocation IDs are required.", code: "INVALID_ALLOCATION_IDS" });
+    }
 
     if (!verifyFinanceVerificationToken(req, verificationToken)) {
       return res.status(403).json({
@@ -1560,122 +1784,156 @@ router.put(
       });
     }
 
-    const existing = await query(
-      `
-        SELECT
-          fts.*,
-          t.full_name AS teacher_name
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const settlementResult = await client.query(
+        `SELECT fts.*, t.full_name AS teacher_name
+         FROM finance_teacher_settlements fts
+         INNER JOIN teachers t ON t.id = fts.teacher_id
+         WHERE fts.id = $1 FOR UPDATE OF fts`,
+        [settlementId],
+      );
+      if (!settlementResult.rows.length) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ error: "Teacher settlement not found." });
+      }
+      const current = settlementResult.rows[0];
 
-        FROM finance_teacher_settlements fts
+      // Prevent paying an already-paid settlement
+      if (current.status === "paid") {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ error: "This salary has already been paid.", code: "TEACHER_SETTLEMENT_ALREADY_PAID" });
+      }
 
-        INNER JOIN teachers t
-          ON t.id = fts.teacher_id
-
-        WHERE fts.id = $1
-        LIMIT 1
-      `,
-      [settlementId],
-    );
-
-    if (!existing.rows.length) {
-      return res.status(404).json({
-        error: "Teacher settlement not found.",
-      });
-    }
-
-    const current = existing.rows[0];
-
-    if (current.status === "paid") {
-      return res.json({
-        message: "This teacher settlement has already been marked as paid.",
-
-        settlement: {
-          id: Number(current.id),
-          teacher_id: Number(current.teacher_id),
-          teacher_name: current.teacher_name || "Unknown",
-
-          solar_year: Number(current.solar_year),
-
-          solar_month: Number(current.solar_month),
-
-          expected_amount: roundMoney(current.expected_amount),
-
-          status: current.status,
-
-          paid_at: current.paid_at,
-          paid_by_user_id: current.paid_by_user_id
-            ? Number(current.paid_by_user_id)
-            : null,
-        },
-      });
-    }
-
-    const result = await query(
-      `
-        UPDATE finance_teacher_settlements
-
-        SET
-          status = 'paid',
-          paid_at = NOW(),
-          paid_by_user_id = $1,
-          updated_at = NOW()
-
-        WHERE id = $2
-
-        RETURNING *
-      `,
-      [req.user.id, settlementId],
-    );
-
-    const row = result.rows[0];
-
-    const userResult = await query(
-      `
-        SELECT
-          id,
-          full_name,
-          email,
-          role
-        FROM users
-        WHERE id = $1
-        LIMIT 1
-      `,
-      [row.paid_by_user_id],
-    );
-
-    res.json({
-      message: "Teacher settlement marked as paid successfully.",
-
-      settlement: {
-        id: Number(row.id),
-
-        teacher_id: Number(row.teacher_id),
-
-        teacher_name: current.teacher_name || "Unknown",
-
+      const allocations = await client.query(
+        `SELECT fpa.id AS allocation_id, fp.id AS payment_id, fp.created_at AS payment_created_at,
+                fpm.solar_year, fpm.solar_month, fpa.allocated_amount,
+                rate.id AS share_rate_id, COALESCE(rate.percentage, $4) AS share_percent,
+                ROUND(fpa.allocated_amount * COALESCE(rate.percentage, $4) / 100, 2) AS share_amount
+         FROM fee_payment_allocations fpa
+         INNER JOIN fee_payments fp ON fp.id = fpa.fee_payment_id
+         INNER JOIN fee_period_months fpm ON fpm.id = fpa.fee_period_month_id
+         INNER JOIN fee_periods fper ON fper.id = fpm.fee_period_id
+         INNER JOIN student_enrollments se ON se.id = fper.enrollment_id
+         INNER JOIN class_slots cs ON cs.id = se.class_slot_id
+         LEFT JOIN LATERAL (
+           SELECT fsr.id, fsr.percentage FROM finance_share_rates fsr
+           WHERE fsr.effective_at <= fp.created_at
+           ORDER BY fsr.effective_at DESC, fsr.id DESC LIMIT 1
+         ) rate ON TRUE
+         WHERE cs.teacher_id = $1 AND fpm.solar_year = $2 AND fpm.solar_month = $3
+         ORDER BY fp.created_at, fp.id, fpa.id`,
+        [current.teacher_id, current.solar_year, current.solar_month, DEFAULT_SHARE_PERCENT],
+      );
+      const eligibleAllocationIds = new Set(
+        allocations.rows.map((row) => Number(row.allocation_id)),
+      );
+      if (allocationIds && allocationIds.some((id) => !eligibleAllocationIds.has(id))) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ error: "One or more selected teacher allocations are no longer eligible. Refresh and select the current amounts again.", code: "TEACHER_ALLOCATIONS_CHANGED" });
+      }
+      const shareRows = allocations.rows.map((row) => ({
+        allocation_id: Number(row.allocation_id),
+        payment_id: Number(row.payment_id),
+        payment_created_at: row.payment_created_at,
         solar_year: Number(row.solar_year),
         solar_month: Number(row.solar_month),
+        allocated_amount: roundMoney(row.allocated_amount),
+        share_rate_id: row.share_rate_id ? Number(row.share_rate_id) : null,
+        share_percent: Number(row.share_percent),
+        share_amount: roundMoney(row.share_amount),
+      }));
+      const priorHistory = await client.query(
+        `SELECT share_calculation_snapshot
+         FROM finance_teacher_settlement_payments
+         WHERE teacher_settlement_id = $1`,
+        [settlementId],
+      );
+      const paidAllocationIds = new Set(
+        priorHistory.rows.flatMap((row) => row.share_calculation_snapshot?.allocations || [])
+          .map((row) => Number(row.allocation_id)),
+      );
+      const unpaidShareRows = shareRows.filter((row) => !paidAllocationIds.has(row.allocation_id));
+      const currentEarned = roundMoney(unpaidShareRows.reduce((sum, row) => sum + row.share_amount, 0));
+      const previouslyPaid = priorHistory.rows.length === 0 && current.status === "paid"
+        ? roundMoney(current.expected_amount)
+        : 0;
+      let credit = previouslyPaid;
+      const payoutAllocations = [];
+      for (const allocation of unpaidShareRows) {
+        if (credit >= allocation.share_amount) {
+          credit = roundMoney(credit - allocation.share_amount);
+          continue;
+        }
+        const payableShare = roundMoney(allocation.share_amount - credit);
+        credit = 0;
+        if (payableShare > 0) payoutAllocations.push({ ...allocation, payout_share_amount: payableShare });
+      }
+      /*
+        The credit above is applied over the teacher's full set of
+        allocations for the month, so each allocation's payable share is
+        resolved consistently whether or not it was selected. Only the
+        allocations the Admin actually selected are settled here.
+      */
+      const selectedAllocationIds = allocationIds
+        ? new Set(allocationIds)
+        : null;
+      const payableAllocations = selectedAllocationIds
+        ? payoutAllocations.filter((row) =>
+            selectedAllocationIds.has(row.allocation_id),
+          )
+        : payoutAllocations;
+      const payoutAmount = roundMoney(payableAllocations.reduce((sum, row) => sum + row.payout_share_amount, 0));
+      if (payoutAmount <= 0) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ error: "There is no unpaid teacher share for this period.", code: "TEACHER_SHARE_ALREADY_SETTLED" });
+      }
+      const requestedAmount = Number(req.body?.expected_amount);
+      if (!Number.isFinite(requestedAmount) || roundMoney(requestedAmount) !== payoutAmount) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ error: "The teacher share changed after it was selected. Refresh the Finance data and select the current amount again.", code: "TEACHER_SHARE_AMOUNT_CHANGED", expected_amount: payoutAmount });
+      }
 
-        month_name: monthName(Number(row.solar_month)),
-
-        expected_amount: roundMoney(row.expected_amount),
-
-        status: row.status,
-
-        paid_at: row.paid_at,
-
-        paid_at_solar_date: toSolarDateValue(row.paid_at),
-
-        paid_by_user_id: row.paid_by_user_id
-          ? Number(row.paid_by_user_id)
-          : null,
-
-        paid_by: normalizeUser(userResult.rows[0]),
-
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-      },
-    });
+      const history = await client.query(
+        `INSERT INTO finance_teacher_settlement_payments
+           (teacher_settlement_id, amount, share_calculation_snapshot, paid_by_user_id, paid_by_name_snapshot)
+         VALUES ($1, $2, $3::jsonb, $4, $5)
+         RETURNING id, amount, paid_at`,
+        [settlementId, payoutAmount, JSON.stringify({ teacher_id: Number(current.teacher_id), solar_year: Number(current.solar_year), solar_month: Number(current.solar_month), calculation_total: currentEarned, previously_paid_credit: previouslyPaid, allocations: payableAllocations }), req.user.id, req.user.full_name || "Administrator"],
+      );
+      const newCumulativePaid = roundMoney(previouslyPaid + payoutAmount);
+      const updated = await client.query(
+        `UPDATE finance_teacher_settlements
+         SET status = 'paid', expected_amount = $1,
+             paid_at = COALESCE(fts.paid_at, NOW()),
+             paid_by_user_id = COALESCE(fts.paid_by_user_id, $2),
+             updated_at = NOW()
+         WHERE id = $3
+         RETURNING *`,
+        [newCumulativePaid, req.user.id, settlementId],
+      );
+      await client.query("COMMIT");
+      const row = updated.rows[0];
+      return res.json({
+        message: "Teacher share paid successfully.",
+        payment: { id: Number(history.rows[0].id), amount: payoutAmount, paid_at: history.rows[0].paid_at, calculation: { current_earned: currentEarned, previously_paid: previouslyPaid, allocations: payableAllocations } },
+        settlement: {
+          id: Number(row.id), teacher_id: Number(row.teacher_id), teacher_name: current.teacher_name || "Unknown",
+          solar_year: Number(row.solar_year), solar_month: Number(row.solar_month), month_name: monthName(Number(row.solar_month)),
+          amount_paid_now: payoutAmount, expected_amount: roundMoney(row.expected_amount), status: row.status,
+          paid_at: row.paid_at, paid_at_solar_date: toSolarDateValue(row.paid_at),
+          paid_by_user_id: row.paid_by_user_id ? Number(row.paid_by_user_id) : null,
+          paid_by: normalizeUser({ id: req.user.id, full_name: req.user.full_name, role: req.user.role }),
+          created_at: row.created_at, updated_at: row.updated_at,
+        },
+      });
+    } catch (error) {
+      try { await client.query("ROLLBACK"); } catch (_) {}
+      throw error;
+    } finally {
+      client.release();
+    }
   }),
 );
 
@@ -2218,238 +2476,96 @@ router.get(
       maxLimit: 100,
     });
 
-    /*
-      Staff expected amount is the total amount of payments that the
-      particular collector recorded/collected during the selected
-      Solar month.
+    const monthRange = solarMonthGregorianRange(solarYear, solarMonth);
 
-      The payment itself remains untouched.
+    if (!monthRange) {
+      return res.status(400).json({
+        error: "The selected Solar month could not be resolved.",
+      });
+    }
+
+    /*
+      SOURCE OF TRUTH
+
+        staff table            -> the actual Staff entities
+        fee_payments           -> the actual payment transactions
+        collected_by_staff_id  -> the actual collector identity
+
+      Administrator accounts are NOT Staff. An admin may authorize a
+      payment, but that does not make the admin a staff collector, so
+      admin/attendance authentication accounts are excluded here.
     */
     const countResult = await query(`
       SELECT COUNT(*)::int AS total
-      FROM users u
-      WHERE
-        u.role IN ('admin', 'staff')
-        AND u.is_active = TRUE
-    `);
+      FROM staff s
+      WHERE s.is_active = TRUE OR EXISTS (
+        SELECT 1 FROM fee_payments fp
+        WHERE fp.collected_by_staff_id = s.id
+          AND fp.payment_date >= $1::date AND fp.payment_date <= $2::date
+      )
+    `, [monthRange.from, monthRange.to]);
 
     const totalItems = Number(countResult.rows[0]?.total || 0);
 
     const result = await query(
       `
-        SELECT
-          u.id,
-          u.full_name,
-          u.email,
-          u.role,
-
-          COUNT(fp.id)::int AS payment_count,
-
-          COALESCE(
-            SUM(fp.amount),
-            0
-          ) AS total_amount,
-
-          MAX(fp.payment_date)
-            AS last_payment_date,
-
-          COALESCE(
-            settlement.status,
-            'pending'
-          ) AS settlement_status,
-
-          settlement.id AS settlement_id,
-
-          settlement.expected_amount
-            AS settlement_expected_amount,
-
-          settlement.received_at,
-
-          settlement.received_by_user_id,
-
-          received_by.full_name
-            AS received_by_name,
-
-          received_by.email
-            AS received_by_email,
-
-          received_by.role
-            AS received_by_role
-
-        FROM users u
-
-        LEFT JOIN fee_payments fp
-          ON fp.collected_by_user_id = u.id
-
-        LEFT JOIN LATERAL
-        (
+        WITH staff_payments AS (
           SELECT
-            fss.id,
-            fss.expected_amount,
-            fss.status,
-            fss.received_at,
-            fss.received_by_user_id
-
-          FROM finance_staff_settlements fss
-
-          WHERE fss.staff_user_id = u.id
-            AND fss.solar_year = $1
-            AND fss.solar_month = $2
-
-          LIMIT 1
-        ) settlement
-          ON TRUE
-
-        LEFT JOIN users received_by
-          ON received_by.id =
-             settlement.received_by_user_id
-
-        WHERE
-          u.role IN ('admin', 'staff')
-          AND u.is_active = TRUE
-
-        GROUP BY
-          u.id,
-          u.full_name,
-          u.email,
-          u.role,
-
-          settlement.id,
-          settlement.expected_amount,
-          settlement.status,
-          settlement.received_at,
-          settlement.received_by_user_id,
-
-          received_by.full_name,
-          received_by.email,
-          received_by.role
-
-        ORDER BY
-          u.full_name,
-          u.id
-
-        LIMIT $3
-        OFFSET $4
+            fp.collected_by_staff_id AS staff_id,
+            COUNT(*)::int AS payment_count,
+            COALESCE(SUM(fp.amount), 0) AS total_amount,
+            MAX(fp.payment_date) AS last_payment_date,
+            COALESCE(SUM(fp.amount) FILTER (WHERE fsps.id IS NOT NULL), 0) AS handed_over_amount,
+            COUNT(*) FILTER (WHERE fsps.id IS NOT NULL)::int AS handed_over_count
+          FROM fee_payments fp
+          LEFT JOIN finance_staff_payment_settlements fsps
+            ON fsps.fee_payment_id = fp.id
+          WHERE fp.payment_date >= $1::date AND fp.payment_date <= $2::date
+            AND fp.collected_by_staff_id IS NOT NULL
+          GROUP BY fp.collected_by_staff_id
+        )
+        SELECT
+          s.id, s.full_name, s.email,
+          COALESCE(sp.payment_count, 0)::int AS payment_count,
+          COALESCE(sp.total_amount, 0) AS total_amount,
+          COALESCE(sp.handed_over_amount, 0) AS handed_over_amount,
+          GREATEST(COALESCE(sp.total_amount, 0) - COALESCE(sp.handed_over_amount, 0), 0) AS pending_amount,
+          COALESCE(sp.handed_over_count, 0)::int AS handed_over_count,
+          COALESCE(sp.payment_count, 0) - COALESCE(sp.handed_over_count, 0) AS pending_count,
+          sp.last_payment_date
+        FROM staff s
+        LEFT JOIN staff_payments sp ON sp.staff_id = s.id
+        WHERE s.is_active = TRUE OR sp.staff_id IS NOT NULL
+        ORDER BY s.full_name, s.id
+        LIMIT $3 OFFSET $4
       `,
-      [solarYear, solarMonth, pagination.limit, pagination.offset],
+      [monthRange.from, monthRange.to, pagination.limit, pagination.offset],
     );
 
-    const staff = [];
-
-    for (const row of result.rows) {
+    const staff = result.rows.map((row) => {
       const totalAmount = roundMoney(row.total_amount);
-
-      /*
-        Ensure a persistent settlement record exists.
-
-        If the row already exists and is received, its status remains
-        received.
-      */
-      const settlementResult = await query(
-        `
-          INSERT INTO finance_staff_settlements
-          (
-            staff_user_id,
-            solar_year,
-            solar_month,
-            expected_amount
-          )
-          VALUES
-          (
-            $1,
-            $2,
-            $3,
-            $4
-          )
-
-          ON CONFLICT
-          (
-            staff_user_id,
-            solar_year,
-            solar_month
-          )
-
-          DO UPDATE SET
-            expected_amount = EXCLUDED.expected_amount,
-            updated_at = NOW()
-
-          RETURNING
-            id,
-            staff_user_id,
-            solar_year,
-            solar_month,
-            expected_amount,
-            status,
-            received_at,
-            received_by_user_id,
-            created_at,
-            updated_at
-        `,
-        [Number(row.id), solarYear, solarMonth, totalAmount],
-      );
-
-      const settlement = settlementResult.rows[0];
-
-      let receivedBy = null;
-
-      if (settlement?.received_by_user_id) {
-        const receivedByResult = await query(
-          `
-              SELECT
-                id,
-                full_name,
-                email,
-                role
-              FROM users
-              WHERE id = $1
-              LIMIT 1
-            `,
-          [settlement.received_by_user_id],
-        );
-
-        receivedBy = normalizeUser(receivedByResult.rows[0]);
-      }
-
-      staff.push({
-        user_id: Number(row.id),
-
+      const handedOverAmount = roundMoney(row.handed_over_amount);
+      return {
+        id: Number(row.id),
+        collector_staff_id: Number(row.id),
         full_name: row.full_name || "Unknown",
-
         email: row.email || null,
-
-        role: row.role || null,
-
+        role: "staff",
         payment_count: Number(row.payment_count || 0),
 
+        teacher_share_amount: roundMoney(row.teacher_share_amount),
+        allocation_ids: Array.isArray(row.allocation_ids)
+          ? row.allocation_ids.map(Number)
+          : [],
         total_amount: totalAmount,
-
+        handed_over_amount: handedOverAmount,
+        pending_amount: roundMoney(row.pending_amount),
+        handed_over_count: Number(row.handed_over_count || 0),
+        pending_count: Number(row.pending_count || 0),
         last_payment_date: row.last_payment_date || null,
-
         last_payment_solar_date: toSolarDateValue(row.last_payment_date),
-
-        settlement: {
-          id: Number(settlement.id),
-
-          expected_amount: roundMoney(settlement.expected_amount),
-
-          status: settlement.status,
-
-          received_at: settlement.received_at || null,
-
-          received_at_solar_date: toSolarDateValue(settlement.received_at),
-
-          received_by_user_id: settlement.received_by_user_id
-            ? Number(settlement.received_by_user_id)
-            : null,
-
-          received_by: receivedBy,
-
-          created_at: settlement.created_at,
-
-          updated_at: settlement.updated_at,
-        },
-      });
-    }
+      };
+    });
 
     res.json({
       solar_year: solarYear,
@@ -2476,13 +2592,30 @@ router.get(
   authRequired,
   requireRoles("admin"),
   asyncH(async (req, res) => {
-    const collectorUserId = req.query.collector_user_id
+    /*
+      Finance staff transactions are the REAL payment transactions.
+
+      The collector is identified by `fee_payments.collected_by_staff_id`,
+      which references the `staff` table. Filtering on
+      `collected_by_user_id` instead would return nothing, because
+      collectors are Staff entities rather than authentication users.
+
+      `collector_user_id` is still accepted as a legacy fallback so an
+      older client keeps working, but the Staff reference wins.
+    */
+    const collectorStaffId = req.query.collector_staff_id
+      ? Number(req.query.collector_staff_id)
+      : null;
+
+    const legacyCollectorUserId = req.query.collector_user_id
       ? Number(req.query.collector_user_id)
       : null;
 
+    const collectorId = collectorStaffId ?? legacyCollectorUserId;
+
     if (
-      collectorUserId !== null &&
-      (!Number.isInteger(collectorUserId) || collectorUserId < 1)
+      collectorId !== null &&
+      (!Number.isInteger(collectorId) || collectorId < 1)
     ) {
       return res.status(400).json({
         error: "Invalid collector.",
@@ -2519,26 +2652,23 @@ router.get(
         SELECT COUNT(*)::int AS total
 
         FROM fee_payments fp
-
         WHERE
-          (
-            $1::integer IS NULL
-            OR fp.collected_by_user_id = $1
-          )
+        (($1::integer IS NULL OR fp.collected_by_staff_id = $1)
+          AND ($2::integer IS NULL OR fp.collected_by_user_id = $2))
 
-          AND
-          (
-            $2::date IS NULL
-            OR fp.payment_date >= $2
-          )
+        AND
+        (
+          $3::date IS NULL
+          OR fp.payment_date >= $3
+        )
 
-          AND
-          (
-            $3::date IS NULL
-            OR fp.payment_date <= $3
-          )
+        AND
+        (
+          $4::date IS NULL
+          OR fp.payment_date <= $4
+        )
       `,
-      [collectorUserId, fromDate, toDate],
+      [collectorStaffId, collectorStaffId === null ? legacyCollectorUserId : null, fromDate, toDate],
     );
 
     const totalItems = Number(countResult.rows[0]?.total || 0);
@@ -2553,12 +2683,16 @@ router.get(
           fp.comment,
           fp.created_at,
 
+          fp.collected_by_staff_id,
           fp.collected_by_user_id,
+
+          fp.collected_by_name_snapshot,
+          fp.collected_by_role_snapshot,
 
           collector.full_name
             AS collector_name,
 
-          collector.role
+          'staff'
             AS collector_role,
 
           fp.recorded_by,
@@ -2573,14 +2707,17 @@ router.get(
           s.full_name AS student_name,
           s.roll_number,
 
-          fpa.id AS allocation_id,
-          fpa.allocated_amount,
-          fpa.covered_days,
-          fpa.from_date,
-          fpa.to_date,
-
-          fpm.solar_year,
-          fpm.solar_month
+          allocation.allocation_id,
+          allocation.allocated_amount,
+          allocation.covered_days,
+          allocation.from_date,
+          allocation.to_date,
+          allocation.solar_year,
+          allocation.solar_month,
+          (fsps.id IS NOT NULL) AS handed_over,
+          fsps.id AS settlement_id,
+          fsps.settled_at,
+          fsps.settled_by_name_snapshot
 
         FROM fee_payments fp
 
@@ -2590,48 +2727,55 @@ router.get(
         INNER JOIN students s
           ON s.id = f.student_id
 
-        LEFT JOIN users collector
+        LEFT JOIN staff collector
           ON collector.id =
-             fp.collected_by_user_id
+             fp.collected_by_staff_id
 
         LEFT JOIN users recorder
           ON recorder.id =
              fp.recorded_by
 
-        LEFT JOIN fee_payment_allocations fpa
-          ON fpa.fee_payment_id = fp.id
+        LEFT JOIN LATERAL (
+          SELECT
+            MIN(fpa.id) AS allocation_id,
+            SUM(fpa.allocated_amount) AS allocated_amount,
+            SUM(fpa.covered_days)::int AS covered_days,
+            MIN(fpa.from_date) AS from_date,
+            MAX(fpa.to_date) AS to_date,
+            MIN(fpm.solar_year) AS solar_year,
+            MIN(fpm.solar_month) AS solar_month
+          FROM fee_payment_allocations fpa
+          LEFT JOIN fee_period_months fpm ON fpm.id = fpa.fee_period_month_id
+          WHERE fpa.fee_payment_id = fp.id
+        ) allocation ON TRUE
 
-        LEFT JOIN fee_period_months fpm
-          ON fpm.id =
-             fpa.fee_period_month_id
+        LEFT JOIN finance_staff_payment_settlements fsps
+          ON fsps.fee_payment_id = fp.id
 
         WHERE
-          (
-            $1::integer IS NULL
-            OR fp.collected_by_user_id = $1
-          )
-
-          AND
-          (
-            $2::date IS NULL
-            OR fp.payment_date >= $2
-          )
+          (($1::integer IS NULL OR fp.collected_by_staff_id = $1)
+            AND ($2::integer IS NULL OR fp.collected_by_user_id = $2))
 
           AND
           (
             $3::date IS NULL
-            OR fp.payment_date <= $3
+            OR fp.payment_date >= $3
+          )
+
+          AND
+          (
+            $4::date IS NULL
+            OR fp.payment_date <= $4
           )
 
         ORDER BY
           fp.payment_date DESC,
-          fp.id DESC,
-          fpa.id ASC
+          fp.id DESC
 
-        LIMIT $4
-        OFFSET $5
+        LIMIT $5
+        OFFSET $6
       `,
-      [collectorUserId, fromDate, toDate, pagination.limit, pagination.offset],
+      [collectorStaffId, collectorStaffId === null ? legacyCollectorUserId : null, fromDate, toDate, pagination.limit, pagination.offset],
     );
 
     const payments = result.rows.map((row) => ({
@@ -2655,13 +2799,21 @@ router.get(
 
       roll_number: row.roll_number || null,
 
+      collected_by_staff_id: row.collected_by_staff_id
+        ? Number(row.collected_by_staff_id)
+        : null,
+
       collected_by_user_id: row.collected_by_user_id
         ? Number(row.collected_by_user_id)
         : null,
 
-      collector_name: row.collector_name || null,
+      collector_name:
+        row.collector_name ||
+        row.collected_by_name_snapshot ||
+        null,
 
-      collector_role: row.collector_role || null,
+      collector_role:
+        row.collected_by_role_snapshot || row.collector_role || null,
 
       recorded_by: row.recorded_by ? Number(row.recorded_by) : null,
 
@@ -2692,6 +2844,10 @@ router.get(
       coverage_to_date: row.to_date || null,
 
       coverage_to_solar_date: toSolarDateValue(row.to_date),
+      handed_over: Boolean(row.handed_over),
+      settlement_id: row.settlement_id ? Number(row.settlement_id) : null,
+      settled_at: row.settled_at || null,
+      settled_by_name: row.settled_by_name_snapshot || null,
     }));
 
     /*
@@ -2709,31 +2865,29 @@ router.get(
           ) AS amount
 
         FROM fee_payments fp
-
         WHERE
-          (
-            $1::integer IS NULL
-            OR fp.collected_by_user_id = $1
-          )
+        (($1::integer IS NULL OR fp.collected_by_staff_id = $1)
+          AND ($2::integer IS NULL OR fp.collected_by_user_id = $2))
 
-          AND
-          (
-            $2::date IS NULL
-            OR fp.payment_date >= $2
-          )
+        AND
+        (
+          $3::date IS NULL
+          OR fp.payment_date >= $3
+        )
 
-          AND
-          (
-            $3::date IS NULL
-            OR fp.payment_date <= $3
-          )
+        AND
+        (
+          $4::date IS NULL
+          OR fp.payment_date <= $4
+        )
       `,
-      [collectorUserId, fromDate, toDate],
+      [collectorStaffId, collectorStaffId === null ? legacyCollectorUserId : null, fromDate, toDate],
     );
 
     res.json({
       filters: {
-        collector_user_id: collectorUserId,
+        collector_staff_id: collectorStaffId,
+        collector_user_id: legacyCollectorUserId,
 
         from_solar_date: req.query.from_solar_date || null,
 
@@ -2766,9 +2920,17 @@ router.get(
   authRequired,
   requireRoles("admin"),
   asyncH(async (req, res) => {
-    const staffUserId = req.query.staff_user_id
-      ? Number(req.query.staff_user_id)
-      : null;
+    /*
+      Settlements are keyed to real Staff records through
+      `collector_staff_id`. Legacy rows created before that column
+      existed still carry `staff_user_id`, so both are resolved here
+      and the Staff reference takes precedence.
+    */
+    const staffUserId = req.query.collector_staff_id
+      ? Number(req.query.collector_staff_id)
+      : req.query.staff_user_id
+        ? Number(req.query.staff_user_id)
+        : null;
 
     const solarYear = parseSolarYear(req.query.solar_year);
 
@@ -2779,7 +2941,7 @@ router.get(
       (!Number.isInteger(staffUserId) || staffUserId < 1)
     ) {
       return res.status(400).json({
-        error: "Invalid staff user ID.",
+        error: "Invalid staff ID.",
       });
     }
 
@@ -2798,7 +2960,11 @@ router.get(
         WHERE
           (
             $1::integer IS NULL
-            OR fss.staff_user_id = $1
+            OR fss.collector_staff_id = $1
+            OR (
+              fss.collector_staff_id IS NULL
+              AND fss.staff_user_id = $1
+            )
           )
 
           AND
@@ -2825,9 +2991,22 @@ router.get(
 
           fss.staff_user_id,
 
-          u.full_name AS staff_name,
-          u.email AS staff_email,
-          u.role AS staff_role,
+          fss.collector_staff_id,
+
+          COALESCE(
+            s.full_name,
+            u.full_name
+          ) AS staff_name,
+
+          COALESCE(
+            s.email,
+            u.email
+          ) AS staff_email,
+
+          COALESCE(
+            'staff',
+            u.role
+          ) AS staff_role,
 
           fss.solar_year,
           fss.solar_month,
@@ -2852,7 +3031,10 @@ router.get(
 
         FROM finance_staff_settlements fss
 
-        INNER JOIN users u
+        LEFT JOIN staff s
+          ON s.id = fss.collector_staff_id
+
+        LEFT JOIN users u
           ON u.id = fss.staff_user_id
 
         LEFT JOIN users received_by
@@ -2862,7 +3044,11 @@ router.get(
         WHERE
           (
             $1::integer IS NULL
-            OR fss.staff_user_id = $1
+            OR fss.collector_staff_id = $1
+            OR (
+              fss.collector_staff_id IS NULL
+              AND fss.staff_user_id = $1
+            )
           )
 
           AND
@@ -2880,7 +3066,10 @@ router.get(
         ORDER BY
           fss.solar_year DESC,
           fss.solar_month DESC,
-          u.full_name ASC,
+          COALESCE(
+            s.full_name,
+            u.full_name
+          ) ASC,
           fss.id DESC
 
         LIMIT $4
@@ -2893,7 +3082,13 @@ router.get(
       settlements: result.rows.map((row) => ({
         id: Number(row.id),
 
-        staff_user_id: Number(row.staff_user_id),
+        staff_user_id: row.staff_user_id
+          ? Number(row.staff_user_id)
+          : null,
+
+        collector_staff_id: row.collector_staff_id
+          ? Number(row.collector_staff_id)
+          : null,
 
         staff_name: row.staff_name || "Unknown",
 
@@ -2943,162 +3138,667 @@ router.get(
 );
 
 /* ==========================================================================
-   MARK STAFF SETTLEMENT AS RECEIVED
+   LEGACY MONTHLY STAFF RECEIPT ROUTE
+
+   Kept as an explicit gone response so old clients cannot create an
+   aggregate receipt that conflicts with transaction-level handovers.
 ========================================================================== */
 
 router.put(
   "/staff-settlements/:id/receive",
   authRequired,
   requireRoles("admin"),
+  (req, res) => res.status(410).json({
+    error: "Monthly staff receipts are no longer accepted. Select the real payment transactions and use the Staff handover workflow.",
+    code: "LEGACY_STAFF_SETTLEMENT_DISABLED",
+  }),
+);
+
+/* ==========================================================================
+   STAFF CASH HANDOVER / SETTLEMENT
+
+   Settles the CASH a staff member collected on behalf of the academy.
+
+   This is NOT a teacher share.
+
+   Settlement references the original fee_payments rows and never
+   duplicates or modifies them. The unique index on
+   finance_staff_payment_settlements(fee_payment_id) guarantees a
+   payment cannot be settled twice, even across concurrent requests.
+========================================================================== */
+
+router.put(
+  "/staff-transactions/handover",
+  authRequired,
+  requireRoles("admin"),
   asyncH(async (req, res) => {
-    const settlementId = Number(req.params.id);
-
-    if (!Number.isInteger(settlementId) || settlementId < 1) {
-      return res.status(400).json({
-        error: "Invalid staff settlement ID.",
-      });
-    }
-
     const verificationToken = req.body?.verification_token;
 
     if (!verifyFinanceVerificationToken(req, verificationToken)) {
       return res.status(403).json({
         error:
-          "A valid administrator password verification is required before marking a staff settlement as received.",
+          "A valid administrator password verification is required before settling staff-collected cash.",
         code: "FINANCE_PASSWORD_VERIFICATION_REQUIRED",
       });
     }
 
-    const existing = await query(
-      `
-        SELECT
-          fss.*,
+    const collectorStaffId = req.body?.collector_staff_id
+      ? Number(req.body.collector_staff_id)
+      : null;
 
-          u.full_name AS staff_name,
-          u.email AS staff_email,
-          u.role AS staff_role
-
-        FROM finance_staff_settlements fss
-
-        INNER JOIN users u
-          ON u.id = fss.staff_user_id
-
-        WHERE fss.id = $1
-
-        LIMIT 1
-      `,
-      [settlementId],
-    );
-
-    if (!existing.rows.length) {
-      return res.status(404).json({
-        error: "Staff settlement not found.",
+    if (
+      collectorStaffId === null &&
+      req.body?.collector_user_id !== undefined
+    ) {
+      return res.status(400).json({
+        error:
+          "collector_staff_id is required. Staff collectors are identified by their Staff record, not an authentication account.",
+        code: "INVALID_COLLECTOR",
       });
     }
 
-    const current = existing.rows[0];
+    const rawPaymentIds = req.body?.payment_ids;
+    if (!Array.isArray(rawPaymentIds) || rawPaymentIds.length === 0) {
+      return res.status(400).json({
+        error: "At least one payment transaction is required.",
+        code: "INVALID_PAYMENT_IDS",
+      });
+    }
 
-    if (current.status === "received") {
-      return res.json({
-        message: "This staff settlement has already been marked as received.",
+    const paymentIds = rawPaymentIds.map(Number);
+    if (paymentIds.some((id) => !Number.isInteger(id) || id < 1) || new Set(paymentIds).size !== paymentIds.length) {
+      return res.status(400).json({ error: "Payment IDs must be unique positive integers.", code: "INVALID_PAYMENT_IDS" });
+    }
+    if (!Number.isInteger(collectorStaffId) || collectorStaffId < 1) {
+      return res.status(400).json({ error: "A valid staff collector is required.", code: "INVALID_COLLECTOR" });
+    }
 
-        settlement: {
-          id: Number(current.id),
+    const solarYear = parseSolarYear(req.body?.solar_year);
+    const solarMonth = parseSolarMonth(req.body?.solar_month);
 
-          staff_user_id: Number(current.staff_user_id),
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const staffResult = await client.query(
+        "SELECT id, full_name FROM staff WHERE id = $1 AND is_active = TRUE FOR UPDATE",
+        [collectorStaffId],
+      );
+      if (!staffResult.rows.length) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ error: "Staff collector not found or inactive.", code: "COLLECTOR_NOT_FOUND" });
+      }
 
-          staff_name: current.staff_name || "Unknown",
+      const paymentsResult = await client.query(
+        `SELECT fp.id, fp.amount, fp.receipt_number, fp.payment_date,
+                fp.collected_by_staff_id, fp.collected_by_name_snapshot
+         FROM fee_payments fp WHERE fp.id = ANY($1::int[]) FOR UPDATE`,
+        [paymentIds],
+      );
+      if (paymentsResult.rows.length !== paymentIds.length) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ error: "One or more selected payment transactions were not found.", code: "PAYMENT_NOT_FOUND" });
+      }
+      const mismatched = paymentsResult.rows.filter((row) => Number(row.collected_by_staff_id) !== collectorStaffId);
+      if (mismatched.length) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ error: "One or more selected transactions were collected by a different staff member.", code: "COLLECTOR_MISMATCH", mismatched_payment_ids: mismatched.map((row) => Number(row.id)) });
+      }
+      const already = await client.query(
+        "SELECT fee_payment_id FROM finance_staff_payment_settlements WHERE fee_payment_id = ANY($1::int[]) FOR UPDATE",
+        [paymentIds],
+      );
+      if (already.rows.length) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ error: "One or more selected payments have already been handed over. No transactions were changed.", code: "PAYMENT_ALREADY_SETTLED", payment_ids: already.rows.map((row) => Number(row.fee_payment_id)) });
+      }
 
-          solar_year: Number(current.solar_year),
+      const name = staffResult.rows[0].full_name || "Unknown";
+      const values = [];
+      const tuples = paymentsResult.rows.map((payment, index) => {
+        const n = index * 5;
+        values.push(Number(payment.id), collectorStaffId, name, req.user.id, req.user.full_name || "Administrator");
+        return `($${n + 1}, $${n + 2}, NULL, $${n + 3}, 'staff', $${n + 4}, $${n + 5})`;
+      });
+      const inserted = await client.query(
+        `INSERT INTO finance_staff_payment_settlements
+           (fee_payment_id, collector_staff_id, collector_user_id, collector_name_snapshot,
+            collector_role_snapshot, settled_by_user_id, settled_by_name_snapshot)
+         VALUES ${tuples.join(",")}
+         RETURNING id, fee_payment_id, collector_staff_id, collector_name_snapshot,
+                   settled_at, settled_by_user_id, settled_by_name_snapshot`,
+        values,
+      );
+      await client.query("COMMIT");
+      const byId = new Map(paymentsResult.rows.map((row) => [Number(row.id), row]));
+      const settlements = inserted.rows.map((row) => {
+        const payment = byId.get(Number(row.fee_payment_id));
+        return { ...row, id: Number(row.id), fee_payment_id: Number(row.fee_payment_id), amount: roundMoney(payment.amount), receipt_number: payment.receipt_number || null, payment_date: payment.payment_date, payment_solar_date: toSolarDateValue(payment.payment_date) };
+      });
+      return res.json({ message: "Staff-collected cash handed over successfully.", collector_staff_id: collectorStaffId, collector_name: name, solar_year: solarYear, solar_month: solarMonth, month_name: solarMonth ? monthName(solarMonth) : null, settled: settlements, settled_count: settlements.length });
+    } catch (error) {
+      try { await client.query("ROLLBACK"); } catch (_) {}
+      throw error;
+    } finally {
+      client.release();
+    }
+  }),
+);
 
-          solar_month: Number(current.solar_month),
+/* ==========================================================================
+   STAFF TRANSACTION SETTLEMENT STATUS
+========================================================================== */
 
-          expected_amount: roundMoney(current.expected_amount),
+router.get(
+  "/staff-transactions/settlement-status",
+  authRequired,
+  requireRoles("admin"),
+  asyncH(async (req, res) => {
+    const collectorStaffId = req.query.collector_staff_id
+      ? Number(req.query.collector_staff_id)
+      : null;
 
-          status: current.status,
-
-          received_at: current.received_at,
-
-          received_by_user_id: current.received_by_user_id
-            ? Number(current.received_by_user_id)
-            : null,
-        },
+    if (
+      collectorStaffId !== null &&
+      (!Number.isInteger(collectorStaffId) || collectorStaffId < 1)
+    ) {
+      return res.status(400).json({
+        error: "Invalid collector.",
       });
     }
 
     const result = await query(
       `
-        UPDATE finance_staff_settlements
-
-        SET
-          status = 'received',
-          received_at = NOW(),
-          received_by_user_id = $1,
-          updated_at = NOW()
-
-        WHERE id = $2
-
-        RETURNING *
+        SELECT
+          fsps.fee_payment_id,
+          fsps.collector_staff_id,
+          fsps.collector_name_snapshot,
+          fsps.settled_at,
+          fsps.settled_by_user_id,
+          fsps.settled_by_name_snapshot
+        FROM finance_staff_payment_settlements fsps
+        WHERE
+          (
+            $1::integer IS NULL
+            OR fsps.collector_staff_id = $1
+          )
+        ORDER BY
+          fsps.settled_at DESC,
+          fsps.id DESC
       `,
-      [req.user.id, settlementId],
-    );
-
-    const row = result.rows[0];
-
-    const receivedByResult = await query(
-      `
-          SELECT
-            id,
-            full_name,
-            email,
-            role
-
-          FROM users
-
-          WHERE id = $1
-
-          LIMIT 1
-        `,
-      [row.received_by_user_id],
+      [collectorStaffId],
     );
 
     res.json({
-      message: "Staff settlement marked as received successfully.",
-
-      settlement: {
-        id: Number(row.id),
-
-        staff_user_id: Number(row.staff_user_id),
-
-        staff_name: current.staff_name || "Unknown",
-
-        staff_email: current.staff_email || null,
-
-        staff_role: current.staff_role || null,
-
-        solar_year: Number(row.solar_year),
-
-        solar_month: Number(row.solar_month),
-
-        month_name: monthName(Number(row.solar_month)),
-
-        expected_amount: roundMoney(row.expected_amount),
-
-        status: row.status,
-
-        received_at: row.received_at,
-
-        received_at_solar_date: toSolarDateValue(row.received_at),
-
-        received_by_user_id: row.received_by_user_id
-          ? Number(row.received_by_user_id)
+      settlements: result.rows.map((row) => ({
+        payment_id: Number(row.fee_payment_id),
+        collector_staff_id: row.collector_staff_id
+          ? Number(row.collector_staff_id)
           : null,
+        collector_name: row.collector_name_snapshot || null,
+        settled_at: row.settled_at,
+        settled_at_solar_date: toSolarDateValue(row.settled_at),
+        settled_by_user_id: row.settled_by_user_id
+          ? Number(row.settled_by_user_id)
+          : null,
+        settled_by_name: row.settled_by_name_snapshot || null,
+      })),
+    });
+  }),
+);
 
-        received_by: normalizeUser(receivedByResult.rows[0]),
+/* ==========================================================================
+   RECONCILIATION
 
+   Expected money versus money that was actually handed over.
+
+   Both sides come from real collected payments:
+
+     expected   the sum of every real payment the collector took
+     handed over the sum of those same payments once they have been
+                 settled through a handover
+
+   A collector can never hand over money that was never collected,
+   because handovers operate on existing payment IDs.
+
+   Status is derived, never stored as a guess:
+
+     Pending  money collected but nothing handed over yet
+     Matched  handed over exactly what was collected
+     Short    less was handed over than was collected
+     Over     more was handed over than was collected, which happens
+              when a payment is voided or edited after its handover
+========================================================================== */
+
+const RECONCILIATION_STATUSES = ["Pending", "Matched", "Short", "Over"];
+
+function classifyReconciliation(expected, handedOver) {
+  const expectedAmount = Number(expected || 0);
+  const handedOverAmount = Number(handedOver || 0);
+
+  const difference = roundMoney(handedOverAmount - expectedAmount);
+
+  // Sub-cent rounding must not be treated as a real difference.
+  if (Math.abs(difference) < 0.005) {
+    return { status: "Matched", difference: 0 };
+  }
+
+  if (difference > 0) {
+    return { status: "Over", difference };
+  }
+
+  if (handedOverAmount > 0) {
+    return { status: "Short", difference };
+  }
+
+  return { status: "Pending", difference };
+}
+
+/*
+  Reads the real collected payments for the period, grouped by
+  collector, and pairs them with the handovers already recorded.
+*/
+async function buildReconciliationRows({
+  collectorStaffId = null,
+  fromDate = null,
+  toDate = null,
+}) {
+  const result = await query(
+    `
+      SELECT
+        fp.collected_by_staff_id,
+        collector.full_name AS collector_name,
+
+        COALESCE(SUM(fp.amount), 0)::NUMERIC AS expected_amount,
+        COUNT(*)::INTEGER AS payment_count,
+
+        COALESCE(
+          SUM(fp.amount) FILTER (
+            WHERE EXISTS (
+              SELECT 1
+              FROM finance_staff_payment_settlements fsps
+              WHERE fsps.fee_payment_id = fp.id
+            )
+          ),
+          0
+        )::NUMERIC AS handed_over_amount,
+
+        COUNT(*) FILTER (
+          WHERE EXISTS (
+            SELECT 1
+            FROM finance_staff_payment_settlements fsps
+            WHERE fsps.fee_payment_id = fp.id
+          )
+        )::INTEGER AS handed_over_count
+
+      FROM fee_payments fp
+
+      LEFT JOIN staff collector
+        ON collector.id = fp.collected_by_staff_id
+
+      WHERE
+        (
+          $1::integer IS NULL
+          OR fp.collected_by_staff_id = $1
+        )
+
+        AND ($2::date IS NULL OR fp.payment_date >= $2)
+        AND ($3::date IS NULL OR fp.payment_date <= $3)
+
+      GROUP BY
+        fp.collected_by_staff_id,
+        collector.full_name
+
+      ORDER BY
+        collector.full_name ASC NULLS LAST,
+        fp.collected_by_staff_id ASC NULLS LAST
+    `,
+    [collectorStaffId, fromDate, toDate],
+  );
+
+  const rows = result.rows.map((row) => {
+    const { status, difference } = classifyReconciliation(
+      row.expected_amount,
+      row.handed_over_amount,
+    );
+
+    return {
+      collector_staff_id: row.collected_by_staff_id
+        ? Number(row.collected_by_staff_id)
+        : null,
+      collector_name: row.collector_name || "Unassigned collector",
+
+      expected_amount: roundMoney(row.expected_amount),
+      handed_over_amount: roundMoney(row.handed_over_amount),
+      difference,
+
+      payment_count: Number(row.payment_count || 0),
+      handed_over_count: Number(row.handed_over_count || 0),
+      outstanding_count:
+        Number(row.payment_count || 0) - Number(row.handed_over_count || 0),
+
+      status,
+    };
+  });
+
+  const totals = rows.reduce(
+    (accumulator, row) => ({
+      expected_amount: roundMoney(
+        accumulator.expected_amount + row.expected_amount,
+      ),
+      handed_over_amount: roundMoney(
+        accumulator.handed_over_amount + row.handed_over_amount,
+      ),
+      payment_count: accumulator.payment_count + row.payment_count,
+      handed_over_count:
+        accumulator.handed_over_count + row.handed_over_count,
+    }),
+    {
+      expected_amount: 0,
+      handed_over_amount: 0,
+      payment_count: 0,
+      handed_over_count: 0,
+    },
+  );
+
+  const classification = classifyReconciliation(
+    totals.expected_amount,
+    totals.handed_over_amount,
+  );
+
+  return {
+    rows,
+    totals: {
+      ...totals,
+      difference: classification.difference,
+      status: classification.status,
+      outstanding_count:
+        totals.payment_count - totals.handed_over_count,
+    },
+  };
+}
+
+router.get(
+  "/reconciliation",
+  authRequired,
+  requireRoles("admin"),
+  asyncH(async (req, res) => {
+    const collectorStaffId = req.query.collector_staff_id
+      ? Number(req.query.collector_staff_id)
+      : null;
+
+    if (
+      collectorStaffId !== null &&
+      (!Number.isInteger(collectorStaffId) || collectorStaffId < 1)
+    ) {
+      return res.status(400).json({ error: "Invalid collector." });
+    }
+
+    let fromDate = null;
+    let toDate = null;
+
+    try {
+      fromDate = parseOptionalSolarDate(req.query.from_solar_date);
+      toDate = parseOptionalSolarDate(req.query.to_solar_date);
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    if (fromDate && toDate && fromDate > toDate) {
+      return res.status(400).json({
+        error: "From date cannot be after to date.",
+      });
+    }
+
+    const reconciliation = await buildReconciliationRows({
+      collectorStaffId,
+      fromDate,
+      toDate,
+    });
+
+    // Outstanding payments are the real money still to be handed over.
+    const outstanding = await query(
+      `
+        SELECT
+          fp.id AS payment_id,
+          fp.amount,
+          fp.payment_date,
+          fp.receipt_number,
+          collector.full_name AS collector_name,
+          st.full_name AS student_name,
+          st.roll_number AS student_roll_number
+
+        FROM fee_payments fp
+
+        LEFT JOIN staff collector
+          ON collector.id = fp.collected_by_staff_id
+
+        LEFT JOIN fees f
+          ON f.id = fp.fee_id
+
+        LEFT JOIN students st
+          ON st.id = f.student_id
+
+        WHERE
+          NOT EXISTS (
+            SELECT 1
+            FROM finance_staff_payment_settlements fsps
+            WHERE fsps.fee_payment_id = fp.id
+          )
+
+          AND ($1::integer IS NULL OR fp.collected_by_staff_id = $1)
+          AND ($2::date IS NULL OR fp.payment_date >= $2)
+          AND ($3::date IS NULL OR fp.payment_date <= $3)
+
+        ORDER BY fp.payment_date ASC, fp.id ASC
+
+        LIMIT 200
+      `,
+      [collectorStaffId, fromDate, toDate],
+    );
+
+    const history = await query(
+      `
+        SELECT
+          cr.id,
+          cr.collector_staff_id,
+          collector.full_name AS collector_name,
+          cr.from_date,
+          cr.to_date,
+          cr.expected_amount,
+          cr.handed_over_amount,
+          cr.difference,
+          cr.status,
+          cr.payment_count,
+          cr.notes,
+          cr.verification_date,
+          cr.created_at,
+          u.full_name AS verified_by_name
+        FROM cash_reconciliations cr
+
+        LEFT JOIN staff collector
+          ON collector.id = cr.collector_staff_id
+
+        LEFT JOIN users u
+          ON u.id = cr.verified_by_user_id
+
+        ORDER BY cr.created_at DESC
+        LIMIT 50
+      `,
+    );
+
+    res.json({
+      period: {
+        from_date: fromDate,
+        to_date: toDate,
+        collector_staff_id: collectorStaffId,
+      },
+
+      totals: reconciliation.totals,
+
+      collectors: reconciliation.rows,
+
+      outstanding_payments: outstanding.rows.map((row) => ({
+        payment_id: Number(row.payment_id),
+        amount: roundMoney(row.amount),
+        payment_date: row.payment_date,
+        receipt_number: row.receipt_number || null,
+        collector_name: row.collector_name || "Unassigned collector",
+        student_name: row.student_name || null,
+        student_roll_number: row.student_roll_number || null,
+      })),
+
+      statuses: RECONCILIATION_STATUSES,
+
+      history: history.rows.map((row) => ({
+        id: Number(row.id),
+        collector_staff_id: row.collector_staff_id
+          ? Number(row.collector_staff_id)
+          : null,
+        collector_name: row.collector_name || "Unassigned collector",
+        from_date: row.from_date,
+        to_date: row.to_date,
+        expected_amount: roundMoney(row.expected_amount),
+        handed_over_amount: roundMoney(row.handed_over_amount),
+        difference: roundMoney(row.difference),
+        status: row.status,
+        payment_count: Number(row.payment_count || 0),
+        notes: row.notes || null,
+        verification_date: row.verification_date,
+        verified_by_name: row.verified_by_name || null,
         created_at: row.created_at,
+      })),
+    });
+  }),
+);
 
-        updated_at: row.updated_at,
+/*
+  Records that an administrator verified a reconciliation. This only
+  stores the confirmation; the amounts are always recomputed from the
+  real payments at read time, so a stale record can never be
+  mistaken for the current truth.
+*/
+router.post(
+  "/reconciliation/verify",
+  authRequired,
+  requireRoles("admin"),
+  asyncH(async (req, res) => {
+    const verificationToken = req.body?.verification_token;
+
+    if (!verifyFinanceVerificationToken(req, verificationToken)) {
+      return res.status(403).json({
+        error:
+          "A valid administrator password verification is required before confirming a reconciliation.",
+        code: "FINANCE_PASSWORD_VERIFICATION_REQUIRED",
+      });
+    }
+
+    const collectorStaffId = req.body?.collector_staff_id
+      ? Number(req.body.collector_staff_id)
+      : null;
+
+    if (
+      collectorStaffId !== null &&
+      (!Number.isInteger(collectorStaffId) || collectorStaffId < 1)
+    ) {
+      return res.status(400).json({
+        error: "Invalid collector.",
+        code: "INVALID_COLLECTOR",
+      });
+    }
+
+    let fromDate = null;
+    let toDate = null;
+
+    try {
+      fromDate = parseOptionalSolarDate(req.body?.from_solar_date);
+      toDate = parseOptionalSolarDate(req.body?.to_solar_date);
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    if (!fromDate || !toDate) {
+      return res.status(400).json({
+        error: "A verified reconciliation needs a from and to date.",
+        code: "PERIOD_REQUIRED",
+      });
+    }
+
+    if (fromDate > toDate) {
+      return res.status(400).json({
+        error: "From date cannot be after to date.",
+      });
+    }
+
+    const reconciliation = await buildReconciliationRows({
+      collectorStaffId,
+      fromDate,
+      toDate,
+    });
+
+    const totals = reconciliation.totals;
+
+    const result = await query(
+      `
+        INSERT INTO cash_reconciliations (
+          collector_user_id,
+          collector_staff_id,
+          from_date,
+          to_date,
+          expected_amount,
+          handed_over_amount,
+          difference,
+          status,
+          payment_count,
+          verification_date,
+          verified_by_user_id,
+          notes,
+          created_by_user_id
+        )
+        VALUES (
+          NULL,
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7,
+          $8,
+          NOW(),
+          $9,
+          $10,
+          $9
+        )
+        RETURNING *
+      `,
+      [
+        collectorStaffId,
+        fromDate,
+        toDate,
+        totals.expected_amount,
+        totals.handed_over_amount,
+        totals.difference,
+        totals.status.toLowerCase(),
+        totals.payment_count,
+        req.user.id,
+        cleanOptionalText(req.body?.notes),
+      ],
+    );
+
+    res.status(201).json({
+      ok: true,
+
+      reconciliation: {
+        id: Number(result.rows[0].id),
+        collector_staff_id: collectorStaffId,
+        from_date: fromDate,
+        to_date: toDate,
+        expected_amount: totals.expected_amount,
+        handed_over_amount: totals.handed_over_amount,
+        difference: totals.difference,
+        status: totals.status,
+        payment_count: totals.payment_count,
+        verification_date: result.rows[0].verification_date,
       },
     });
   }),
@@ -3113,11 +3813,10 @@ router.get(
   authRequired,
   requireRoles("admin"),
   asyncH(async (req, res) => {
-    const userId = req.query.user_id ? Number(req.query.user_id) : null;
-
-    if (userId !== null && (!Number.isInteger(userId) || userId < 1)) {
+    const staffId = req.query.staff_id ? Number(req.query.staff_id) : null;
+    if (staffId !== null && (!Number.isInteger(staffId) || staffId < 1)) {
       return res.status(400).json({
-        error: "Invalid user ID.",
+        error: "Invalid staff ID.",
       });
     }
 
@@ -3130,14 +3829,10 @@ router.get(
     const countResult = await query(
       `
         SELECT COUNT(*)::int AS total
-
-        FROM fee_payment_audit a
-
-        WHERE
-          $1::integer IS NULL
-          OR a.performed_by = $1
+        FROM fee_payments fp
+        WHERE $1::integer IS NULL OR fp.collected_by_staff_id = $1
       `,
-      [userId],
+      [staffId],
     );
 
     const totalItems = Number(countResult.rows[0]?.total || 0);
@@ -3145,31 +3840,25 @@ router.get(
     const result = await query(
       `
         SELECT
-          a.id,
-          a.fee_payment_id,
-          a.receipt_number,
-          a.action,
-
-          a.performed_by,
-          a.performed_by_name,
-          a.performed_by_role,
-          a.performed_at,
-
-          a.old_data,
-          a.new_data,
-
+          fp.id,
+          fp.id AS fee_payment_id,
+          fp.receipt_number,
+          'payment_collected' AS action,
+          fp.collected_by_staff_id,
+          fp.collected_by_name_snapshot AS performed_by_name,
+          'staff' AS performed_by_role,
+          fp.created_at AS performed_at,
           fp.amount,
           fp.payment_date,
+          fp.comment,
+          collector.full_name AS current_collector_name,
 
           s.id AS student_id,
           s.full_name AS student_name,
           s.roll_number
 
-        FROM fee_payment_audit a
-
-        LEFT JOIN fee_payments fp
-          ON fp.id = a.fee_payment_id
-
+        FROM fee_payments fp
+        LEFT JOIN staff collector ON collector.id = fp.collected_by_staff_id
         LEFT JOIN fees f
           ON f.id = fp.fee_id
 
@@ -3178,23 +3867,24 @@ router.get(
 
         WHERE
           $1::integer IS NULL
-          OR a.performed_by = $1
+          OR fp.collected_by_staff_id = $1
 
         ORDER BY
-          a.performed_at DESC,
-          a.id DESC
+          fp.created_at DESC,
+          fp.id DESC
 
         LIMIT $2
         OFFSET $3
       `,
-      [userId, pagination.limit, pagination.offset],
+      [staffId, pagination.limit, pagination.offset],
     );
 
     res.json({
-      user_id: userId,
+      staff_id: staffId,
 
       activity: result.rows.map((row) => ({
         id: Number(row.id),
+        payment_id: Number(row.fee_payment_id),
 
         fee_payment_id: row.fee_payment_id ? Number(row.fee_payment_id) : null,
 
@@ -3204,11 +3894,12 @@ router.get(
 
         performed_by: row.performed_by ? Number(row.performed_by) : null,
 
-        performed_by_name: row.performed_by_name || null,
+        performed_by_name: row.current_collector_name || row.performed_by_name || null,
 
         performed_by_role: row.performed_by_role || null,
 
         performed_at: row.performed_at,
+        performed_at_solar_date: toSolarDateValue(row.performed_at),
 
         amount: row.amount !== null ? roundMoney(row.amount) : null,
 
@@ -3222,9 +3913,7 @@ router.get(
 
         roll_number: row.roll_number || null,
 
-        old_data: row.old_data || null,
-
-        new_data: row.new_data || null,
+        comment: row.comment || null,
       })),
 
       pagination: buildPagination(

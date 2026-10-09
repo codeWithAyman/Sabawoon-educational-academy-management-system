@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import api from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../components/Toast";
+import SolarDateField, {
+  gregorianToSolarInput,
+  toIsoDate,
+} from "../components/SolarDateField";
 import {
   Plus,
   Pencil,
@@ -17,9 +21,20 @@ import {
   Layers3,
   RefreshCw,
   Check,
+  AlertTriangle,
 } from "lucide-react";
 
 const GOLD = "#f2bd19";
+
+/* =========================================================
+   DEADLINE RULES
+
+   The deadline itself always comes from the backend. Only the
+   "how close are we" comparison lives here, because it depends
+   on the current date rather than on stored data.
+============================================================= */
+
+const DEADLINE_WARNING_DAYS = 7;
 
 /* =========================================================
    HELPERS
@@ -42,12 +57,74 @@ function formatTime(value) {
   return `${hour}:${minute} ${suffix}`;
 }
 
+function getKabulToday() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kabul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+
+  const result = {};
+
+  for (const part of parts) {
+    if (part.type !== "literal") {
+      result[part.type] = part.value;
+    }
+  }
+
+  return `${result.year}-${result.month}-${result.day}`;
+}
+
+/* =========================================================
+   DEADLINE STATUS
+============================================================= */
+
+function getDeadlineState(deadline) {
+  const raw = toIsoDate(deadline);
+
+  if (!raw) {
+    return { status: "none", label: null, daysLeft: null };
+  }
+
+  const today = getKabulToday();
+
+  const daysLeft = Math.round(
+    (Date.parse(`${raw}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) /
+      86400000,
+  );
+
+  if (daysLeft < 0) {
+    return { status: "reached", daysLeft, label: "Deadline reached" };
+  }
+
+  if (daysLeft === 0) {
+    return { status: "today", daysLeft, label: "Deadline is today" };
+  }
+
+  if (daysLeft <= DEADLINE_WARNING_DAYS) {
+    return {
+      status: "warning",
+      daysLeft,
+      label: `${daysLeft} ${daysLeft === 1 ? "day" : "days"} left`,
+    };
+  }
+
+  return {
+    status: "upcoming",
+    daysLeft,
+    label: `${daysLeft} days left`,
+  };
+}
+
 function emptySlotForm() {
   return {
     subject_id: "",
     teacher_id: "",
     start_time: "14:00",
     end_time: "15:00",
+    deadline: "",
+    class_type_id: "",
     book_ids: [],
   };
 }
@@ -140,6 +217,7 @@ export default function Classes() {
   const [classes, setClasses] = useState([]);
   const [subjects, setSubjects] = useState([]);
   const [teachers, setTeachers] = useState([]);
+  const [classTypes, setClassTypes] = useState([]);
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -224,6 +302,17 @@ export default function Classes() {
     setSubjects(Array.isArray(data) ? data : []);
   }
 
+  /*
+    IMPORTANT:
+    Class types come directly from the backend so the list is
+    never hardcoded here. Administrators can add more later.
+  */
+  async function loadClassTypes() {
+    const { data } = await api.get("/classes/types");
+
+    setClassTypes(Array.isArray(data) ? data : []);
+  }
+
   async function loadTeachers() {
     if (!isAdmin) {
       setTeachers([]);
@@ -248,7 +337,12 @@ export default function Classes() {
     }
 
     try {
-      await Promise.all([loadClasses(), loadSubjects(), loadTeachers()]);
+      await Promise.all([
+        loadClasses(),
+        loadSubjects(),
+        loadTeachers(),
+        loadClassTypes(),
+      ]);
     } catch (error) {
       console.error("Failed to load classes and courses:", error);
 
@@ -359,6 +453,14 @@ export default function Classes() {
 
       end_time: String(currentSlot.end_time || "15:00").slice(0, 5),
 
+      deadline: toIsoDate(currentSlot.deadline),
+
+      class_type_id:
+        currentSlot.class_type_id !== null &&
+        currentSlot.class_type_id !== undefined
+          ? String(currentSlot.class_type_id)
+          : "",
+
       book_ids: getSlotBookIds(currentSlot),
     });
 
@@ -414,6 +516,13 @@ export default function Classes() {
       return;
     }
 
+    const deadline = slotForm.deadline ? String(slotForm.deadline) : "";
+
+    if (deadline && !/^\d{4}-\d{2}-\d{2}$/.test(deadline)) {
+      toast.error("Please enter a valid Solar Hijri deadline.");
+      return;
+    }
+
     setSavingSlot(true);
 
     const payload = {
@@ -421,6 +530,10 @@ export default function Classes() {
       teacher_id: teacherId,
       start_time: slotForm.start_time,
       end_time: slotForm.end_time,
+      deadline: deadline || null,
+      class_type_id: slotForm.class_type_id
+        ? Number(slotForm.class_type_id)
+        : null,
       book_ids: slotForm.book_ids.map(Number),
     };
 
@@ -1029,6 +1142,7 @@ export default function Classes() {
           setSlotForm={setSlotForm}
           subjects={subjects}
           activeTeachers={activeTeachers}
+          classTypes={classTypes}
           selectedSubjectBooks={selectedSubjectBooks}
           savingSlot={savingSlot}
           onClose={closeSlotModal}
@@ -1126,6 +1240,63 @@ function SectionHeading({ title, description, count, icon: Icon, action }) {
    CLASS TABLE
 ========================================================= */
 
+/* =========================================================
+   DEADLINE BADGE
+============================================================= */
+
+function DeadlineBadge({ deadline }) {
+  const isoDate = toIsoDate(deadline);
+
+  const { status, label } = getDeadlineState(isoDate);
+
+  if (status === "none") {
+    return <span className="text-[9px] text-slate-600">-</span>;
+  }
+
+  const solarDate = gregorianToSolarInput(isoDate);
+
+  const styles = {
+    reached: "bg-red-500/10 border-red-500/35 text-red-300",
+    today: "bg-amber-400/12 border-amber-400/40 text-amber-300",
+    warning: "bg-amber-400/10 border-amber-400/30 text-amber-300",
+    upcoming: "bg-white/[0.025] border-white/[0.07] text-slate-400",
+  }[status];
+
+  const Icon = status === "reached" || status === "today" ? AlertTriangle : null;
+
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <span
+        className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[8px] font-medium whitespace-nowrap ${styles}`}
+      >
+        {Icon && <Icon className="w-[10px] h-[10px] shrink-0" />}
+
+        {label}
+      </span>
+
+      <span className="text-[8px] text-slate-600">{solarDate}</span>
+    </div>
+  );
+}
+
+/* =========================================================
+   CLASS TYPE BADGE
+============================================================= */
+
+function ClassTypeBadge({ slot }) {
+  const name = slot.class_type;
+
+  if (!name) {
+    return <span className="text-[9px] text-slate-600">-</span>;
+  }
+
+  return (
+    <span className="inline-flex items-center px-2 py-1 rounded-md border border-white/[0.07] bg-white/[0.025] text-[8px] font-medium text-slate-400 whitespace-nowrap">
+      {name}
+    </span>
+  );
+}
+
 function ClassTable({
   classes,
   selectedClass,
@@ -1145,6 +1316,8 @@ function ClassTable({
             <TableHeader>Time</TableHeader>
             <TableHeader>Sections / Levels</TableHeader>
             <TableHeader>Students</TableHeader>
+            <TableHeader>Class Type</TableHeader>
+            <TableHeader>Deadline</TableHeader>
             <TableHeader>Actions</TableHeader>
           </tr>
         </thead>
@@ -1230,6 +1403,14 @@ function ClassTable({
 
                     <span>{slot.student_count ?? 0}</span>
                   </div>
+                </TableCell>
+
+                <TableCell>
+                  <ClassTypeBadge slot={slot} />
+                </TableCell>
+
+                <TableCell>
+                  <DeadlineBadge deadline={slot.deadline} />
                 </TableCell>
 
                 <TableCell
@@ -1463,9 +1644,20 @@ function SelectedClassPanel({
                     <div className="flex items-center gap-2.5">
                       <Avatar icon={UserRound} />
 
-                      <span className="text-[10px] font-medium text-slate-300">
-                        {student.full_name || student.name || "Unnamed student"}
-                      </span>
+                      <div className="min-w-0">
+                        <span className="block text-[10px] font-medium text-slate-300 truncate">
+                          {student.full_name ||
+                            student.name ||
+                            student.roll_number ||
+                            "Unnamed student"}
+                        </span>
+
+                        {student.full_name && student.roll_number && (
+                          <span className="block text-[8px] text-slate-600">
+                            {student.roll_number}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </TableCell>
 
@@ -1494,6 +1686,7 @@ function ClassModal({
   setSlotForm,
   subjects,
   activeTeachers,
+  classTypes,
   selectedSubjectBooks,
   savingSlot,
   onClose,
@@ -1574,6 +1767,53 @@ function ClassModal({
                 }))}
                 placeholder="Select teacher"
               />
+            </div>
+
+            {/* CLASS TYPE */}
+
+            <div className="mt-5">
+              <SelectField
+                label="Class Type"
+                value={slotForm.class_type_id}
+                onChange={(event) => {
+                  setSlotForm((current) => ({
+                    ...current,
+                    class_type_id: event.target.value,
+                  }));
+                }}
+                options={classTypes.map((classType) => ({
+                  value: classType.id,
+                  label: classType.name,
+                }))}
+                placeholder="No class type"
+              />
+
+              <p className="mt-2 text-[8px] text-slate-600">
+                Who this class is for, such as Male, Female, Kids or Mixed.
+              </p>
+            </div>
+
+            {/* DEADLINE — SOLAR HIJRI */}
+
+            <div className="mt-5">
+              <div className="max-w-[280px]">
+                <SolarDateField
+                  label="Deadline"
+                  optional
+                  value={slotForm.deadline}
+                  onChange={(value) =>
+                    setSlotForm((current) => ({
+                      ...current,
+                      deadline: value,
+                    }))
+                  }
+                />
+              </div>
+
+              <p className="mt-2 text-[8px] text-slate-600">
+                Leave empty if this class has no deadline. It turns yellow
+                within {DEADLINE_WARNING_DAYS} days and red once it has passed.
+              </p>
             </div>
 
             {/* SECTIONS / LEVELS */}

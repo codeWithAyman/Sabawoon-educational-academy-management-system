@@ -12,7 +12,30 @@ const router = express.Router();
 
 const attendanceRoles = requireRoles("admin", "attendance");
 
-const VALID_STATUSES = ["present", "absent"];
+const VALID_STATUSES = ["present", "absent", "leave"];
+
+const MAX_REMARK_LENGTH = 500;
+
+/*
+  Remarks explain why a student was marked as on leave.
+
+  They are optional on every status, but only leave days are
+  expected to carry a reason. The comment is trimmed and stored
+  as NULL when empty so the register never keeps blank text.
+*/
+function normalizeRemark(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  const text = String(value).trim();
+
+  if (!text) {
+    return null;
+  }
+
+  return text.slice(0, MAX_REMARK_LENGTH);
+}
 
 const SOLAR_MONTH_NAMES = {
   1: "حمل",
@@ -812,6 +835,7 @@ router.get(
           a.student_id,
           a.date::text AS date,
           a.status,
+          a.remarks,
           a.marked_by,
           u.full_name AS marked_by_name
 
@@ -845,6 +869,7 @@ router.get(
       attendanceByStudentAndDay.set(key, {
         id: row.id,
         status: row.status,
+        remarks: row.remarks ?? null,
         marked_by: row.marked_by,
         marked_by_name: row.marked_by_name,
       });
@@ -869,12 +894,14 @@ router.get(
         attendance[monthDay.day] = record
           ? {
               status: record.status,
+              remarks: record.remarks ?? null,
               attendance_id: record.id,
               marked_by: record.marked_by,
               marked_by_name: record.marked_by_name,
             }
           : {
               status: null,
+              remarks: null,
               attendance_id: null,
               marked_by: null,
               marked_by_name: null,
@@ -1020,7 +1047,7 @@ router.post(
 
       if (status !== null && !VALID_STATUSES.includes(status)) {
         return res.status(400).json({
-          error: "Attendance status must be present, absent, or null",
+          error: "Attendance status must be present, absent, leave, or null",
         });
       }
 
@@ -1038,12 +1065,13 @@ router.post(
       const day = Number(record.day);
       const status = record.status;
 
-      const key = `${studentId}:${day}`;
-
-      normalizedRecords.set(key, {
+      const key = `${studentId}:${day}`;normalizedRecords.set(key, {
         studentId,
+
         day,
         status,
+
+        remark: normalizeRemark(record.remarks ?? record.remark),
       });
     }
 
@@ -1065,6 +1093,7 @@ router.post(
         studentId: record.studentId,
         day: record.day,
         status: record.status,
+        remark: record.remark,
         gregorianDate: normalizeDateString(parsed.gregorianDate),
       });
     }
@@ -1115,8 +1144,8 @@ router.post(
               $2,
               $3::date,
               $4,
-              NULL,
-              $5
+              $5,
+              $6
             )
 
             ON CONFLICT (
@@ -1127,6 +1156,7 @@ router.post(
 
             DO UPDATE SET
               status = EXCLUDED.status,
+              remarks = EXCLUDED.remarks,
               marked_by = EXCLUDED.marked_by
           `,
           [
@@ -1134,6 +1164,7 @@ router.post(
             classSlotId,
             record.gregorianDate,
             record.status,
+            record.remark ?? null,
             req.user.id,
           ],
         );
@@ -1246,7 +1277,7 @@ router.post(
 
       if (!VALID_STATUSES.includes(record.status)) {
         return res.status(400).json({
-          error: "Attendance status must be present or absent",
+          error: "Attendance status must be present, absent, or leave",
         });
       }
 
@@ -1352,7 +1383,7 @@ router.post(
 
     if (!VALID_STATUSES.includes(status)) {
       return res.status(400).json({
-        error: "Attendance status must be present or absent",
+        error: "Attendance status must be present, absent, or leave",
       });
     }
 
@@ -1461,7 +1492,7 @@ router.put(
 
     if (!VALID_STATUSES.includes(status)) {
       return res.status(400).json({
-        error: "Attendance status must be present or absent",
+        error: "Attendance status must be present, absent, or leave",
       });
     }
 
