@@ -19,6 +19,7 @@ import {
   Warehouse,
   CloudDownload,
   CloudUpload,
+  ShoppingCart,
 } from "lucide-react";
 
 import api from "../lib/api";
@@ -437,6 +438,140 @@ function RemoveModal({ item, onClose, onConfirm, removing }) {
           Remove
         </button>
       </div>
+    </Modal>    );
+}
+
+function SellModal({ item, onClose, onConfirm }) {
+  const toast = useToast();
+  const [form, setForm] = useState(() => ({
+    quantity: "1",
+    selling_price: String(item?.selling_price || 0),
+  }));
+
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const upd = (field) => (value) => setForm((current) => ({ ...current, [field]: value }));
+
+  const maxStock = Number(item?.current_stock || 0);
+  const unitPrice = Number(form.selling_price || item?.selling_price || 0);
+
+  const totalAmount = useMemo(() => Number(form.quantity || 0) * unitPrice, [form.quantity, unitPrice]);
+
+  async function submit() {
+    if (!form.quantity.trim()) {
+      setError("Quantity is required.");
+      return;
+    }
+
+    const quantity = Number(form.quantity);
+
+    if (!Number.isInteger(quantity) || quantity < 1) {
+      setError("Quantity must be a positive whole number.");
+      return;
+    }
+
+    if (quantity > maxStock) {
+      setError(`Insufficient stock. Available: ${maxStock}`);
+      return;
+    }
+
+    const sellingPrice = Number(form.selling_price || 0);
+    if (sellingPrice < 0 || !Number.isFinite(sellingPrice)) {
+      setError("Selling price must be a valid non-negative number.");
+      return;
+    }
+
+    setError("");
+    setSaving(true);
+
+    try {
+      await api.post(
+        `/inventory/items/${item.id}/sell`,
+        {
+          quantity,
+          selling_price: sellingPrice,
+        }
+      );
+
+      toast.success("Sale recorded successfully.");
+      onClose();
+      onConfirm();
+    } catch (err) {
+      toast.error(getApiError(err, "Sale failed."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal
+      title="Sell Item"
+      subtitle={`Sell ${item.name}`}
+      onClose={onClose}
+    >
+      <p className="text-[12px] text-slate-300">
+        Sell quantity from current stock of {formatNumber(maxStock)} {item.name}.
+      </p>
+
+      <div className="mt-2 rounded-lg border border-white/[0.06] bg-[#0b0d10] p-3">
+        <div className="flex justify-between text-[11px]">
+          <span className="text-gray-500">Total Amount</span>
+          <span className="font-semibold text-slate-200">
+            {formatMoney(totalAmount)} AFN
+          </span>
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-2">
+        <label className="text-[11px] text-slate-400">Quantity</label>
+        <input
+          type="number"
+          min="1"
+          max={maxStock}
+          value={form.quantity}
+          onChange={upd("quantity")}
+          className="w-full rounded-lg border border-white/[0.1] bg-[#0d1013] px-3 py-2 text-[11px] focus:border-[#f2bd19] focus:outline-none"
+        />
+
+        <label className="text-[11px] text-slate-400">Selling price / unit</label>
+        <input
+          type="number"
+          min="0"
+          value={form.selling_price}
+          onChange={upd("selling_price")}
+          className="w-full rounded-lg border border-white/[0.1] bg-[#0d1013] px-3 py-2 text-[11px] focus:border-[#f2bd19] focus:outline-none"
+        />
+      </div>
+
+      {error && (
+        <p className="mt-2 text-[11px] text-red-400">{error}</p>
+      )}
+
+      <div className="mt-5 flex items-center justify-end gap-2 border-t border-white/[0.06] pt-4">
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-lg border border-white/10 px-3.5 py-2 text-[11px] font-medium text-slate-300 transition hover:bg-white/5"
+        >
+          Cancel
+        </button>
+
+        <button
+          type="button"
+          onClick={submit}
+          disabled={saving}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-[#f2bd19] px-3.5 py-2 text-[11px] font-semibold text-black transition hover:bg-[#e2a800] disabled:opacity-50"
+        >
+          {saving ? (
+            <Loader2 size={13} className="animate-spin" />
+          ) : (
+            <span className="inline-flex items-center gap-1">
+              Sell
+            </span>
+          )}
+        </button>
+      </div>
     </Modal>
   );
 }
@@ -463,6 +598,8 @@ export default function FinanceBooksMaterials() {
   const [detailModal, setDetailModal] = useState(null);
   const [removeTarget, setRemoveTarget] = useState(null);
   const [removing, setRemoving] = useState(false);
+  const [sellTarget, setSellTarget] = useState(null);
+  const [selling, setSelling] = useState(false);
 
   const load = useCallback(async () => {
     setError("");
@@ -527,6 +664,10 @@ export default function FinanceBooksMaterials() {
     } finally {
       setRemoving(false);
     }
+  }
+
+  async function confirmSell() {
+    await load();
   }
 
   const afterSave = useCallback(async () => {
@@ -721,6 +862,15 @@ export default function FinanceBooksMaterials() {
 
                     <button
                       type="button"
+                      onClick={() => setSellTarget(item)}
+                      className="rounded-md p-1.5 text-gray-600 transition hover:bg-white/5 hover:text-gray-300"
+                      aria-label="Sell"
+                    >
+                      <ShoppingCart size={13} />
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={() => setRemoveTarget(item)}
                       className="rounded-md p-1.5 text-gray-600 transition hover:bg-red-400/10 hover:text-red-400"
                       aria-label="Remove"
@@ -751,6 +901,14 @@ export default function FinanceBooksMaterials() {
           removing={removing}
           onClose={() => setRemoveTarget(null)}
           onConfirm={confirmRemove}
+        />
+      )}
+
+      {sellTarget && (
+        <SellModal
+          item={sellTarget}
+          onClose={() => setSellTarget(null)}
+          onConfirm={confirmSell}
         />
       )}
     </div>

@@ -1048,6 +1048,18 @@ router.get(
         }
       }
 
+      /*
+        The full teacher share earned from this row's allocations, before the
+        already-settled portion is removed further down. This is what the
+        Student payment status table reports as the amount allocated to the
+        teacher's share.
+      */
+      const allocatedTeacherShare = roundMoney(row.teacher_share_amount);
+
+      const allocatedAllocationIds = Array.isArray(row.allocation_ids)
+        ? row.allocation_ids.map(Number)
+        : [];
+
       return {
         student_id: Number(row.student_id),
         student_name: row.student_name || "Unknown",
@@ -1092,11 +1104,18 @@ router.get(
 
         payment_count: Number(row.payment_count || 0),
 
-        teacher_share_amount: roundMoney(row.teacher_share_amount),
+        teacher_share_amount: allocatedTeacherShare,
 
-        allocation_ids: Array.isArray(row.allocation_ids)
-          ? row.allocation_ids.map(Number)
-          : [],
+        allocation_ids: allocatedAllocationIds,
+
+        /*
+          Full allocation picture. These are not overwritten by the pending
+          settlement pass below, so the client can tell an unallocated payment
+          apart from an allocation that has already been settled.
+        */
+        allocated_teacher_share_amount: allocatedTeacherShare,
+
+        allocated_allocation_ids: allocatedAllocationIds,
 
         last_payment_date: row.last_payment_date || null,
 
@@ -1356,9 +1375,29 @@ router.get(
         .map((allocation) => Number(allocation.allocation_id)),
     );
 
+    /*
+      Amount already paid for this month that is not attached to any single
+      allocation. A settlement that was marked paid before payout history
+      existed carries its whole expected_amount; once payments are recorded,
+      expected_amount is the running total paid, so the unattributed part is
+      that total minus the payout rows. Without this subtraction the
+      pre-history portion would look unpaid again as soon as the first top-up
+      payment is recorded, and the Admin would be offered money the teacher
+      has already received.
+    */
+    const historyPaidForMonth = roundMoney(
+      payoutHistoryResult.rows.reduce(
+        (sum, payment) => sum + Number(payment.amount || 0),
+        0,
+      ),
+    );
+
     let pendingCredit =
-      payoutHistoryResult.rows.length === 0 && settlement.status === "paid"
-        ? roundMoney(settlement.expected_amount)
+      settlement.status === "paid"
+        ? Math.max(
+            roundMoney(Number(settlement.expected_amount) - historyPaidForMonth),
+            0,
+          )
         : 0;
 
     const pendingShareByAllocation = new Map();
@@ -1402,6 +1441,19 @@ router.get(
       );
 
       student.allocation_ids = pendingAllocationIds;
+
+      student.pending_teacher_share_amount = student.teacher_share_amount;
+
+      student.pending_allocation_ids = pendingAllocationIds;
+
+      student.settled_teacher_share_amount = Math.max(
+        roundMoney(
+          student.allocated_teacher_share_amount - student.teacher_share_amount,
+        ),
+        0,
+      );
+
+      student.has_pending_share = student.teacher_share_amount > 0;
     }
 
     let paidBy = null;
@@ -1800,11 +1852,13 @@ router.put(
       }
       const current = settlementResult.rows[0];
 
-      // Prevent paying an already-paid settlement
-      if (current.status === "paid") {
-        await client.query("ROLLBACK");
-        return res.status(409).json({ error: "This salary has already been paid.", code: "TEACHER_SETTLEMENT_ALREADY_PAID" });
-      }
+      /*
+        A settlement can be topped up over several payments: status is set to
+        "paid" as soon as any part of the teacher share is paid, so the status
+        alone must never block a further payment. What actually blocks a
+        payment is having no unpaid share left, which is evaluated below from
+        the payout history and the current allocations.
+      */
 
       const allocations = await client.query(
         `SELECT fpa.id AS allocation_id, fp.id AS payment_id, fp.created_at AS payment_created_at,
@@ -1845,10 +1899,22 @@ router.put(
         share_amount: roundMoney(row.share_amount),
       }));
       const priorHistory = await client.query(
-        `SELECT share_calculation_snapshot
+        `SELECT amount, share_calculation_snapshot
          FROM finance_teacher_settlement_payments
          WHERE teacher_settlement_id = $1`,
         [settlementId],
+      );
+
+      /*
+        Everything already paid for this teacher/month: the sum of the real
+        payout transactions plus the legacy case of a settlement that was
+        marked paid before payout history existed.
+      */
+      const historyPaid = roundMoney(
+        priorHistory.rows.reduce(
+          (sum, row) => sum + Number(row.amount || 0),
+          0,
+        ),
       );
       const paidAllocationIds = new Set(
         priorHistory.rows.flatMap((row) => row.share_calculation_snapshot?.allocations || [])
@@ -1856,8 +1922,14 @@ router.put(
       );
       const unpaidShareRows = shareRows.filter((row) => !paidAllocationIds.has(row.allocation_id));
       const currentEarned = roundMoney(unpaidShareRows.reduce((sum, row) => sum + row.share_amount, 0));
-      const previouslyPaid = priorHistory.rows.length === 0 && current.status === "paid"
-        ? roundMoney(current.expected_amount)
+      /*
+        Same rule as the teacher-monthly overview: expected_amount is the
+        running total paid for a settled month, so the part not covered by
+        payout rows (payments recorded before payout history existed) is the
+        credit that must be applied before anything is paid again.
+      */
+      const previouslyPaid = current.status === "paid"
+        ? Math.max(roundMoney(Number(current.expected_amount) - historyPaid), 0)
         : 0;
       let credit = previouslyPaid;
       const payoutAllocations = [];
@@ -1902,15 +1974,17 @@ router.put(
          RETURNING id, amount, paid_at`,
         [settlementId, payoutAmount, JSON.stringify({ teacher_id: Number(current.teacher_id), solar_year: Number(current.solar_year), solar_month: Number(current.solar_month), calculation_total: currentEarned, previously_paid_credit: previouslyPaid, allocations: payableAllocations }), req.user.id, req.user.full_name || "Administrator"],
       );
-      const newCumulativePaid = roundMoney(previouslyPaid + payoutAmount);
+      const newCumulativePaid = roundMoney(
+        previouslyPaid + historyPaid + payoutAmount,
+      );
       const updated = await client.query(
-        `UPDATE finance_teacher_settlements
+        `UPDATE finance_teacher_settlements fts
          SET status = 'paid', expected_amount = $1,
              paid_at = COALESCE(fts.paid_at, NOW()),
              paid_by_user_id = COALESCE(fts.paid_by_user_id, $2),
              updated_at = NOW()
-         WHERE id = $3
-         RETURNING *`,
+         WHERE fts.id = $3
+         RETURNING fts.*`,
         [newCumulativePaid, req.user.id, settlementId],
       );
       await client.query("COMMIT");

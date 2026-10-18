@@ -738,9 +738,11 @@ export default function Finance() {
 
       const list = Array.isArray(data)
         ? data
-        : Array.isArray(data?.history)
-          ? data.history
-          : [];
+        : Array.isArray(data?.months)
+          ? data.months
+          : Array.isArray(data?.history)
+            ? data.history
+            : [];
 
       setTeacherHistory(list);
     } catch (error) {
@@ -1188,29 +1190,20 @@ export default function Finance() {
      TEACHER STUDENTS
   ========================================================================== */
 
+  /*
+   * Every enrolled student of the selected teacher for the selected Solar
+   * month is shown here, including unpaid and partially paid students.
+   * Deduplicate by enrollment so a student joined to several payment rows
+   * never appears twice.
+   */
   const teacherStudents = useMemo(() => {
     const list = Array.isArray(teacherMonthly?.students)
       ? teacherMonthly.students
       : [];
 
-    /*
-     * The queue contains only the teacher share
-     * that is still awaiting Admin settlement.
-     *
-     * Once the backend reports the specific student/
-     * enrollment as settled, it disappears from this
-     * pending queue.
-     */
-    const pending = list.filter(
-      (student) => Number(student.teacher_share_amount || 0) > 0,
-    );
-
-    /*
-     * Protect the UI from duplicated enrollment rows.
-     */
     const unique = new Map();
 
-    pending.forEach((student) => {
+    list.forEach((student) => {
       const key = teacherStudentKey(student);
 
       if (!unique.has(key)) {
@@ -1221,12 +1214,63 @@ export default function Finance() {
     return Array.from(unique.values());
   }, [teacherMonthly]);
 
+  /*
+   * Only students with a positive, still-unsettled teacher share may be
+   * selected for a settlement. Unpaid or unallocated rows stay visible in
+   * the table but are not selectable.
+   */
+  const settleableTeacherStudents = useMemo(
+    () =>
+      teacherStudents.filter(
+        (student) => Number(student.teacher_share_amount || 0) > 0,
+      ),
+    [teacherStudents],
+  );
+
   const selectedTeacherStudentRows = useMemo(
-    () => teacherStudents.filter((student) =>
+    () => settleableTeacherStudents.filter((student) =>
       selectedTeacherStudents.has(teacherStudentKey(student)),
     ),
-    [teacherStudents, selectedTeacherStudents],
+    [settleableTeacherStudents, selectedTeacherStudents],
   );
+
+  /*
+   * Completed teacher payments. These are real salary transactions recorded
+   * against a settlement, not student fee allocations. Merged across months
+   * and de-duplicated by payment id so a payment never shows twice.
+   */
+  const actualTeacherPayments = useMemo(() => {
+    const rows = teacherHistory.flatMap((item) =>
+      (Array.isArray(item?.settlement?.payout_history)
+        ? item.settlement.payout_history
+        : []
+      ).map((payment) => ({
+        ...payment,
+        solar_year: item.solar_year,
+        solar_month: item.solar_month,
+        month_name: item.month_name,
+        share_percent:
+          payment?.calculation?.share_percent ??
+          item.share_percent ??
+          null,
+        settlement_status: item?.settlement?.status ?? null,
+      })),
+    );
+
+    const unique = new Map();
+
+    rows.forEach((payment) => {
+      const key = String(payment.id);
+
+      if (!unique.has(key)) {
+        unique.set(key, payment);
+      }
+    });
+
+    return Array.from(unique.values()).sort(
+      (a, b) => new Date(b.paid_at).getTime() - new Date(a.paid_at).getTime(),
+    );
+  }, [teacherHistory]);
 
   const selectedTeacherAmount = useMemo(
     () => selectedTeacherStudentRows.reduce(
@@ -1236,10 +1280,14 @@ export default function Finance() {
     [selectedTeacherStudentRows],
   );
 
-  const allTeacherStudentsSelected = teacherStudents.length > 0 &&
-    teacherStudents.every((student) => selectedTeacherStudents.has(teacherStudentKey(student)));
+  const allTeacherStudentsSelected = settleableTeacherStudents.length > 0 &&
+    settleableTeacherStudents.every((student) => selectedTeacherStudents.has(teacherStudentKey(student)));
 
   function toggleTeacherStudent(student) {
+    if (Number(student?.teacher_share_amount || 0) <= 0) {
+      return;
+    }
+
     const key = teacherStudentKey(student);
     setSelectedTeacherStudents((current) => {
       const next = new Set(current);
@@ -1253,7 +1301,9 @@ export default function Finance() {
     if (allTeacherStudentsSelected) {
       setSelectedTeacherStudents(new Set());
     } else {
-      setSelectedTeacherStudents(new Set(teacherStudents.map(teacherStudentKey)));
+      setSelectedTeacherStudents(
+        new Set(settleableTeacherStudents.map(teacherStudentKey)),
+      );
     }
   }
 
@@ -2353,15 +2403,16 @@ export default function Finance() {
                   <button
                     type="button"
                     onClick={toggleAllTeacherStudents}
-                    disabled={teacherStudents.length === 0 || teacherShareDue <= 0}
+                    disabled={settleableTeacherStudents.length === 0 || teacherShareDue <= 0}
                     className={`rounded-lg border px-3 py-2 text-[9px] font-semibold disabled:opacity-30 ${allTeacherStudentsSelected ? "border-[#f2bd19]/30 bg-[#f2bd19]/10 text-[#f2bd19]" : "border-white/[0.06] text-slate-400"}`}
                   >
                     {allTeacherStudentsSelected ? "Unselect all" : "Select all"}
                   </button>
+
                   <button
                     type="button"
                     onClick={requestTeacherStudentSettlement}
-                    disabled={selectedTeacherStudentRows.length === 0 || teacherSettlementLoading || selectedTeacherAmount <= 0}
+                    disabled={selectedTeacherStudentRows.length === 0 || teacherSettlementLoading || selectedTeacherAmount <= 0 || settlementPaid}
                     className="rounded-lg bg-[#f2bd19] px-3 py-2 text-[9px] font-bold text-black disabled:opacity-30"
                   >
                     {teacherSettlementLoading ? "Processing…" : `${selectedTeacherStudentRows.length} selected · AFN ${formatMoney(selectedTeacherAmount)}`}
@@ -2409,8 +2460,8 @@ export default function Finance() {
             ) : teacherStudents.length === 0 ? (
               <EmptyState
                 icon={CheckCircle2}
-                title="No pending teacher balances"
-                  description="There are no enrolled students or fee allocations for this teacher and period."
+                title="No students for this period"
+                description="There are no enrolled students or fee allocations for this teacher and period."
               />
             ) : (
               <div className="overflow-x-auto">
@@ -2445,6 +2496,10 @@ export default function Finance() {
                         Outstanding
                       </th>
 
+                      <th className="px-3 py-2.5 text-right text-[8px] uppercase tracking-wider text-slate-600">
+                        Teacher share
+                      </th>
+
                       <th className="px-3 py-2.5 text-left text-[8px] uppercase tracking-wider text-slate-600">
                         Status
                       </th>
@@ -2459,6 +2514,32 @@ export default function Finance() {
                     {teacherStudents.map((student) => {
                       const key = teacherStudentKey(student);
                       const selected = selectedTeacherStudents.has(key);
+
+                      /*
+                       * teacher_share_amount is the share that is still
+                       * awaiting settlement. allocated_teacher_share_amount
+                       * is everything allocated from this student's payments,
+                       * including amounts already settled.
+                       */
+                      const teacherShare = Number(
+                        student.teacher_share_amount || 0,
+                      );
+
+                      const allocatedTeacherShare = Number(
+                        student.allocated_teacher_share_amount ??
+                          student.teacher_share_amount ??
+                          0,
+                      );
+
+                      const settleable = teacherShare > 0;
+
+                      const allocationIds = Array.isArray(
+                        student.allocated_allocation_ids,
+                      )
+                        ? student.allocated_allocation_ids
+                        : Array.isArray(student.allocation_ids)
+                          ? student.allocation_ids
+                          : [];
 
                       const expected = Number(
                         student.expected_amount ??
@@ -2489,7 +2570,11 @@ export default function Finance() {
                           className="border-b border-white/[0.035] transition last:border-0 hover:bg-white/[0.015]"
                         >
                           <td className="px-3 py-3">
-                            <Checkbox checked={selected} onChange={() => toggleTeacherStudent(student)} />
+                            <Checkbox
+                              checked={selected}
+                              disabled={!settleable}
+                              onChange={() => toggleTeacherStudent(student)}
+                            />
                           </td>
 
                           <td className="px-3 py-3">
@@ -2500,6 +2585,11 @@ export default function Finance() {
                                   "Unnamed student"}
                               </p>
 
+                              {student.roll_number && (
+                                <p className="mt-0.5 text-[8px] text-slate-600">
+                                  {student.roll_number}
+                                </p>
+                              )}
                             </div>
                           </td>
 
@@ -2537,6 +2627,34 @@ export default function Finance() {
                             </span>
                           </td>
 
+                          <td className="px-3 py-3 text-right text-[9px] font-semibold">
+                            <span
+                              className={
+                                allocatedTeacherShare > 0
+                                  ? "text-[#f2bd19]"
+                                  : "text-slate-700"
+                              }
+                            >
+                              {allocatedTeacherShare > 0
+                                ? `AFN ${formatMoney(allocatedTeacherShare)}`
+                                : "—"}
+                            </span>
+
+                            {allocatedTeacherShare > 0 && (
+                              <p
+                                className={`mt-1 text-[7px] font-semibold ${
+                                  teacherShare > 0
+                                    ? "text-amber-400/80"
+                                    : "text-emerald-400/80"
+                                }`}
+                              >
+                                {teacherShare > 0
+                                  ? `AFN ${formatMoney(teacherShare)} pending`
+                                  : "Settled"}
+                              </p>
+                            )}
+                          </td>
+
                           <td className="px-3 py-3">
                             <StatusBadge
                               status={
@@ -2545,6 +2663,12 @@ export default function Finance() {
                                 (outstanding > 0 ? "partial" : "paid")
                               }
                             />
+
+                            {paid > 0 && allocationIds.length === 0 && (
+                              <p className="mt-1 text-[7px] font-semibold text-amber-400/80">
+                                Unallocated
+                              </p>
+                            )}
                           </td>
 
                           <td className="px-3 py-3 text-right text-[8px] text-slate-600">
@@ -2642,57 +2766,177 @@ export default function Finance() {
 
             {teacherHistory.length === 0 ? (
               <p className="py-5 text-center text-[9px] text-slate-700">
-                No historical teacher settlements.
+                No historical teacher earnings or payments for this teacher.
               </p>
             ) : (
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                {teacherHistory.map((item, index) => {
-                  const year = Number(item.solar_year);
-                  const month = Number(item.solar_month);
+              <>
+                {/* A. HISTORICAL MONTHLY EARNINGS */}
 
-                  return (
-                    <button
-                      type="button"
-                      key={item.id ?? `${year}-${month}-${index}`}
-                      onClick={() => {
-                        if (Number.isInteger(year) && Number.isInteger(month)) {
-                          setSelectedYear(year);
-                          setSelectedMonth(month);
-                          setTeacherPage(1);
-                        }
-                      }}
-                      className="rounded-lg border border-white/[0.05] bg-[#0d1013] p-3 text-left transition hover:border-[#f2bd19]/15 hover:bg-[#f2bd19]/[0.02]"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <p className="text-[10px] font-semibold text-white">
-                            {monthName(month)} {year}
-                          </p>
+                <p className="mb-2 text-[8px] font-semibold uppercase tracking-wider text-slate-600">
+                  Monthly earnings
+                </p>
 
-                          <p className="mt-1 text-[8px] text-slate-700">
-                            {Number(item.payment_count ?? 0)} payments ·{" "}
-                            {Number(item.share_percent ?? shareRate).toFixed(2)}
-                            % share
-                          </p>
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {teacherHistory.map((item, index) => {
+                    const year = Number(item.solar_year);
+                    const month = Number(item.solar_month);
+
+                    const earned = Number(
+                      item.teacher_share_amount ??
+                        item.settlement?.expected_amount ??
+                        0,
+                    );
+
+                    const payouts = Array.isArray(
+                      item?.settlement?.payout_history,
+                    )
+                      ? item.settlement.payout_history
+                      : [];
+
+                    const paidAmount = payouts.reduce(
+                      (total, payment) => total + Number(payment.amount || 0),
+                      0,
+                    );
+
+                    const remainingAmount = Math.max(earned - paidAmount, 0);
+
+                    return (
+                      <button
+                        type="button"
+                        key={`${year}-${month}-${index}`}
+                        onClick={() => {
+                          if (
+                            Number.isInteger(year) &&
+                            Number.isInteger(month)
+                          ) {
+                            setSelectedYear(year);
+                            setSelectedMonth(month);
+                            setTeacherPage(1);
+                          }
+                        }}
+                        className="rounded-lg border border-white/[0.05] bg-[#0d1013] p-3 text-left transition hover:border-[#f2bd19]/15 hover:bg-[#f2bd19]/[0.02]"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <p className="text-[10px] font-semibold text-white">
+                              {item.month_name || monthName(month)} {year}
+                            </p>
+
+                            <p className="mt-1 text-[8px] text-slate-700">
+                              {Number(item.payment_count ?? 0)} payments ·{" "}
+                              {Number(
+                                item.share_percent ?? shareRate,
+                              ).toFixed(2)}
+                              % share
+                            </p>
+                          </div>
+
+                          <StatusBadge
+                            status={
+                              remainingAmount > 0
+                                ? paidAmount > 0
+                                  ? "partial"
+                                  : "pending"
+                                : "paid"
+                            }
+                          />
                         </div>
 
-                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400/70" />
-                      </div>
+                        <p className="mt-3 text-[8px] uppercase tracking-wider text-slate-700">
+                          Allocated fees
+                        </p>
 
-                      <p className="mt-3 text-[8px] uppercase tracking-wider text-slate-700">
-                        Teacher share
-                      </p>
+                        <p className="mt-0.5 text-[9px] text-slate-400">
+                          AFN {formatMoney(item.collected_amount)}
+                        </p>
 
-                      <p className="mt-0.5 text-sm font-bold text-[#f2bd19]">
-                        AFN{" "}
-                        {formatMoney(
-                          item.teacher_share_amount ?? item.share_amount ?? 0,
-                        )}
-                      </p>
-                    </button>
-                  );
-                })}
-              </div>
+                        <p className="mt-2 text-[8px] uppercase tracking-wider text-slate-700">
+                          Teacher share earned
+                        </p>
+
+                        <p className="mt-0.5 text-sm font-bold text-[#f2bd19]">
+                          AFN {formatMoney(earned)}
+                        </p>
+
+                        <div className="mt-2 flex items-center justify-between gap-2 text-[8px]">
+                          <span className="text-slate-600">
+                            Paid AFN {formatMoney(paidAmount)}
+                          </span>
+
+                          <span
+                            className={
+                              remainingAmount > 0
+                                ? "font-semibold text-amber-300"
+                                : "font-semibold text-emerald-300"
+                            }
+                          >
+                            {remainingAmount > 0
+                              ? `Remaining AFN ${formatMoney(remainingAmount)}`
+                              : "Settled"}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* B. ACTUAL TEACHER PAYMENTS */}
+
+                <div className="mt-4 border-t border-white/[0.05] pt-3">
+                  <p className="mb-2 text-[8px] font-semibold uppercase tracking-wider text-slate-600">
+                    Completed teacher payments
+                  </p>
+
+                  {actualTeacherPayments.length === 0 ? (
+                    <p className="py-3 text-center text-[8px] text-slate-700">
+                      No salary payments have been recorded for this teacher
+                      yet.
+                    </p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {actualTeacherPayments.map((payment) => (
+                        <div
+                          key={`payment-${payment.id}`}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/[0.05] bg-[#0d1013] px-3 py-2"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-[9px] font-semibold text-white">
+                              {monthName(payment.solar_month)}{" "}
+                              {payment.solar_year} ·{" "}
+                              {formatSolarDate(
+                                payment.paid_at_solar_date || payment.paid_at,
+                              )}
+                            </p>
+
+                            <p className="mt-0.5 text-[8px] text-slate-600">
+                              {payment.paid_by_name || "Administrator"} · Ref
+                              #{payment.id}
+                              {payment.share_percent !== null &&
+                              payment.share_percent !== undefined
+                                ? ` · ${Number(payment.share_percent).toFixed(2)}% share`
+                                : ""}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <span className="text-[9px] font-bold text-emerald-300">
+                              AFN {formatMoney(payment.amount)}
+                            </span>
+
+                            <StatusBadge
+                              status={
+                                payment.settlement_status === "paid"
+                                  ? "paid"
+                                  : payment.settlement_status || "pending"
+                              }
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </section>
         </main>
@@ -3010,7 +3254,7 @@ export default function Finance() {
                 <button
                   type="button"
                   onClick={requestStaffHandover}
-                  disabled={selectedStaffTransactions.size === 0}
+                  disabled={selectedStaffTransactions.size === 0 || selectedStaffTransactionRows.every((t) => isStaffTransactionHandedOver(t))}
                   className="flex h-8 items-center gap-1.5 rounded-lg bg-[#f2bd19] px-3 text-[8px] font-bold text-black transition hover:bg-[#ffd34d] disabled:cursor-not-allowed disabled:opacity-30"
                 >
                   <Check className="h-3.5 w-3.5" />

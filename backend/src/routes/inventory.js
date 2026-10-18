@@ -168,6 +168,39 @@ function normalizeItemFinancials(row) {
   };
 }
 
+/*
+  Purchase and sale totals are derived from the movement ledger, which is
+  the single source of truth for stock changes. The stored "total_*"
+  columns do not exist in this database; the ledger always does.
+*/
+const ITEM_TOTALS_JOIN = `
+  LEFT JOIN (
+    SELECT
+      im.item_id,
+
+      SUM(CASE WHEN im.movement_type = 'received' THEN im.quantity ELSE 0 END)::int AS total_purchased,
+      SUM(CASE WHEN im.movement_type = 'issued' THEN im.quantity ELSE 0 END)::int AS total_sold,
+
+      SUM(
+        CASE WHEN im.movement_type = 'received'
+          THEN im.quantity * COALESCE(im.unit_price, 0)
+          ELSE 0
+        END
+      )::numeric AS total_spent,
+
+      SUM(
+        CASE WHEN im.movement_type = 'issued'
+          THEN im.quantity * COALESCE(im.unit_price, 0)
+          ELSE 0
+        END
+      )::numeric AS total_earned
+
+    FROM inventory_movements im
+    WHERE im.is_voided = FALSE
+    GROUP BY im.item_id
+  ) mv ON mv.item_id = ii.id
+`;
+
 const ITEM_SELECT = `
   SELECT
     ii.id,
@@ -181,18 +214,19 @@ const ITEM_SELECT = `
     ii.chapter,
     ii.current_stock,
     ii.minimum_stock_level,
-    ii.purchase_price,
+    COALESCE(ii.unit_cost, ii.cost_price, 0) AS purchase_price,
     ii.selling_price,
-    ii.unit_cost,
-    ii.total_purchased,
-    ii.total_sold,
-    ii.total_spent,
-    ii.total_earned,
+    COALESCE(ii.unit_cost, ii.cost_price, 0) AS unit_cost,
+    COALESCE(mv.total_purchased, 0) AS total_purchased,
+    COALESCE(mv.total_sold, 0) AS total_sold,
+    COALESCE(mv.total_spent, 0) AS total_spent,
+    COALESCE(mv.total_earned, 0) AS total_earned,
     ii.created_at,
     ii.updated_at
 
   FROM inventory_items ii
   LEFT JOIN inventory_categories ic ON ic.id = ii.category_id
+  ${ITEM_TOTALS_JOIN}
 `;
 
 /* ==========================================================================
@@ -232,16 +266,20 @@ router.get(
         SELECT
           COUNT(*)::int AS total_items,
           SUM(ii.current_stock)::int AS total_stock,
-          SUM(ii.total_spent)::numeric AS total_spent,
-          SUM(ii.total_earned)::numeric AS total_earned,
-          SUM(ii.current_stock * ii.purchase_price)::numeric AS inventory_value,
+          SUM(COALESCE(mv.total_spent, 0))::numeric AS total_spent,
+          SUM(COALESCE(mv.total_earned, 0))::numeric AS total_earned,
+          SUM(ii.current_stock * COALESCE(ii.unit_cost, ii.cost_price, 0))::numeric AS inventory_value,
           SUM(ii.current_stock * ii.selling_price)::numeric AS expected_revenue,
-          SUM(ii.total_earned - ii.total_spent)::numeric AS actual_profit,
-          SUM(ii.current_stock * ii.selling_price - ii.current_stock * ii.purchase_price)::numeric AS expected_profit
+          SUM(COALESCE(mv.total_earned, 0) - COALESCE(mv.total_spent, 0))::numeric AS actual_profit,
+          SUM(
+            ii.current_stock * ii.selling_price
+            - ii.current_stock * COALESCE(ii.unit_cost, ii.cost_price, 0)
+          )::numeric AS expected_profit
 
         FROM inventory_items ii
+        ${ITEM_TOTALS_JOIN}
         WHERE ii.is_active = TRUE
-          AND ii.purchase_price > 0
+          AND COALESCE(ii.unit_cost, ii.cost_price, 0) > 0
       `,
     );
 
@@ -287,32 +325,7 @@ router.get(
 
     const item = itemResult.rows[0];
 
-    // Get transactions (purchase/restock/sales history)
-    const transactionsResult = await query(
-      `
-        SELECT
-          it.id,
-          it.item_id,
-          it.transaction_type,
-          it.quantity,
-          it.unit_cost,
-          it.total_cost,
-          it.selling_price,
-          it.total_revenue,
-          it.notes,
-          it.created_by_user_id,
-          u.full_name AS created_by_name,
-          it.created_at
-
-        FROM inventory_transactions it
-        LEFT JOIN users u ON u.id = it.created_by_user_id
-        WHERE it.item_id = $1
-        ORDER BY it.created_at DESC, it.id DESC
-      `,
-      [itemId],
-    );
-
-    // Get movement history (for restock/sales details)
+    // Movement history is also the purchase/sale ledger.
     const movementsResult = await query(
       `
         SELECT
@@ -337,10 +350,34 @@ router.get(
 
     const financials = normalizeItemFinancials(item);
 
+    const transactions = movementsResult.rows.map((row) => ({
+      id: Number(row.id),
+      item_id: itemId,
+      item_name: item.name || null,
+      transaction_type: row.movement_type === "issued" ? "sale" : "purchase",
+      quantity: Number(row.quantity),
+      unit_cost: roundMoney(row.unit_price || 0),
+      total_cost: roundMoney(
+        Number(row.quantity) * Number(row.unit_price || 0),
+      ),
+      selling_price:
+        row.movement_type === "issued" ? roundMoney(row.unit_price || 0) : 0,
+      total_revenue:
+        row.movement_type === "issued"
+          ? roundMoney(Number(row.quantity) * Number(row.unit_price || 0))
+          : 0,
+      notes: row.notes || null,
+      created_by_user_id: row.created_by_user_id
+        ? Number(row.created_by_user_id)
+        : null,
+      created_by_name: row.created_by_name || null,
+      created_at: row.created_at,
+    }));
+
     res.json({
       item: normalizeItem(item),
       financials,
-      transactions: transactionsResult.rows.map(normalizeTransaction),
+      transactions,
       movements: movementsResult.rows.map((row) => ({
         id: Number(row.id),
         movement_type: row.movement_type,
@@ -423,11 +460,6 @@ router.post(
     const edition = cleanText(req.body?.edition);
     const chapter = cleanText(req.body?.chapter);
 
-    // Calculate totals
-    const totalPurchaseCost = roundMoney(currentStock * purchasePrice);
-    const expectedRevenue = roundMoney(currentStock * sellingPrice);
-    const expectedProfit = roundMoney(expectedRevenue - totalPurchaseCost);
-
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -438,13 +470,8 @@ router.post(
             name,
             current_stock,
             minimum_stock_level,
-            purchase_price,
-            selling_price,
             unit_cost,
-            total_purchased,
-            total_sold,
-            total_spent,
-            total_earned,
+            selling_price,
             category_id,
             supplier,
             unit,
@@ -453,7 +480,7 @@ router.post(
             is_active,
             created_by_user_id
           )
-          VALUES ($1, $2, $3, $4, $5, $4, $2, 0, $6, $7, $8, $9, $10, $11, $12, TRUE, $13)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, $11)
           RETURNING id
         `,
         [
@@ -462,8 +489,6 @@ router.post(
           minimumStock,
           purchasePrice,
           sellingPrice,
-          totalPurchaseCost,
-          expectedRevenue,
           categoryId || null,
           supplier || null,
           unit || null,
@@ -473,34 +498,8 @@ router.post(
         ],
       );
 
-      // Create initial purchase transaction if stock > 0
+      // Record the initial stock in the movement ledger.
       if (currentStock > 0 && purchasePrice > 0) {
-        await client.query(
-          `
-            INSERT INTO inventory_transactions (
-              item_id,
-              transaction_type,
-              quantity,
-              unit_cost,
-              total_cost,
-              selling_price,
-              created_by_user_id,
-              notes
-            )
-            VALUES ($1, 'purchase', $2, $3, $4, $5, $6, $7)
-          `,
-          [
-            inserted.rows[0].id,
-            currentStock,
-            purchasePrice,
-            totalPurchaseCost,
-            expectedRevenue,
-            req.user.id,
-            `Initial purchase: ${currentStock} units @ ${purchasePrice} AFN/unit`,
-          ],
-        );
-
-        // Create corresponding movement
         await client.query(
           `
             INSERT INTO inventory_movements (
@@ -625,7 +624,6 @@ router.put(
           name = $1,
           current_stock = $2,
           minimum_stock_level = $3,
-          purchase_price = $4,
           selling_price = $5,
           unit_cost = $4,
           category_id = $6,
@@ -740,7 +738,7 @@ router.post(
 
       // Get current item with lock
       const itemResult = await client.query(
-        `SELECT id, name, current_stock, total_purchased, total_spent, purchase_price, selling_price, unit_cost
+        `SELECT id, name, current_stock, selling_price, unit_cost
          FROM inventory_items
          WHERE id = $1 AND is_active = TRUE
          FOR UPDATE`,
@@ -755,52 +753,21 @@ router.post(
       const item = itemResult.rows[0];
 
       const newStock = Number(item.current_stock) + quantity;
-      const newTotalPurchased = Number(item.total_purchased) + quantity;
-      const newTotalSpent = roundMoney(Number(item.total_spent) + totalCost);
 
-      // Update item
-      const updated = await client.query(
+      // Update item. Purchased totals are derived from the ledger.
+      await client.query(
         `
           UPDATE inventory_items
           SET
             current_stock = $1,
-            total_purchased = $2,
-            total_spent = $3,
-            unit_cost = $4,
+            unit_cost = $2,
             updated_at = NOW()
-          WHERE id = $5
-          RETURNING id, name, current_stock, total_purchased, total_spent
+          WHERE id = $3
         `,
-        [newStock, newTotalPurchased, newTotalSpent, unitCost, itemId],
+        [newStock, unitCost, itemId],
       );
 
-      // Create transaction record
-      await client.query(
-        `
-          INSERT INTO inventory_transactions (
-            item_id,
-            transaction_type,
-            quantity,
-            unit_cost,
-            total_cost,
-            selling_price,
-            created_by_user_id,
-            notes
-          )
-          VALUES ($1, 'restock', $2, $3, $4, $5, $6, $7)
-        `,
-        [
-          itemId,
-          quantity,
-          unitCost,
-          totalCost,
-          roundMoney(quantity * Number(updated.rows[0].selling_price || 0)),
-          req.user.id,
-          notes || `Restock: ${quantity} units @ ${unitCost} AFN/unit`,
-        ],
-      );
-
-      // Create movement record
+      // Record the restock in the movement ledger.
       await client.query(
         `
           INSERT INTO inventory_movements (
@@ -895,7 +862,7 @@ router.post(
 
       // Get current item with lock
       const itemResult = await client.query(
-        `SELECT id, name, current_stock, total_sold, total_earned, selling_price, purchase_price
+        `SELECT id, name, current_stock, selling_price
          FROM inventory_items
          WHERE id = $1 AND is_active = TRUE
          FOR UPDATE`,
@@ -919,49 +886,20 @@ router.post(
 
       const totalRevenue = roundMoney(quantity * sellingPrice);
       const newStock = Number(item.current_stock) - quantity;
-      const newTotalSold = Number(item.total_sold) + quantity;
-      const newTotalEarned = roundMoney(Number(item.total_earned) + totalRevenue);
 
-      // Update item
-      const updated = await client.query(
+      // Update item. Sold totals are derived from the ledger.
+      await client.query(
         `
           UPDATE inventory_items
           SET
             current_stock = $1,
-            total_sold = $2,
-            total_earned = $3,
             updated_at = NOW()
-          WHERE id = $4
-          RETURNING id, name, current_stock, total_sold, total_earned
+          WHERE id = $2
         `,
-        [newStock, newTotalSold, newTotalEarned, itemId],
+        [newStock, itemId],
       );
 
-      // Create transaction record
-      await client.query(
-        `
-          INSERT INTO inventory_transactions (
-            item_id,
-            transaction_type,
-            quantity,
-            selling_price,
-            total_revenue,
-            created_by_user_id,
-            notes
-          )
-          VALUES ($1, 'sale', $2, $3, $4, $5, $6)
-        `,
-        [
-          itemId,
-          quantity,
-          sellingPrice,
-          totalRevenue,
-          req.user.id,
-          notes || `Sale: ${quantity} units @ ${sellingPrice} AFN/unit`,
-        ],
-      );
-
-      // Create movement record
+      // Record the sale in the movement ledger.
       await client.query(
         `
           INSERT INTO inventory_movements (
@@ -1040,23 +978,20 @@ router.get(
     const transactionsResult = await query(
       `
         SELECT
-          it.id,
-          it.transaction_type,
-          it.quantity,
-          it.unit_cost,
-          it.total_cost,
-          it.selling_price,
-          it.total_revenue,
-          it.notes,
-          it.created_by_user_id,
+          im.id,
+          im.quantity,
+          im.unit_price,
+          im.notes,
+          im.created_by_user_id,
           u.full_name AS created_by_name,
-          it.created_at
+          im.created_at
 
-        FROM inventory_transactions it
-        LEFT JOIN users u ON u.id = it.created_by_user_id
-        WHERE it.item_id = $1
-          AND it.transaction_type IN ('purchase', 'restock')
-        ORDER BY it.created_at DESC, it.id DESC
+        FROM inventory_movements im
+        LEFT JOIN users u ON u.id = im.created_by_user_id
+        WHERE im.item_id = $1
+          AND im.movement_type = 'received'
+          AND im.is_voided = FALSE
+        ORDER BY im.created_at DESC, im.id DESC
       `,
       [itemId],
     );
@@ -1068,11 +1003,13 @@ router.get(
       },
       restock_history: transactionsResult.rows.map((row) => ({
         id: Number(row.id),
-        transaction_type: row.transaction_type,
+        transaction_type: "restock",
         quantity: Number(row.quantity),
-        unit_cost: roundMoney(row.unit_cost || 0),
-        total_cost: roundMoney(row.total_cost || 0),
-        selling_price: roundMoney(row.selling_price || 0),
+        unit_cost: roundMoney(row.unit_price || 0),
+        total_cost: roundMoney(
+          Number(row.quantity) * Number(row.unit_price || 0),
+        ),
+        selling_price: 0,
         notes: row.notes || null,
         created_by_user_id: row.created_by_user_id ? Number(row.created_by_user_id) : null,
         created_by_name: row.created_by_name || null,
