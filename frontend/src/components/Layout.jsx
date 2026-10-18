@@ -18,6 +18,7 @@ import {
   Menu,
   Sun,
   Moon,
+  DatabaseBackup,
 } from "lucide-react";
 import logo from "../assets/sabawoon-logo.png";
 
@@ -80,6 +81,12 @@ const NAV = [
     to: "/app/profile",
     label: "Settings",
     icon: Settings,
+    roles: ["admin"],
+  },
+  {
+    to: "/app/updates-backup",
+    label: "Updates & Backup",
+    icon: DatabaseBackup,
     roles: ["admin"],
   },
 ];

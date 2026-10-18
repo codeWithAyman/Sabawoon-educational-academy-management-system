@@ -21,6 +21,11 @@ backend/uploads/avatars/*
 !backend/uploads/submissions/.gitkeep
 !backend/uploads/avatars/.gitkeep
 
+# database backups (contain live academy data — never commit)
+backend/backups/
+backups/
+*.dump
+
 # logs
 *.log
 logs/

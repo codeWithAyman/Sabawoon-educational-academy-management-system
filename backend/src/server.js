@@ -125,6 +125,12 @@ app.use("/api/timetable", require("./routes/timetable"));
 
 app.use("/api/dashboard", require("./routes/dashboard"));
 
+/*
+  UPDATES & BACKUP
+  Administrator-only database backup / restore and GitHub release checks.
+*/
+app.use("/api/backup", require("./routes/backup"));
+
 /* ==========================================================================
    FRONTEND BUILD
 ========================================================================== */

@@ -17,6 +17,7 @@ import Finance from "./pages/Finance";
 import Assignments from "./pages/Assignments";
 import Timetable from "./pages/Timetable";
 import Profile from "./pages/Profile";
+import UpdatesBackup from "./pages/UpdatesBackup";
 
 function Protected({ children }) {
   const { user } = useAuth();
@@ -61,6 +62,9 @@ export default function App() {
             <Route path="assignments" element={<Assignments />} />
             <Route path="timetable" element={<Timetable />} />
             <Route path="profile" element={<Profile />} />
+
+            {/* Admin-only Updates & Backup page */}
+            <Route path="updates-backup" element={<UpdatesBackup />} />
           </Route>
 
           {/* Unknown routes */}
