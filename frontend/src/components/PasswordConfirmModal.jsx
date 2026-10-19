@@ -101,7 +101,27 @@ export default function PasswordConfirmModal({
       const status = error?.response?.status;
       const code = error?.response?.data?.code;
 
+      /*
+        Only a real password mismatch may say "Incorrect password".
+       
+        Every other failure previously showed that same message, which
+        hid the actual reason (expired session, or an account that is not
+        allowed to perform the action) and made a correct password look
+        wrong.
+      */
       if (
+        status === 401 &&
+        (code === "AUTH_REQUIRED" || code === "AUTH_INVALID")
+      ) {
+        setError(
+          "Your session has expired. Please log out and log in again.",
+        );
+      } else if (status === 403 && code === "FORBIDDEN") {
+        setError(
+          "This action requires the administrator account. " +
+            "Please log in as an administrator and try again.",
+        );
+      } else if (
         status === 401 ||
         status === 403 ||
         code === "PASSWORD_INCORRECT" ||
