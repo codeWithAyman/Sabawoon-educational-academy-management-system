@@ -1,7 +1,7 @@
 {
   "name": "sabawoon-academy",
   "productName": "Sabawoon Educational Academy",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Sabawoon Educational Academy Management System — Windows desktop application (Electron wrapping the existing React + Express + PostgreSQL stack)",
   "main": "electron/main.cjs",
