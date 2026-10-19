@@ -12,11 +12,10 @@
     "start": "npm run build:frontend && electron .",
     "electron": "electron .",
     "electron:dev": "cross-env ELECTRON_RENDERER_URL=http://localhost:5173 electron .",
-    "dist:win": "npm run build:frontend && electron-builder --win",
-    "pack:win": "npm run build:frontend && electron-builder --win --dir"
-  },
-  "dependencies": {
-    "jalaali-js": "^2.0.1"
+    "verify:backend-deps": "node scripts/verify-backend-deps.cjs",
+    "prepare:backend": "npm --prefix backend ci --omit=dev && npm run verify:backend-deps",
+    "dist:win": "npm run prepare:backend && npm run build:frontend && electron-builder --win",
+    "pack:win": "npm run prepare:backend && npm run build:frontend && electron-builder --win --dir"
   },
   "devDependencies": {
     "cross-env": "^10.1.0",

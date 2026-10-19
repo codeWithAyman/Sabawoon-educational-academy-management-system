@@ -5,11 +5,24 @@ const cors = require("cors");
 const helmet = require("helmet");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const rateLimit = require("express-rate-limit");
+const { query } = require("./db/pool");
 
 const app = express();
 
-const PORT = parseInt(process.env.PORT || "5478", 10);
+const parsedPort = parseInt(process.env.PORT || "5478", 10);
+
+/*
+  Ignore nonsense PORT values (empty, 0, negative, non-numeric) so a
+  stray environment variable can never make the server bind a random
+  port that no phone, tablet or desktop shortcut knows about.
+*/
+
+const PORT =
+  Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort < 65536
+    ? parsedPort
+    : 5478;
 
 /* ==========================================================================
    UPLOAD DIRECTORIES
@@ -38,11 +51,24 @@ app.use(
   }),
 );
 
-app.use(
-  cors({
-    origin: process.env.CORS_ORIGIN || "*",
-  }),
-);
+/*
+  CORS
+
+  The production frontend is served by THIS SAME server (see FRONTEND
+  BUILD below), so every browser request from a PC, phone or tablet is
+  same-origin and needs no CORS headers at all.
+
+  CORS stays disabled unless CORS_ORIGIN is set explicitly. Only set it
+  when you deliberately host the frontend on a different origin during
+  development (e.g. http://localhost:5173 pointing straight at the API).
+  Never use "*" in production — it is not needed and weakens safety.
+*/
+
+const corsOrigin = process.env.CORS_ORIGIN;
+
+if (corsOrigin) {
+  app.use(cors({ origin: corsOrigin }));
+}
 
 app.use(
   express.json({
@@ -87,9 +113,39 @@ app.use("/uploads", express.static(upDir));
    HEALTH CHECK
 ========================================================================== */
 
-app.get("/api/health", (req, res) => {
+/*
+  HEALTH CHECK
+
+  Always answers 200 once the HTTP server is up so the desktop app does
+  not start a duplicate backend; the "database" field reports PostgreSQL
+  reachability for diagnostics.
+*/
+
+let lastDatabaseCheck = { at: 0, ok: false };
+
+async function checkDatabase(force = false) {
+  const now = Date.now();
+
+  if (!force && now - lastDatabaseCheck.at < 5000) {
+    return lastDatabaseCheck.ok;
+  }
+
+  try {
+    await query("SELECT 1");
+    lastDatabaseCheck = { at: now, ok: true };
+  } catch {
+    lastDatabaseCheck = { at: now, ok: false };
+  }
+
+  return lastDatabaseCheck.ok;
+}
+
+app.get("/api/health", async (req, res) => {
+  const databaseOk = await checkDatabase();
+
   res.json({
-    status: "ok",
+    status: databaseOk ? "ok" : "degraded",
+    database: databaseOk ? "connected" : "unreachable",
     time: new Date().toISOString(),
   });
 });
@@ -161,6 +217,65 @@ app.use((err, req, res, next) => {
    START SERVER
 ========================================================================== */
 
-app.listen(PORT, "0.0.0.0", () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`Sabawoon Academy server listening on port ${PORT}`);
+
+  /*
+    Print the addresses this system can be opened from.
+    Phones and tablets on the same Wi-Fi use the LAN address.
+  */
+
+  const lanUrls = [];
+
+  for (const interfaces of Object.values(os.networkInterfaces())) {
+    for (const entry of interfaces || []) {
+      if (entry.family === "IPv4" && !entry.internal) {
+        lanUrls.push(`http://${entry.address}:${PORT}`);
+      }
+    }
+  }
+
+  console.log(`Open on this PC: http://localhost:${PORT}`);
+
+  if (lanUrls.length) {
+    console.log(
+      `Open on phones/tablets on the same Wi-Fi: ${lanUrls.join("  or  ")}`,
+    );
+  } else {
+    console.log(
+      "No LAN network detected — connect this PC to the Wi-Fi router to " +
+        "allow phones and tablets to connect.",
+    );
+  }
+
+  /*
+    PostgreSQL check (informational only — the server keeps running so a
+    briefly-starting database does not kill an otherwise healthy setup).
+  */
+
+  checkDatabase(true).then((databaseOk) => {
+    if (!databaseOk) {
+      console.error(
+        "WARNING: cannot reach PostgreSQL. Check that the PostgreSQL " +
+          "service is running and DATABASE_URL is correct. The server is " +
+          "up, but login and data pages will fail until the database is " +
+          "reachable.",
+      );
+    }
+  });
+});
+
+server.on("error", (error) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(
+      `Port ${PORT} is already in use. Another copy of the Sabawoon ` +
+        "backend (or a different program) is already running. Close it, " +
+        "or set a different PORT in the configuration file, then try " +
+        "again.",
+    );
+  } else {
+    console.error(`Server failed to start: ${error.message}`);
+  }
+
+  process.exit(1);
 });
