@@ -6,6 +6,8 @@ frontend/node_modules/
 # build artifacts
 frontend/dist/
 frontend/build/
+release/
+dist/
 
 # environment files (keep example, ignore real)
 .env
@@ -46,6 +48,10 @@ Thumbs.db
 # coverage / test
 coverage/
 .nyc_output/
+
+# test artifacts (temporary tokens)
+.test-token
+.teacher-token
 
 # pem / secrets — never commit
 *.pem

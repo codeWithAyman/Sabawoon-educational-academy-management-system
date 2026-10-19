@@ -1,5 +1,81 @@
 {
+  "name": "sabawoon-academy",
+  "productName": "Sabawoon Educational Academy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sabawoon Educational Academy Management System — Windows desktop application (Electron wrapping the existing React + Express + PostgreSQL stack)",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev:frontend": "npm --prefix frontend run dev",
+    "dev:backend": "npm --prefix backend run start",
+    "build:frontend": "npm --prefix frontend run build",
+    "start": "npm run build:frontend && electron .",
+    "electron": "electron .",
+    "electron:dev": "cross-env ELECTRON_RENDERER_URL=http://localhost:5173 electron .",
+    "dist:win": "npm run build:frontend && electron-builder --win",
+    "pack:win": "npm run build:frontend && electron-builder --win --dir"
+  },
   "dependencies": {
     "jalaali-js": "^2.0.1"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.sabawoon.academy",
+    "productName": "Sabawoon Educational Academy",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "electron/**"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!**/.env*",
+          "!backups/**",
+          "!uploads/**",
+          "!**/.test-token",
+          "!**/*.log",
+          "!**/*.pid"
+        ]
+      },
+      {
+        "from": "frontend/dist",
+        "to": "frontend/dist"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Sabawoon Academy"
+    },
+    "extraMetadata": {
+      "main": "electron/main.cjs"
+    }
   }
 }

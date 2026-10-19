@@ -600,6 +600,58 @@ Use the demo credentials in the [Default Logins](#default-logins-demo-data) tabl
 - Or reach out via the repository's discussions tab.
 
 Happy teaching. 📚
+
+---
+
+## Windows Desktop App (Electron)
+
+The system also runs as a Windows desktop application. Electron wraps the
+existing stack unchanged: it starts the same Express backend, waits until it
+is ready, then loads the same frontend the backend serves.
+
+### Development
+
+```bash
+npm install                 # root: electron tooling
+npm run dev:frontend        # Vite dev server (unchanged workflow)
+npm run dev:backend         # backend only (unchanged workflow)
+npm run electron:dev        # Electron + hot-reload frontend (needs dev:backend)
+npm start                   # build frontend, then launch Electron
+```
+
+### Build the Windows installer
+
+```bash
+npm run dist:win            # NSIS installer → release/
+npm run pack:win            # unpacked folder only → release/win-unpacked
+```
+
+> **Note:** the first packaging run on a fresh machine downloads electron-
+> builder's signing tools. If extraction fails with *"Cannot create symbolic
+> link: A required privilege is not held by the client"*, either enable
+> **Windows Developer Mode** or run the build once as Administrator.
+
+### Desktop configuration & prerequisites
+
+- **PostgreSQL is NOT bundled.** It must be installed and running on the PC
+  that hosts the application, exactly as for the web deployment.
+- The installed app reads its configuration from
+  `%APPDATA%\Sabawoon Educational Academy\config.env` — the same keys as
+  `backend/.env` (`DATABASE_URL`, `JWT_SECRET`, ...). Create this file once
+  after installing; it is never packaged into the installer.
+- Uploads and database backups are written under the same
+  `%APPDATA%\Sabawoon Educational Academy` folder, never inside the install
+  directory.
+
+### LAN / tablet access (unchanged)
+
+The desktop app starts the backend on the same port (`5478`, configurable
+via `SABAWOON_PORT`) bound to `0.0.0.0`, so tablets and other PCs on the
+local network keep using the same URL as before. The desktop app is not
+required for LAN access — a backend started manually (or as a service) is
+detected and reused instead of starting a second instance, and is never
+stopped by the desktop app.
+
  
 
 
