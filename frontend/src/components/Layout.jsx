@@ -83,12 +83,12 @@ const NAV = [
     icon: Settings,
     roles: ["admin"],
   },
-  {
-    to: "/app/updates-backup",
-    label: "Database Backups",
-    icon: DatabaseBackup,
-    roles: ["admin"],
-  },
+  // {
+  //   to: "/app/updates-backup",
+  //   label: "Database Backups",
+  //   icon: DatabaseBackup,
+  //   roles: ["admin"],
+  // },
 ];
 
 function roleLabel(role) {
