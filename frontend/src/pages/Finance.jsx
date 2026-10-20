@@ -3772,6 +3772,12 @@ function formatPaymentForStaff(payment) {
     return value;
   }
 
+  if (payment.month?.solar_year && payment.month?.solar_month) {
+    return `${Number(payment.month.solar_year)}/${pad2(
+      payment.month.solar_month,
+    )}`;
+  }
+
   if (payment.payment_for_solar_year && payment.payment_for_solar_month) {
     return `${Number(payment.payment_for_solar_year)}/${pad2(
       payment.payment_for_solar_month,

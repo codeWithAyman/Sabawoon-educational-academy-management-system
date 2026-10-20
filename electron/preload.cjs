@@ -12,4 +12,6 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("sabawoonDesktop", {
   isDesktop: true,
   getInfo: () => ipcRenderer.invoke("app:get-info"),
+  chooseBackupFolder: () => ipcRenderer.invoke("backup:choose-folder"),
+  openBackupFolder: (folder) => ipcRenderer.invoke("backup:open-folder", folder),
 });

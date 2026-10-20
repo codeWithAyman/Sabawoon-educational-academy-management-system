@@ -27,7 +27,7 @@
 const { app, BrowserWindow, dialog, shell, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs");
-const { spawn } = require("child_process");
+const { spawn, execFile } = require("child_process");
 const http = require("http");
 
 /* ==========================================================================
@@ -126,6 +126,15 @@ function loadUserConfig() {
   return config;
 }
 
+function persistBackupFolder(folder) {
+  const file = userConfigPath();
+  const existing = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  const lines = existing.split(/\r?\n/).filter((line) => !/^BACKUP_DIR=/i.test(line));
+  lines.push(`BACKUP_DIR=${folder}`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${lines.filter(Boolean).join("\n")}\n`, "utf8");
+}
+
 /* ==========================================================================
    BACKEND LIFECYCLE
 ========================================================================== */
@@ -164,6 +173,30 @@ async function waitForBackend(timeoutMs = 45000) {
   return false;
 }
 
+/*
+   BACKUP DIRECTORY (packaged)
+
+   Backups must live OUTSIDE the installation folder so they survive
+   updates and reinstalls: %APPDATA%\Sabawoon Educational Academy\backups.
+   The user can still override it with BACKUP_DIR in config.env.
+*/
+
+function backupDirPath() {
+  return path.join(app.getPath("userData"), "backups");
+}
+
+function backupEnv(userConfig) {
+  if (!app.isPackaged) {
+    return {}; // development: backend/.env decides (default backend/backups)
+  }
+
+  return {
+    BACKUP_DIR: userConfig.BACKUP_DIR || backupDirPath(),
+    // Used by the backend to relocate backups from old installs.
+    SABAWOON_BACKEND_DIR: backendDir(),
+  };
+}
+
 function startBackend() {
   const script = serverScriptPath();
 
@@ -180,6 +213,7 @@ function startBackend() {
   const env = {
     ...process.env,
     ...userConfig, // user config wins over inherited env
+    ...backupEnv(userConfig),
     PORT: String(PORT),
     // Watchdog: the runner shuts the backend down if this process dies.
     SABAWOON_PARENT_PID: String(process.pid),
@@ -330,8 +364,118 @@ function createWindow() {
 }
 
 /* ==========================================================================
+   SCHEDULED DAILY BACKUP MODE ("--run-daily-backup")
+
+   Invoked by the Windows scheduled task "Sabawoon Academy Daily Backup"
+   while the application is CLOSED. It runs the standalone backup runner
+   with Electron's Node runtime (no separate Node.js installation needed),
+   prints the result and exits with its exit code. No window is shown and
+   no backend HTTP server is started, so it never conflicts with a running
+   application — the backup service's run lock keeps jobs from overlapping.
+========================================================================== */
+
+function runScheduledBackupAndExit() {
+  const runner = path.join(backendDir(), "src", "services", "run-scheduled-backup.cjs");
+
+  if (!fs.existsSync(runner)) {
+    console.error(`[electron] Backup runner not found: ${runner}`);
+    app.exit(1);
+    return;
+  }
+
+  const userConfig = loadUserConfig();
+
+  const child = spawn(process.execPath, [runner], {
+    env: {
+      ...process.env,
+      ...userConfig,
+      ...backupEnv(userConfig),
+      // Run this Electron binary as plain Node.js.
+      ELECTRON_RUN_AS_NODE: "1",
+    },
+    cwd: app.isPackaged ? app.getPath("userData") : backendDir(),
+    windowsHide: true,
+    stdio: "inherit",
+  });
+
+  child.on("error", (error) => {
+    console.error(`[electron] Could not run the scheduled backup: ${error.message}`);
+    app.exit(1);
+  });
+
+  child.on("exit", (code) => {
+    app.exit(Number.isInteger(code) ? code : 1);
+  });
+}
+
+/* ==========================================================================
+   WINDOWS SCHEDULED TASK (daily backups while the app is closed)
+
+   Registered for the current user, every day at BACKUP_DAILY_AT (default
+   04:00). The task name is fixed and created with /F (overwrite), so tasks
+   can never accumulate or duplicate. Registration is best-effort: failures
+   are logged and the in-application scheduler still runs daily backups
+   whenever the app is open.
+========================================================================== */
+
+const BACKUP_TASK_NAME = "Sabawoon Academy Daily Backup";
+
+function registerDailyBackupTask() {
+  if (!app.isPackaged || process.platform !== "win32") return;
+
+  if ((process.env.SABAWOON_BACKUP_TASK || "").trim() === "off") return;
+
+  const userConfig = loadUserConfig();
+
+  const raw = (userConfig.BACKUP_DAILY_AT || process.env.BACKUP_DAILY_AT || "04:00").trim();
+  const match = raw.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  const time = match
+    ? `${String(Number(match[1])).padStart(2, "0")}:${match[2]}`
+    : "04:00";
+
+  const exe = process.execPath;
+  const trigger = `"${exe}" --run-daily-backup`;
+
+  execFile(
+    "schtasks",
+    ["/Create", "/SC", "DAILY", "/ST", time, "/TN", BACKUP_TASK_NAME, "/TR", trigger, "/F"],
+    { windowsHide: true },
+    (error) => {
+      if (error) {
+        console.error(
+          `[electron] Could not register the daily backup task: ${error.message}. ` +
+            "Backups still run automatically whenever the application is open.",
+        );
+        return;
+      }
+
+      console.log(
+        `[electron] Daily backup task registered: "${BACKUP_TASK_NAME}" runs every day at ${time}.`,
+      );
+    },
+  );
+}
+
+/* ==========================================================================
    APP LIFECYCLE
 ========================================================================== */
+
+ipcMain.handle("backup:choose-folder", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Choose Sabawoon backup folder",
+    properties: ["openDirectory", "createDirectory"],
+  });
+  if (result.canceled) return null;
+  persistBackupFolder(result.filePaths[0]);
+  return result.filePaths[0];
+});
+
+ipcMain.handle("backup:open-folder", async (_event, folder) => {
+  if (typeof folder !== "string" || !path.isAbsolute(folder)) throw new Error("Invalid backup folder.");
+  const result = await shell.openPath(folder);
+  if (result) throw new Error(result);
+  return true;
+});
 
 ipcMain.handle("app:get-info", () => ({
   appVersion: app.getVersion(),
@@ -346,6 +490,14 @@ ipcMain.handle("app:get-info", () => ({
 }));
 
 async function bootstrap() {
+  // Scheduled backup mode: run the backup and exit. Never takes the
+  // single-instance lock, so it works alongside an open application.
+  if (process.argv.includes("--run-daily-backup")) {
+    await app.whenReady();
+    runScheduledBackupAndExit();
+    return;
+  }
+
   // Single instance: a second launch focuses the existing window instead of
   // starting a second backend or window.
   const gotLock = app.requestSingleInstanceLock();
@@ -366,6 +518,9 @@ async function bootstrap() {
   });
 
   await app.whenReady();
+
+  // Keep the Windows scheduled task in sync with the configured time.
+  registerDailyBackupTask();
 
   try {
     if (await probeBackend()) {

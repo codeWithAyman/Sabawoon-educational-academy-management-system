@@ -1007,9 +1007,13 @@ export default function Classes() {
         <div className="grid grid-cols-1 xl:grid-cols-[1.25fr_0.75fr] gap-5">
           {/* =================================================
               CLASS TIME SLOTS
+
+              min-w-0 lets this column shrink to the available
+              width so the table below scrolls INSIDE its own
+              container instead of widening the whole page.
           ================================================= */}
 
-          <section>
+          <section className="min-w-0">
             <SectionHeading
               title="Class Time Slots"
               description="Active class schedules connecting subjects, sections, teachers, and times."
@@ -1054,7 +1058,7 @@ export default function Classes() {
               RIGHT SIDE
           ================================================= */}
 
-          <div className="space-y-5">
+          <div className="space-y-5 min-w-0">
             {/* SUBJECTS */}
 
             <section>
@@ -1345,11 +1349,11 @@ function ClassTable({
                 `}
               >
                 <TableCell>
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
                     <Avatar icon={BookOpen} />
 
-                    <div>
-                      <p className="text-[11px] font-medium text-slate-200">
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-medium text-slate-200 truncate">
                         {getSubjectName(slot)}
                       </p>
 
@@ -1361,10 +1365,10 @@ function ClassTable({
                 </TableCell>
 
                 <TableCell>
-                  <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                  <div className="flex items-center gap-2 text-[10px] text-slate-400 min-w-0">
                     <UserRound className="w-[13px] h-[13px] text-slate-600 shrink-0" />
 
-                    <span>{getTeacherName(slot)}</span>
+                    <span className="truncate">{getTeacherName(slot)}</span>
                   </div>
                 </TableCell>
 
@@ -1563,11 +1567,11 @@ function SelectedClassPanel({
     <div>
       <div className="px-4 py-4 border-b border-white/[0.07]">
         <div className="flex items-start justify-between gap-4">
-          <div className="flex items-start gap-3">
+          <div className="flex items-start gap-3 min-w-0">
             <Avatar icon={BookOpen} />
 
-            <div>
-              <h3 className="text-[12px] font-semibold text-slate-200">
+            <div className="min-w-0">
+              <h3 className="text-[12px] font-semibold text-slate-200 truncate">
                 {getSubjectName(selectedClass)}
               </h3>
 

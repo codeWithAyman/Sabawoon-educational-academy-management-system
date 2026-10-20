@@ -85,7 +85,7 @@ const NAV = [
   },
   {
     to: "/app/updates-backup",
-    label: "Updates & Backup",
+    label: "Database Backups",
     icon: DatabaseBackup,
     roles: ["admin"],
   },

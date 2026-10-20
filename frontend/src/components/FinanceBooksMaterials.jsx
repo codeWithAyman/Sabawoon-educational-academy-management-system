@@ -285,13 +285,26 @@ function ItemModal({ item, onClose, onSaved }) {
       onClose={onClose}
     >
       <div className="space-y-3">
-        {error && (
-          <div className="flex items-start gap-2 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2.5 text-[11px] text-red-300">
-            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+        {/*
+          Stable wrapper for the error message. The error used to be a
+          conditional sibling that preceded the input Fields, so when it
+          appeared or cleared React reconciled by index and reused the first
+          div node — destroying and recreating the input elements (focus was
+          lost mid-typing). The wrapper is always rendered; only its inner
+          content toggles.
+        */}
+        <div>
+          {error && (
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2.5 text-[11px] text-red-300"
+            >
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" />
 
-            {error}
-          </div>
-        )}
+              {error}
+            </div>
+          )}
+        </div>
 
         <Field
           label="Book / Chapter name"

@@ -1186,7 +1186,7 @@ const CLASS_STATE_LABELS = {
   removed: { label: "Class removed", className: "text-red-400" },
 };
 
-function HistoryRow({ row }) {
+function HistoryRow({ row, onOpen, onEdit, onDelete }) {
   const state = CLASS_STATE_LABELS[row.class_state] || CLASS_STATE_LABELS.active;
 
   const iso = toIsoDate(row.exam_date);
@@ -1199,7 +1199,7 @@ function HistoryRow({ row }) {
     .join(", ");
 
   return (
-    <div className="grid min-w-0 grid-cols-[minmax(0,1.6fr)_minmax(0,1.2fr)_minmax(0,1.1fr)_minmax(96px,0.8fr)_minmax(72px,0.6fr)_minmax(72px,0.6fr)] items-center gap-3 border-t border-white/[0.055] px-4 py-2.5">
+    <div role="button" tabIndex={0} onClick={() => onOpen(row)} className="grid w-full min-w-0 grid-cols-[minmax(0,1.6fr)_minmax(0,1.2fr)_minmax(0,1.1fr)_minmax(96px,0.8fr)_minmax(72px,0.6fr)_minmax(72px,0.6fr)] items-center gap-3 border-t border-white/[0.055] px-4 py-2.5 text-left hover:bg-white/[0.025]">
       <div className="min-w-0">
         <div className="truncate text-[11px] font-medium text-gray-200">
           {row.name}
@@ -1269,6 +1269,10 @@ function HistoryRow({ row }) {
           Low – high
         </div>
       </div>
+      <div className="flex justify-end gap-1">
+        <button type="button" onClick={(event) => { event.stopPropagation(); onEdit(row); }} className="rounded border border-white/[0.08] px-2 py-1 text-[9px] text-gray-400 hover:text-white">Edit</button>
+        <button type="button" onClick={(event) => { event.stopPropagation(); onDelete(row); }} className="rounded border border-red-400/20 px-2 py-1 text-[9px] text-red-300 hover:text-red-200">Delete</button>
+      </div>
     </div>
   );
 }
@@ -1280,6 +1284,9 @@ function HistoryPanel({
   onSearchChange,
   loading,
   error,
+  onOpen,
+  onEdit,
+  onDelete,
 }) {
   return (
     <div>
@@ -1382,7 +1389,7 @@ function HistoryPanel({
               </div>
 
               {group.rows.map((row) => (
-                <HistoryRow key={row.id} row={row} />
+                <HistoryRow key={row.id} row={row} onOpen={onOpen} onEdit={onEdit} onDelete={onDelete} />
               ))}
             </div>
           ))}
@@ -1427,6 +1434,8 @@ export default function Exams() {
   const [historySearch, setHistorySearch] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
+  const [historySelected, setHistorySelected] = useState(null);
+  const [historyEditing, setHistoryEditing] = useState(null);
 
   const loadReports = useCallback(async (showRefresh = false) => {
     if (showRefresh) {
@@ -1804,6 +1813,14 @@ export default function Exams() {
     loadReports(true);
   }
 
+  async function deleteHistoricalAssessment(assessment) {
+    if (!window.confirm(`Delete report “${assessment.name}” and its saved scores? This cannot be undone.`)) return;
+    await api.delete(`/marks/assessments/${assessment.id}`);
+    setHistorySelected(null);
+    setHistoryEditing(null);
+    await Promise.all([loadHistory(), loadReports(true)]);
+  }
+
   return (
     <div className="min-w-0 w-full">
       {/* HEADER */}
@@ -1879,14 +1896,34 @@ export default function Exams() {
       {/* HISTORY TAB */}
 
       {tab === "history" && (
-        <HistoryPanel
-          history={history}
-          groups={historyGroups}
-          search={historySearch}
-          onSearchChange={setHistorySearch}
-          loading={historyLoading}
-          error={historyError}
-        />
+        <>
+          <HistoryPanel
+            history={history}
+            groups={historyGroups}
+            search={historySearch}
+            onSearchChange={setHistorySearch}
+            loading={historyLoading}
+            error={historyError}
+            onOpen={setHistorySelected}
+            onEdit={setHistoryEditing}
+            onDelete={deleteHistoricalAssessment}
+          />
+          {historySelected && (
+            <ScoresModal
+              assessment={historySelected}
+              row={historySelected}
+              onClose={() => setHistorySelected(null)}
+              onSaved={() => loadHistory()}
+            />
+          )}
+          {historyEditing && (
+            <EditAssessmentModal
+              assessment={historyEditing}
+              onClose={() => setHistoryEditing(null)}
+              onSaved={(updated) => { setHistoryEditing(null); handleAssessmentUpdated(updated); loadHistory(); }}
+            />
+          )}
+        </>
       )}
 
       {tab === "reports" && (

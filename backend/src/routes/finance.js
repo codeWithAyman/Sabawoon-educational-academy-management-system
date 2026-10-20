@@ -2788,6 +2788,7 @@ router.get(
           allocation.to_date,
           allocation.solar_year,
           allocation.solar_month,
+          allocation.payment_for_months,
           (fsps.id IS NOT NULL) AS handed_over,
           fsps.id AS settlement_id,
           fsps.settled_at,
@@ -2817,7 +2818,11 @@ router.get(
             MIN(fpa.from_date) AS from_date,
             MAX(fpa.to_date) AS to_date,
             MIN(fpm.solar_year) AS solar_year,
-            MIN(fpm.solar_month) AS solar_month
+            MIN(fpm.solar_month) AS solar_month,
+            ARRAY_AGG(
+              DISTINCT CONCAT(fpm.solar_year, '/', LPAD(fpm.solar_month::text, 2, '0'))
+              ORDER BY CONCAT(fpm.solar_year, '/', LPAD(fpm.solar_month::text, 2, '0'))
+            ) FILTER (WHERE fpm.solar_year IS NOT NULL AND fpm.solar_month IS NOT NULL) AS payment_for_months
           FROM fee_payment_allocations fpa
           LEFT JOIN fee_period_months fpm ON fpm.id = fpa.fee_period_month_id
           WHERE fpa.fee_payment_id = fp.id
@@ -2910,6 +2915,10 @@ router.get(
               month_name: monthName(Number(row.solar_month)),
             }
           : null,
+
+      payment_for_months: Array.isArray(row.payment_for_months)
+        ? row.payment_for_months.filter(Boolean)
+        : [],
 
       coverage_from_date: row.from_date || null,
 

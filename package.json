@@ -1,7 +1,7 @@
 {
   "name": "sabawoon-academy",
   "productName": "Sabawoon Educational Academy",
-  "version": "1.0.1",
+  "version": "1.1.1",
   "private": true,
   "description": "Sabawoon Educational Academy Management System — Windows desktop application (Electron wrapping the existing React + Express + PostgreSQL stack)",
   "main": "electron/main.cjs",
@@ -13,6 +13,7 @@
     "electron": "electron .",
     "electron:dev": "cross-env ELECTRON_RENDERER_URL=http://localhost:5173 electron .",
     "verify:backend-deps": "node scripts/verify-backend-deps.cjs",
+    "backup:scheduled": "node backend/src/services/run-scheduled-backup.cjs",
     "prepare:backend": "npm --prefix backend ci --omit=dev && npm run verify:backend-deps",
     "dist:win": "npm run prepare:backend && npm run build:frontend && electron-builder --win",
     "pack:win": "npm run prepare:backend && npm run build:frontend && electron-builder --win --dir"
@@ -53,6 +54,10 @@
       {
         "from": "frontend/dist",
         "to": "frontend/dist"
+      },
+      {
+        "from": "build/provision.ps1",
+        "to": "provision.ps1"
       }
     ],
     "win": {
@@ -68,7 +73,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "perMachine": false,
+      "perMachine": true,
+      "include": "build/installer.nsh",
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "shortcutName": "Sabawoon Academy"

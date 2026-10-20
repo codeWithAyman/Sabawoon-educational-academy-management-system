@@ -1484,7 +1484,7 @@ export default function Dashboard() {
                   SABAWOON ACADEMY
                 </div>
 
-                <h1>Welcome</h1>
+                <h1>Welcome.</h1>
 
                 <p>
                   A quiet overview of everything happening across the academy.

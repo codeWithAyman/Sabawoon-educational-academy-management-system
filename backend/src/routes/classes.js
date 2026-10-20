@@ -72,6 +72,52 @@ async function validateClassTypeId(client, classTypeId) {
   }
 }
 
+/* =========================================================
+   DEFAULT CLASS TYPES
+
+   The four built-in types (Male, Female, Kids, Mixed) are part of
+   the application's data model — see db/schema.sql. Some existing
+   installations have the class_types table but none of the rows,
+   which made the class type selector show "No class type".
+
+   This idempotent insert restores only the missing built-in rows.
+   It never updates or deletes anything an administrator created.
+========================================================= */
+
+const DEFAULT_CLASS_TYPES = [
+  { name: "Male", sortOrder: 1 },
+  { name: "Female", sortOrder: 2 },
+  { name: "Kids", sortOrder: 3 },
+  { name: "Mixed", sortOrder: 4 },
+];
+
+let defaultClassTypesEnsured = false;
+
+async function ensureDefaultClassTypes() {
+  if (defaultClassTypesEnsured) {
+    return;
+  }
+
+  try {
+    for (const classType of DEFAULT_CLASS_TYPES) {
+      await query(
+        `
+          INSERT INTO class_types (name, sort_order)
+          VALUES ($1, $2)
+          ON CONFLICT (name) DO NOTHING
+        `,
+        [classType.name, classType.sortOrder],
+      );
+    }
+
+    defaultClassTypesEnsured = true;
+  } catch (error) {
+    // Keep the flag false so a later request retries. A missing table or a
+    // briefly unreachable database must never crash the API.
+    console.error("Could not ensure default class types:", error.message);
+  }
+}
+
 function normalizeDeadline(value) {
   if (value === undefined || value === null) {
     return { value: null, error: null };
@@ -187,6 +233,8 @@ router.get(
   "/types",
   authRequired,
   asyncH(async (req, res) => {
+    await ensureDefaultClassTypes();
+
     const r = await query(`
       SELECT
         ct.id,
@@ -357,23 +405,72 @@ router.delete(
   authRequired,
   requireRoles("admin"),
   asyncH(async (req, res) => {
+    /*
+      Accurate dependency check.
+
+      Only ACTIVE classes keep a subject in use. Archived classes are
+      historical records: they must survive the removal of a subject,
+      so the check reports them separately and the database keeps them
+      (see db/migrate-2026-10-20-subject-archive-safe.sql, which turns
+      the old destructive cascade into ON DELETE SET NULL).
+    */
     const usage = await query(
       `
-        SELECT EXISTS(
-          SELECT 1
-          FROM class_slots
-          WHERE subject_id = $1
-        ) AS in_use
+        SELECT
+          COUNT(*) FILTER (WHERE cs.is_active = TRUE) AS active_slots,
+          COUNT(*) FILTER (WHERE cs.is_active <> TRUE) AS archived_slots
+        FROM class_slots cs
+        WHERE cs.subject_id = $1
       `,
       [req.params.id],
     );
 
-    if (usage.rows[0].in_use) {
+    const activeSlots = Number(usage.rows[0].active_slots || 0);
+    const archivedSlots = Number(usage.rows[0].archived_slots || 0);
+
+    if (activeSlots > 0) {
       return res.status(409).json({
         error:
-          "This subject cannot be deleted because it is used by a class time slot. Archive or stop using the class instead.",
+          `This subject is still used by ${activeSlots} active ` +
+          `${activeSlots === 1 ? "class" : "classes"}. Archive or reassign ` +
+          "those classes first — active classes always keep their subject.",
         code: "SUBJECT_IN_USE",
       });
+    }
+
+    if (archivedSlots > 0) {
+      /*
+        Deleting the subject must not delete the archived classes that
+        still reference it. That is only safe when the foreign key is
+        ON DELETE SET NULL; with the old ON DELETE CASCADE the row
+        removal would silently destroy archived class records.
+      */
+      const fk = await query(
+        `
+          SELECT c.confdeltype
+          FROM pg_constraint c
+          WHERE c.conrelid = 'class_slots'::regclass
+            AND c.confrelid = 'subjects'::regclass
+            AND c.contype = 'f'
+          LIMIT 1
+        `,
+      );
+
+      const preservesArchived = fk.rows[0]?.confdeltype === "n";
+
+      if (!preservesArchived) {
+        return res.status(409).json({
+          error:
+            `This subject is no longer used by any active class, but it is ` +
+            `still linked to ${archivedSlots} archived ` +
+            `${archivedSlots === 1 ? "class" : "classes"}. Before it can ` +
+            "be removed, run the database migration " +
+            "migrate-2026-10-20-subject-archive-safe.sql (npm run migrate) " +
+            "so archived classes keep their history instead of being " +
+            "deleted with the subject.",
+          code: "SUBJECT_MIGRATION_REQUIRED",
+        });
+      }
     }
 
     const r = await query(
@@ -537,21 +634,34 @@ router.delete(
   authRequired,
   requireRoles("admin"),
   asyncH(async (req, res) => {
+    /*
+      Same rule as subjects: only ACTIVE classes keep a book in use.
+      Removing a book that is only attached to archived classes removes
+      just the book's own links — the archived classes themselves, their
+      enrollments, attendance and every saved report stay untouched
+      (reports keep their own books snapshot).
+    */
     const usage = await query(
       `
-        SELECT EXISTS(
-          SELECT 1
-          FROM class_slot_books
-          WHERE book_id = $1
-        ) AS in_use
+        SELECT
+          COUNT(*) FILTER (WHERE cs.is_active = TRUE) AS active_links,
+          COUNT(*) FILTER (WHERE cs.is_active <> TRUE) AS archived_links
+        FROM class_slot_books csb
+        INNER JOIN class_slots cs
+          ON cs.id = csb.class_slot_id
+        WHERE csb.book_id = $1
       `,
       [req.params.id],
     );
 
-    if (usage.rows[0].in_use) {
+    const activeLinks = Number(usage.rows[0].active_links || 0);
+
+    if (activeLinks > 0) {
       return res.status(409).json({
         error:
-          "This book cannot be deleted because it is attached to a class. Create a new book instead of removing historical class information.",
+          `This book is still attached to ${activeLinks} active ` +
+          `${activeLinks === 1 ? "class" : "classes"}. Remove it from ` +
+          "those classes (or archive them) before deleting it.",
         code: "BOOK_IN_USE",
       });
     }

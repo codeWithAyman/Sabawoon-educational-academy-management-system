@@ -908,9 +908,9 @@ router.get(
     const result = await query(
       `
         SELECT
-          s.id AS student_id,
-          s.full_name,
-          s.roll_number,
+          COALESCE(s.id, m.student_id_snapshot) AS student_id,
+          COALESCE(m.student_name_snapshot, s.full_name) AS full_name,
+          COALESCE(m.student_roll_number_snapshot, s.roll_number) AS roll_number,
 
           m.id AS mark_id,
 
@@ -1206,17 +1206,17 @@ router.put(
           `
             INSERT INTO marks (
               student_id,
+              student_id_snapshot,
+              student_name_snapshot,
+              student_roll_number_snapshot,
               exam_id,
               marks_obtained,
               grade,
               remarks
             )
             VALUES (
-              $1,
-              $2,
-              $3,
-              $4,
-              $5
+              $1, $1, $6, $7,
+              $2, $3, $4, $5
             )
 
             ON CONFLICT (
@@ -1234,7 +1234,7 @@ router.put(
               remarks =
                 EXCLUDED.remarks
           `,
-          [studentId, examId, numericMarks, grade, remarks],
+          [studentId, examId, numericMarks, grade, remarks, item.full_name || null, item.roll_number || null],
         );
       }
     }
@@ -1260,10 +1260,18 @@ router.delete(
   authRequired,
   requireRoles("admin"),
   asyncH(async (req, res) => {
-    return res.status(405).json({
-      message:
-        "Assessments are permanent academic records and cannot be deleted. You can edit the assessment or its scores instead.",
-    });
+    const examId = normalizeId(req.params.id);
+    if (examId === null || examId <= 0) {
+      return res.status(400).json({ message: "Invalid assessment ID." });
+    }
+    const result = await query(
+      "DELETE FROM exams WHERE id = $1 RETURNING id",
+      [examId],
+    );
+    if (!result.rows.length) {
+      return res.status(404).json({ message: "Assessment not found." });
+    }
+    return res.json({ ok: true, deleted_id: Number(result.rows[0].id) });
   }),
 );
 

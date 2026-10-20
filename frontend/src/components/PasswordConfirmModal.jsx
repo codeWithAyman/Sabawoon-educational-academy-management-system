@@ -39,6 +39,26 @@ export default function PasswordConfirmModal({
     return () => clearTimeout(timer);
   }, [open]);
 
+  /*
+    Return the keyboard to the password field the moment a verification
+    attempt finishes. The catch block calls inputRef.current.focus()
+    directly, but at that instant the input is still `disabled` from the
+    loading state (React has not re-rendered yet) and Chromium silently
+    ignores focus() on disabled elements — so after every failed attempt
+    focus fell back to the page body and the user had to click the field
+    again. Focusing after the commit fixes that without changing the
+    clear-the-field behaviour of a failed attempt.
+  */
+  useEffect(() => {
+    if (!open || loading) return undefined;
+
+    const timer = setTimeout(() => {
+      inputRef.current?.focus();
+    }, 0);
+
+    return () => clearTimeout(timer);
+  }, [open, loading]);
+
   useEffect(() => {
     if (!open) return;
 
@@ -198,12 +218,27 @@ export default function PasswordConfirmModal({
 
         <form onSubmit={handleSubmit}>
           <div className="space-y-4 px-5 py-5">
-            {error && (
-              <div className="flex items-start gap-2 rounded-xl border border-red-400/20 bg-red-400/10 px-3 py-3 text-sm text-red-300">
-                <AlertCircle size={17} className="mt-0.5 shrink-0" />
-                <span>{error}</span>
-              </div>
-            )}
+            {/*
+              The error message lives inside a STABLE wrapper that is always
+              rendered. Before this, the error div was a conditional sibling
+              that preceded the input wrapper, so when it appeared or
+              disappeared React reconciled the children by index and REUSED
+              the first div node — destroying the input element and recreating
+              it on the next render. The user saw that as "the input stops
+              accepting clicks/typing": focus was lost mid-typing the moment
+              an error appeared or was cleared.
+            */}
+            <div>
+              {error && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 rounded-xl border border-red-400/20 bg-red-400/10 px-3 py-3 text-sm text-red-300"
+                >
+                  <AlertCircle size={17} className="mt-0.5 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
+            </div>
 
             <div>
               <label

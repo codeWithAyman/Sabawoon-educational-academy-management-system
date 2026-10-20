@@ -8,6 +8,24 @@ const { asyncH } = require("../utils/helpers");
 
 const router = express.Router();
 
+router.get('/setup-status', asyncH(async (req, res) => {
+  const result = await query('SELECT COUNT(*)::int AS count FROM users');
+  res.json({ setupRequired: Number(result.rows[0].count) === 0 });
+}));
+
+router.post('/setup', asyncH(async (req, res) => {
+  const { email, password, full_name } = req.body || {};
+  if (typeof email !== 'string' || !email.includes('@') || typeof password !== 'string' || password.length < 8 || typeof full_name !== 'string' || full_name.trim().length < 2) {
+    return res.status(400).json({ error: 'Enter a valid name, email, and password of at least 8 characters.' });
+  }
+  const existing = await query('SELECT COUNT(*)::int AS count FROM users');
+  if (Number(existing.rows[0].count) !== 0) return res.status(409).json({ error: 'Administrator setup is already complete.' });
+  const hash = await bcrypt.hash(password, 12);
+  const result = await query(`INSERT INTO users (email, password_hash, role, full_name, is_active) VALUES ($1,$2,'admin',$3,TRUE) RETURNING id,email,role,full_name,phone`, [email.trim().toLowerCase(), hash, full_name.trim()]);
+  const user = result.rows[0];
+  res.status(201).json({ token: makeToken(user), user: { id: user.id, email: user.email, role: user.role, name: user.full_name, phone: user.phone } });
+}));
+
 function makeToken(user) {
   return jwt.sign(
     {

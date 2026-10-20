@@ -182,8 +182,10 @@ app.use("/api/timetable", require("./routes/timetable"));
 app.use("/api/dashboard", require("./routes/dashboard"));
 
 /*
-  UPDATES & BACKUP
-  Administrator-only database backup / restore and GitHub release checks.
+  DATABASE BACKUP
+  Administrator-only database backup / restore with optional GitHub
+  upload. The update-checking workflow has been removed — this is a
+  backup-only feature now.
 */
 app.use("/api/backup", require("./routes/backup"));
 
@@ -224,7 +226,7 @@ const server = app.listen(PORT, "0.0.0.0", () => {
     Print the addresses this system can be opened from.
     Phones and tablets on the same Wi-Fi use the LAN address.
   */
-
+
   const lanUrls = [];
 
   for (const interfaces of Object.values(os.networkInterfaces())) {
@@ -263,6 +265,25 @@ const server = app.listen(PORT, "0.0.0.0", () => {
       );
     }
   });
+
+  /*
+    AUTOMATIC DAILY BACKUPS
+
+    The in-process scheduler runs the daily database backup whenever this
+    backend is running, and catches up missed days (computer switched off
+    at the scheduled time) on the next start. When the application is
+    fully closed, the desktop app's Windows scheduled task runs the same
+    backup directly (see electron/main.cjs and
+    backend/src/services/run-scheduled-backup.cjs).
+  */
+  try {
+    const backupService = require("./services/backup-service");
+
+    backupService.migrateLegacyBackupDir();
+    backupService.startBackupScheduler();
+  } catch (error) {
+    console.error(`[backup] Could not start the backup scheduler: ${error.message}`);
+  }
 });
 
 server.on("error", (error) => {

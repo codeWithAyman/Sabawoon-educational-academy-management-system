@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../components/Toast";
@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import logo from "../assets/sabawoon-logo.png";
+import api from "../lib/api";
 
 export default function Login() {
   const { login } = useAuth();
@@ -22,14 +23,24 @@ export default function Login() {
   const [email, setEmail] = useState("Sabawoon.edu.academy1@gmail.com");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [setupRequired, setSetupRequired] = useState(false);
+  const [fullName, setFullName] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+
+  useEffect(() => { api.get('/auth/setup-status').then(({ data }) => setSetupRequired(Boolean(data.setupRequired))).catch(() => {}); }, []);
 
   async function submit(e) {
     e.preventDefault();
     setLoading(true);
 
     try {
-      // Authenticate normally
-      await login(email, password);
+      if (setupRequired) {
+        if (password !== confirmPassword) throw new Error('Passwords do not match.');
+        const { data } = await api.post('/auth/setup', { email, password, full_name: fullName });
+        await login(data.user.email, password);
+      } else {
+        await login(email, password);
+      }
 
       // Small success notification
       toast.success("Welcome back!");
@@ -126,11 +137,11 @@ export default function Login() {
                 <div className="flex items-center justify-between">
                   <div>
                     <h1 className="text-[25px] leading-tight font-semibold tracking-[-0.02em] text-white">
-                      Welcome back
+                      {setupRequired ? "Set up administrator" : "Welcome back"}
                     </h1>
 
                     <p className="text-[12px] text-slate-400 mt-2">
-                      Sign in to continue to your administration workspace.
+                      {setupRequired ? "Create the first administrator account for this computer." : "Sign in to continue to your administration workspace."}
                     </p>
                   </div>
 
@@ -139,6 +150,8 @@ export default function Login() {
                   </div>
                 </div>
               </div>
+
+              {setupRequired && <div className="mb-5"><label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-400 mb-2">Full name</label><input value={fullName} onChange={(e) => setFullName(e.target.value)} required className="w-full h-[47px] px-3 rounded-lg bg-[#0d1013] border border-white/[0.09] text-[13px] text-slate-100 outline-none" /></div>}
 
               {/* =====================================================
                   EMAIL
@@ -149,7 +162,7 @@ export default function Login() {
                   htmlFor="login-email"
                   className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-400 mb-2"
                 >
-                  Email address
+                  {setupRequired ? "Administrator email" : "Email address"}
                 </label>
 
                 <div className="relative group">
@@ -168,6 +181,8 @@ export default function Login() {
                   />
                 </div>
               </div>
+
+              {setupRequired && <div className="mb-7"><label className="block text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-400 mb-2">Confirm password</label><input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} required className="w-full h-[47px] px-3 rounded-lg bg-[#0d1013] border border-white/[0.09] text-[13px] text-slate-100 outline-none" /></div>}
 
               {/* =====================================================
                   PASSWORD
@@ -215,7 +230,7 @@ export default function Login() {
                   </>
                 ) : (
                   <>
-                    Sign in
+                    {setupRequired ? "Create administrator" : "Sign in"}
                     <ArrowRight className="w-[16px] h-[16px] transition-transform group-hover:translate-x-0.5" />
                   </>
                 )}
